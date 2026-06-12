@@ -1,0 +1,15 @@
+# Vendored dev toolkit (large, fetched separately)
+/w64devkit/
+
+# Build output
+/build/
+
+# Debug/QEMU logs and memory dumps
+*.log
+/log.txt
+*.bin
+
+# Backups and scratch folders
+*.bak
+/Unknown/
+/Ненужное/
