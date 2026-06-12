@@ -42,6 +42,10 @@ start:
     cmp al, 18
     jne disk_error
 
+    ; --- Загружаем FAT12-раздел (128 секторов = 64 КБ, начиная с цил.1/головы0/сектора1)
+    ; в RAM по адресу 0x20000. Там лежат конфиги/скрипты, которые читает kernel (fat12.c). ---
+    call load_fat12
+
     jmp disk_done
 
 disk_error:
@@ -55,6 +59,41 @@ disk_done:
     ; 3. Переход в 32-битный Защищенный Режим
     call switch_to_pm
     jmp $
+
+; --- Загрузка FAT12-раздела с диска в RAM (0x2000:0x0000 = физ. адрес 0x20000) ---
+; Раздел занимает 128 секторов (7 полных треков по 18 секторов + 2 сектора),
+; читаем его трек за треком по таблице (цилиндр, головка, кол-во секторов).
+load_fat12:
+    mov ax, 0x2000
+    mov es, ax
+    xor bx, bx
+    mov si, fat12_table
+.fat12_loop:
+    mov ch, [si]        ; цилиндр
+    mov dh, [si+1]      ; головка
+    mov al, [si+2]      ; количество секторов
+    mov cl, 1           ; стартовый сектор (всегда начало трека)
+    mov ah, 0x02
+    mov [fat12_tmp], al
+    int 0x13
+    jc disk_error
+
+    mov al, [fat12_tmp]
+    xor ah, ah
+    shl ax, 9           ; ax = количество секторов * 512
+    add bx, ax
+
+    add si, 3
+    dec byte [fat12_count]
+    jnz .fat12_loop
+
+    xor ax, ax
+    mov es, ax          ; восстанавливаем ES = 0
+    ret
+
+fat12_table: db 1,0,18, 1,1,18, 2,0,18, 2,1,18, 3,0,18, 3,1,18, 4,0,18, 4,1,2
+fat12_count: db 8
+fat12_tmp:   db 0
 
 ; --- Подключаем файлы конфигурации ---
 %include "src/kernel/gdt.asm"

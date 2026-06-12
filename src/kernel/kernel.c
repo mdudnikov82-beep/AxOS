@@ -1,4 +1,5 @@
 #include "keyboard.h" // Подключаем твои порты ввода-вывода и карту скан-кодов
+#include "../fs/fat12.h" // Read-only драйвер FAT12 для RAM-диска (конфиги/скрипты)
 
 #define SCREEN_WIDTH 80
 #define VIDEO_MEMORY 0xB8000
@@ -249,6 +250,8 @@ void execute_command(char* cmd) {
         print_string("  sleep <sec> - pause for N seconds (0-9)\n");
         print_string("  reboot      - restart the OS\n");
         print_string("  echo <text> - print text\n");
+        print_string("  ls          - list files on FAT12 RAM-disk\n");
+        print_string("  cat <file>  - show file contents\n");
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
     } else if (str_eq(cmd, "about")) {
@@ -276,6 +279,12 @@ void execute_command(char* cmd) {
     } else if (str_starts_with(cmd, "echo ")) {
         print_string(cmd + 5);
         print_string("\n");
+    } else if (str_eq(cmd, "ls")) {
+        fat12_list();
+    } else if (str_starts_with(cmd, "cat ")) {
+        if (!fat12_cat(cmd + 4)) {
+            print_string("File not found.\n");
+        }
     } else {
         print_string("Unknown command: ");
         print_string(cmd);

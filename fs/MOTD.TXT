@@ -1,0 +1,3 @@
+Welcome to AxOS!
+This text is loaded dynamically from a FAT12 RAM-disk.
+Edit files in fs/ and rebuild to change this message.
