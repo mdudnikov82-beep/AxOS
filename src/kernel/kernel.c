@@ -1,6 +1,7 @@
 #include "keyboard.h" // Подключаем твои порты ввода-вывода и карту скан-кодов
 #include "../fs/fat12.h" // Read-only драйвер FAT12 для RAM-диска (конфиги/скрипты)
 #include "paging.h" // Защита памяти: paging + read-only код ядра
+#include "tss.h" // TSS: переключение стека ring3 -> ring0
 
 #define SCREEN_WIDTH 80
 #define VIDEO_MEMORY 0xB8000
@@ -14,6 +15,7 @@ void init_idt();
 extern void keyboard_interrupt_handler();
 extern void timer_interrupt_handler();
 extern void syscall_handler();
+extern void enter_usermode(void (*entry)(void)); // usermode.asm — переход в ring3
 int command_len = 0;
 char command_buffer[64];
 
@@ -53,6 +55,7 @@ void init_idt() {
     set_idt_gate(32, (unsigned long)timer_interrupt_handler);
     set_idt_gate(33, (unsigned long)keyboard_interrupt_handler);
     set_idt_gate(0x80, (unsigned long)syscall_handler); // int 0x80 — системные вызовы AxOS
+    IDT[0x80].type_attr = 0xEE; // DPL=3 — int 0x80 разрешён из ring3
     struct { unsigned short limit; unsigned long base; } __attribute__((packed)) idtr = { 256 * 8 - 1, (unsigned long)IDT };
     __asm__("lidt %0" : : "m"(idtr));
 
@@ -238,6 +241,27 @@ void syscall_dispatch(unsigned char func, char* arg) {
     }
 }
 
+// --- Демо-программа ring3 ---
+// Выполняется с CPL=3: не имеет доступа к привилегированным
+// инструкциям (cli/hlt/lgdt/...), но может вызывать ядро через
+// int 0x80 (IDT[0x80] открыт для DPL=3 в init_idt).
+void usermode_demo() {
+    char* msg = "Hello from ring3 (user mode)! Syscall int 0x80 works.\n";
+
+    __asm__ volatile(
+        "mov $0x01, %%ah\n" // 0x01 — sys_print_string
+        "mov %0, %%esi\n"
+        "int $0x80\n"
+        :: "r"(msg) : "eax", "esi"
+    );
+
+    while (1) {
+        // ring3-код не может выполнить hlt (привилегированная инструкция),
+        // поэтому просто крутимся — таймер/клавиатура продолжают работать
+        // через прерывания.
+    }
+}
+
 // Разбирает и выполняет введённую команду
 void execute_command(char* cmd) {
     if (str_eq(cmd, "")) {
@@ -254,6 +278,7 @@ void execute_command(char* cmd) {
         print_string("  echo <text> - print text\n");
         print_string("  ls          - list files on FAT12 RAM-disk\n");
         print_string("  cat <file>  - show file contents\n");
+        print_string("  usermode    - demo: jump to ring3, call syscall via int 0x80\n");
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
     } else if (str_eq(cmd, "about")) {
@@ -287,6 +312,9 @@ void execute_command(char* cmd) {
         if (!fat12_cat(cmd + 4)) {
             print_string("File not found.\n");
         }
+    } else if (str_eq(cmd, "usermode")) {
+        print_string("Switching to ring3...\n");
+        enter_usermode(usermode_demo);
     } else {
         print_string("Unknown command: ");
         print_string(cmd);
@@ -339,6 +367,7 @@ void kernel_main() {
     clear_screen();
     init_idt();
     init_paging();
+    init_tss();
     print_string("AxOS v0.5 [Interrupt Mode]\nAxOS> ");
 
     // БЕСКОНЕЧНЫЙ ЦИКЛ ОБЯЗАТЕЛЕН
