@@ -15,6 +15,13 @@ void print_string(char* str) {
     unsigned char* vidmem = (unsigned char*) 0xB8000;
     int i = 0;
     while (str[i] != '\0') {
+        if (str[i] == '\n') {
+            cursor_x = 0;
+            cursor_y++;
+            i++;
+            continue;
+        }
+
         int offset = (cursor_y * 80 + cursor_x) * 2;
 
         // Защита от выхода за пределы экрана
