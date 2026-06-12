@@ -11,6 +11,23 @@ void clear_screen() {
     cursor_y = 0;
 }
 
+// Стирает символ перед курсором (используется клавишей Backspace)
+void backspace() {
+    if (cursor_x == 0 && cursor_y == 0) return;
+
+    if (cursor_x == 0) {
+        cursor_x = 79;
+        cursor_y--;
+    } else {
+        cursor_x--;
+    }
+
+    unsigned char* vidmem = (unsigned char*) 0xB8000;
+    int offset = (cursor_y * 80 + cursor_x) * 2;
+    vidmem[offset] = ' ';
+    vidmem[offset + 1] = 0x0F;
+}
+
 void print_string(char* str) {
     unsigned char* vidmem = (unsigned char*) 0xB8000;
     int i = 0;
