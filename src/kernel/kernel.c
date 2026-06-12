@@ -2,6 +2,7 @@
 #include "../fs/fat12.h" // Read-only драйвер FAT12 для RAM-диска (конфиги/скрипты)
 #include "paging.h" // Защита памяти: paging + read-only код ядра
 #include "tss.h" // TSS: переключение стека ring3 -> ring0
+#include "heap.h" // kmalloc/kfree - простой кучевой аллокатор
 
 #define SCREEN_WIDTH 80
 #define VIDEO_MEMORY 0xB8000
@@ -193,6 +194,18 @@ void print_uint(unsigned long val) {
     print_string(&buf[i]);
 }
 
+// Печатает беззнаковое число в виде 8-значного hex (с ведущими нулями)
+static void print_hex(unsigned int val) {
+    char hex_digits[] = "0123456789ABCDEF";
+    char buf[9];
+    buf[8] = '\0';
+    for (int i = 7; i >= 0; i--) {
+        buf[i] = hex_digits[val & 0xF];
+        val >>= 4;
+    }
+    print_string(buf);
+}
+
 // Перезагружает машину через контроллер клавиатуры 8042 (impulse на линию reset)
 void reboot() {
     unsigned char temp;
@@ -262,6 +275,93 @@ void usermode_demo() {
     }
 }
 
+// --- Демо/тест кучи (malloc/free) ---
+// Выделяет несколько блоков разного размера, записывает и проверяет
+// данные, освобождает часть блоков, выделяет снова — проверяя
+// повторное использование и слияние (coalescing). Печатает PASS/FAIL
+// и диагностику (адреса, размеры).
+void memtest_demo() {
+    int ok = 1;
+
+    print_string("Heap test:\n");
+
+    char* a = (char*)malloc(64);
+    char* b = (char*)malloc(128);
+    char* c = (char*)malloc(32);
+
+    print_string("  malloc(64)  -> 0x");
+    print_hex((unsigned int)a);
+    print_string("\n  malloc(128) -> 0x");
+    print_hex((unsigned int)b);
+    print_string("\n  malloc(32)  -> 0x");
+    print_hex((unsigned int)c);
+    print_string("\n");
+
+    if (!a || !b || !c) {
+        print_string("  FAIL: malloc returned NULL\n");
+        return;
+    }
+
+    for (int i = 0; i < 64; i++)  a[i] = (char)i;
+    for (int i = 0; i < 128; i++) b[i] = (char)(i ^ 0x55);
+    for (int i = 0; i < 32; i++)  c[i] = (char)(255 - i);
+
+    for (int i = 0; i < 64; i++)  if (a[i] != (char)i) ok = 0;
+    for (int i = 0; i < 128; i++) if (b[i] != (char)(i ^ 0x55)) ok = 0;
+    for (int i = 0; i < 32; i++)  if (c[i] != (char)(255 - i)) ok = 0;
+
+    if (!ok) {
+        print_string("  FAIL: data verification failed\n");
+        return;
+    }
+    print_string("  Data write/read-back OK\n");
+
+    free(b);
+    print_string("  Freed block b (128 bytes)\n");
+
+    char* d = (char*)malloc(100);
+    print_string("  malloc(100) -> 0x");
+    print_hex((unsigned int)d);
+    print_string("\n");
+
+    if (!d) {
+        print_string("  FAIL: malloc(100) after free returned NULL\n");
+        return;
+    }
+
+    if ((unsigned int)d != (unsigned int)b) {
+        print_string("  WARNING: malloc(100) did not reuse freed block b's address\n");
+    } else {
+        print_string("  Reused freed block's address - OK\n");
+    }
+
+    free(a);
+    free(c);
+    free(d);
+
+    char* big = (char*)malloc(300);
+    print_string("  malloc(300) after freeing all -> 0x");
+    print_hex((unsigned int)big);
+    print_string("\n");
+
+    if (!big) {
+        print_string("  FAIL: malloc(300) after freeing all returned NULL (coalescing broken?)\n");
+        return;
+    }
+
+    for (int i = 0; i < 300; i++) big[i] = (char)(i & 0xFF);
+    for (int i = 0; i < 300; i++) if (big[i] != (char)(i & 0xFF)) ok = 0;
+
+    if (!ok) {
+        print_string("  FAIL: data verification failed on coalesced block\n");
+        return;
+    }
+
+    free(big);
+
+    print_string("PASS: heap allocator OK\n");
+}
+
 // Разбирает и выполняет введённую команду
 void execute_command(char* cmd) {
     if (str_eq(cmd, "")) {
@@ -279,6 +379,7 @@ void execute_command(char* cmd) {
         print_string("  ls          - list files on FAT12 RAM-disk\n");
         print_string("  cat <file>  - show file contents\n");
         print_string("  usermode    - demo: jump to ring3, call syscall via int 0x80\n");
+        print_string("  memtest     - test heap allocator (malloc/free)\n");
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
     } else if (str_eq(cmd, "about")) {
@@ -315,6 +416,8 @@ void execute_command(char* cmd) {
     } else if (str_eq(cmd, "usermode")) {
         print_string("Switching to ring3...\n");
         enter_usermode(usermode_demo);
+    } else if (str_eq(cmd, "memtest")) {
+        memtest_demo();
     } else {
         print_string("Unknown command: ");
         print_string(cmd);
@@ -368,6 +471,7 @@ void kernel_main() {
     init_idt();
     init_paging();
     init_tss();
+    init_heap();
     print_string("AxOS v0.5 [Interrupt Mode]\nAxOS> ");
 
     // БЕСКОНЕЧНЫЙ ЦИКЛ ОБЯЗАТЕЛЕН
