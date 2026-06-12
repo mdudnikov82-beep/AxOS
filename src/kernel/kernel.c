@@ -132,6 +132,25 @@ void print_datetime() {
     print_string("\n");
 }
 
+// Перезагружает машину через контроллер клавиатуры 8042 (impulse на линию reset)
+void reboot() {
+    unsigned char temp;
+
+    __asm__("cli");
+
+    // Опустошаем буфер контроллера клавиатуры перед отправкой команды
+    do {
+        temp = port_byte_in(0x64);
+        if (temp & 1) port_byte_in(0x60);
+    } while (temp & 2);
+
+    port_byte_out(0x64, 0xFE); // команда сброса (pulse output line, импульс на CPU RESET)
+
+    while (1) {
+        __asm__("hlt");
+    }
+}
+
 // Разбирает и выполняет введённую команду
 void execute_command(char* cmd) {
     if (str_eq(cmd, "")) {
@@ -142,6 +161,7 @@ void execute_command(char* cmd) {
         print_string("  clear       - clear the screen\n");
         print_string("  about       - show OS info\n");
         print_string("  date        - show current date and time\n");
+        print_string("  reboot      - restart the OS\n");
         print_string("  echo <text> - print text\n");
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
@@ -149,6 +169,9 @@ void execute_command(char* cmd) {
         print_string("AxOS v0.5 - hobby OS in C and x86 Assembly\n");
     } else if (str_eq(cmd, "date") || str_eq(cmd, "time")) {
         print_datetime();
+    } else if (str_eq(cmd, "reboot")) {
+        print_string("Rebooting...\n");
+        reboot();
     } else if (str_starts_with(cmd, "echo ")) {
         print_string(cmd + 5);
         print_string("\n");
