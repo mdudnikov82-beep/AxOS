@@ -9,6 +9,12 @@ unsigned char port_byte_in(unsigned short port)
     return result;
 }
 
+// Запись байта в порт (нужна, например, для выбора регистра CMOS/RTC)
+void port_byte_out(unsigned short port, unsigned char data)
+{
+    __asm__ volatile("outb %%al, %%dx" : : "a"(data), "d"(port));
+}
+
 // Карта перевода аппаратных кодов клавиатуры в обычные английские буквы
 static char scancode_to_char[128] = {
     0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',

@@ -16,11 +16,11 @@ echo Compiling IDT...
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Kernel (C)...
-gcc -m32 -ffreestanding -I src/drivers -c src/kernel/kernel.c -o build/kernel.o
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/kernel.c -o build/kernel.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Screen (C)...
-gcc -m32 -ffreestanding -I src/drivers -c src/kernel/screen.c -o build/screen.o
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/screen.c -o build/screen.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Syscalls...

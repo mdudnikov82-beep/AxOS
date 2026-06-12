@@ -78,6 +78,60 @@ int str_starts_with(char* str, char* prefix) {
     return 1;
 }
 
+// Читает регистр CMOS/RTC (порт 0x70 — выбор регистра, 0x71 — чтение значения)
+unsigned char cmos_read(unsigned char reg) {
+    port_byte_out(0x70, reg);
+    return port_byte_in(0x71);
+}
+
+// Переводит число из BCD (используется CMOS по умолчанию) в обычное десятичное
+int bcd_to_bin(unsigned char val) {
+    return (val & 0x0F) + ((val >> 4) * 10);
+}
+
+// Печатает текущую дату и время, считанные из RTC, в формате YYYY-MM-DD HH:MM:SS
+void print_datetime() {
+    // Ждём, пока RTC закончит обновление своих регистров
+    while (cmos_read(0x0A) & 0x80);
+
+    int second = cmos_read(0x00);
+    int minute = cmos_read(0x02);
+    int hour   = cmos_read(0x04);
+    int day    = cmos_read(0x07);
+    int month  = cmos_read(0x08);
+    int year   = cmos_read(0x09);
+    unsigned char status_b = cmos_read(0x0B);
+
+    if (!(status_b & 0x04)) { // регистры в формате BCD — переводим в десятичное
+        second = bcd_to_bin(second);
+        minute = bcd_to_bin(minute);
+        hour   = bcd_to_bin(hour & 0x7F);
+        day    = bcd_to_bin(day);
+        month  = bcd_to_bin(month);
+        year   = bcd_to_bin(year);
+    }
+
+    char buf[20] = "0000-00-00 00:00:00";
+    buf[0]  = '0' + (2000 + year) / 1000 % 10;
+    buf[1]  = '0' + (2000 + year) / 100 % 10;
+    buf[2]  = '0' + (2000 + year) / 10 % 10;
+    buf[3]  = '0' + (2000 + year) % 10;
+    buf[5]  = '0' + month / 10;
+    buf[6]  = '0' + month % 10;
+    buf[8]  = '0' + day / 10;
+    buf[9]  = '0' + day % 10;
+    buf[11] = '0' + hour / 10;
+    buf[12] = '0' + hour % 10;
+    buf[14] = '0' + minute / 10;
+    buf[15] = '0' + minute % 10;
+    buf[17] = '0' + second / 10;
+    buf[18] = '0' + second % 10;
+    buf[19] = '\0';
+
+    print_string(buf);
+    print_string("\n");
+}
+
 // Разбирает и выполняет введённую команду
 void execute_command(char* cmd) {
     if (str_eq(cmd, "")) {
@@ -87,11 +141,14 @@ void execute_command(char* cmd) {
         print_string("  help        - show this help\n");
         print_string("  clear       - clear the screen\n");
         print_string("  about       - show OS info\n");
+        print_string("  date        - show current date and time\n");
         print_string("  echo <text> - print text\n");
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
     } else if (str_eq(cmd, "about")) {
         print_string("AxOS v0.5 - hobby OS in C and x86 Assembly\n");
+    } else if (str_eq(cmd, "date") || str_eq(cmd, "time")) {
+        print_datetime();
     } else if (str_starts_with(cmd, "echo ")) {
         print_string(cmd + 5);
         print_string("\n");
