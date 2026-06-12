@@ -1,5 +1,6 @@
 #include "keyboard.h" // Подключаем твои порты ввода-вывода и карту скан-кодов
 #include "../fs/fat12.h" // Read-only драйвер FAT12 для RAM-диска (конфиги/скрипты)
+#include "paging.h" // Защита памяти: paging + read-only код ядра
 
 #define SCREEN_WIDTH 80
 #define VIDEO_MEMORY 0xB8000
@@ -48,6 +49,7 @@ void init_pit() {
 }
 
 void init_idt() {
+    set_idt_gate(14, (unsigned long)page_fault_handler); // #PF — для отладки paging
     set_idt_gate(32, (unsigned long)timer_interrupt_handler);
     set_idt_gate(33, (unsigned long)keyboard_interrupt_handler);
     set_idt_gate(0x80, (unsigned long)syscall_handler); // int 0x80 — системные вызовы AxOS
@@ -336,6 +338,7 @@ void kernel_main() {
     
     clear_screen();
     init_idt();
+    init_paging();
     print_string("AxOS v0.5 [Interrupt Mode]\nAxOS> ");
 
     // БЕСКОНЕЧНЫЙ ЦИКЛ ОБЯЗАТЕЛЕН

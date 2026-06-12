@@ -27,13 +27,17 @@ echo Compiling FAT12 driver (C)...
 gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/fs/fat12.c -o build/fat12.o
 if %errorlevel% neq 0 goto :error
 
+echo Compiling Paging (C)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/paging.c -o build/paging.o
+if %errorlevel% neq 0 goto :error
+
 echo Compiling Syscalls...
 .\tools\nasm.exe -f elf32 src\kernel\syscalls.asm -o build\syscalls.o
 if %errorlevel% neq 0 goto :error
 
 echo Linking to PE...
 :: Линкуем в формат, который он понимает (i386pe)
-ld -T kernel.ld -m i386pe build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\syscalls.o -o build\kernel.exe
+ld -T kernel.ld -m i386pe build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\syscalls.o -o build\kernel.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping to Binary...

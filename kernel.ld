@@ -6,7 +6,8 @@ SECTIONS
 {
     . = 0x1000;
     .text : { *(.text) }
- 
+    __text_end = .; /* GCC добавляет подчёркивание: extern char _text_end[] в Си */
+
     .data : { *(.data) }
     .bss : { *(.bss) }
 }
