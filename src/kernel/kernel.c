@@ -3,6 +3,7 @@
 #include "paging.h" // Защита памяти: paging + read-only код ядра
 #include "tss.h" // TSS: переключение стека ring3 -> ring0
 #include "heap.h" // kmalloc/kfree - простой кучевой аллокатор
+#include "tasking.h" // простой preemptive round-robin планировщик
 
 #define SCREEN_WIDTH 80
 #define VIDEO_MEMORY 0xB8000
@@ -362,6 +363,26 @@ void memtest_demo() {
     print_string("PASS: heap allocator OK\n");
 }
 
+// --- Фоновая задача-демо для планировщика (tasking.c) ---
+// Анимирует спиннер в правом верхнем углу экрана. Пишет напрямую в
+// видеопамять (не через print_string/cursor_x/y), чтобы не конфликтовать
+// с выводом shell — наглядное доказательство, что задача выполняется
+// параллельно (по тикам таймера) независимо от основного потока.
+void heartbeat_task() {
+    char spinner[] = "|/-\\";
+    unsigned int frame = 0;
+
+    while (1) {
+        unsigned char* vidmem = (unsigned char*)0xB8000;
+        int offset = (0 * 80 + 79) * 2; // строка 0, столбец 79
+        vidmem[offset] = spinner[frame % 4];
+        vidmem[offset + 1] = 0x0A; // ярко-зелёный на чёрном
+
+        frame++;
+        for (volatile unsigned int i = 0; i < 200000; i++);
+    }
+}
+
 // Разбирает и выполняет введённую команду
 void execute_command(char* cmd) {
     if (str_eq(cmd, "")) {
@@ -380,6 +401,7 @@ void execute_command(char* cmd) {
         print_string("  cat <file>  - show file contents\n");
         print_string("  usermode    - demo: jump to ring3, call syscall via int 0x80\n");
         print_string("  memtest     - test heap allocator (malloc/free)\n");
+        print_string("  ps          - list running tasks\n");
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
     } else if (str_eq(cmd, "about")) {
@@ -418,6 +440,8 @@ void execute_command(char* cmd) {
         enter_usermode(usermode_demo);
     } else if (str_eq(cmd, "memtest")) {
         memtest_demo();
+    } else if (str_eq(cmd, "ps")) {
+        print_task_list();
     } else {
         print_string("Unknown command: ");
         print_string(cmd);
@@ -472,6 +496,8 @@ void kernel_main() {
     init_paging();
     init_tss();
     init_heap();
+    init_tasking();
+    task_create("heartbeat", heartbeat_task);
     print_string("AxOS v0.5 [Interrupt Mode]\nAxOS> ");
 
     // БЕСКОНЕЧНЫЙ ЦИКЛ ОБЯЗАТЕЛЕН

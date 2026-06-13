@@ -2,6 +2,7 @@
 extern _keyboard_handler_main ; GCC на Windows добавляет подчёркивание к C-функциям
 extern _timer_handler_main
 extern _page_fault_handler_main
+extern _schedule ; tasking.c - переключение задач (round-robin)
 
 global _keyboard_interrupt_handler
 global keyboard_interrupt_handler
@@ -33,6 +34,17 @@ timer_interrupt_handler:
 
     mov al, 0x20    ; EOI
     out 0x20, al
+
+    ; Переключение задач: после pusha esp указывает на кадр текущей
+    ; задачи [pusha x8][EIP][CS][EFLAGS]. schedule(esp) сохраняет его
+    ; в текущей задаче, выбирает следующую по кольцу и возвращает её
+    ; esp (для task0 на первом тике, и до init_tasking(), schedule
+    ; возвращает тот же esp - переключения не происходит).
+    mov eax, esp
+    push eax
+    call _schedule
+    add esp, 4
+    mov esp, eax
 
     popa
     iret
