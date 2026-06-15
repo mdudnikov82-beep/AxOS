@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-smoke-test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # windows-latest ships MSYS2 at C:\msys64 but without the i686 mingw
+      # toolchain. build.bat expects plain gcc/ld/objcopy (normally provided
+      # by w64devkit, which isn't committed) - install the matching MSYS2
+      # packages and put them on PATH instead.
+      - name: Install i686 MinGW toolchain (gcc, ld, objcopy)
+        shell: cmd
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-i686-gcc mingw-w64-i686-binutils"
+
+      - name: Build AxOS (build.bat)
+        shell: cmd
+        run: |
+          set PATH=C:\msys64\mingw32\bin;%PATH%
+          (echo.) | build.bat
+
+      - name: Check kernel.bin fits in 35 boot sectors (<= 17920 bytes)
+        shell: pwsh
+        run: |
+          $size = (Get-Item build\kernel.bin).Length
+          Write-Host "kernel.bin size: $size bytes (limit 17920)"
+          if ($size -gt 17920) {
+            Write-Error "kernel.bin is too big for boot.asm to load (35 sectors = 17920 bytes)"
+            exit 1
+          }
+
+      - name: Install QEMU
+        run: choco install qemu --no-progress -y
+
+      - name: Smoke test in QEMU
+        run: python tools\smoke_test.py

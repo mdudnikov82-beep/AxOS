@@ -75,8 +75,9 @@ powershell -Command "$img = 'build\os-image.bin'; $fat = [System.IO.File]::ReadA
 
 echo Success!
 pause
-exit
+exit /b 0
 
 :error
 echo ERROR! Something went wrong.
 pause
+exit /b 1
