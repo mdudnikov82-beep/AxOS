@@ -61,6 +61,25 @@ echo Stripping to Binary...
 objcopy -O binary build\kernel.exe build\kernel.bin
 if %errorlevel% neq 0 goto :error
 
+echo Compiling user program (hello.c)...
+.\tools\nasm.exe -f elf32 src\user\start.asm -o build\user_start.o
+if %errorlevel% neq 0 goto :error
+
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -c src\user\hello.c -o build\hello.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\user_start.o build\hello.o -o build\hello.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\hello.exe build\hello.bin
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\hello.bin fs\HELLO.BIN
+if %errorlevel% neq 0 goto :error
+
 echo Building FAT12 RAM-disk image from fs/...
 python tools\make_fat12.py
 if %errorlevel% neq 0 goto :error

@@ -9,6 +9,14 @@
 #define VIDEO_MEMORY 0xB8000
 #define DEFAULT_COLOR 0x1F
 
+// Адрес загрузки пользовательских программ командой "run" (см. user.ld).
+// 1 МБ - внутри identity-mapped region (paging.c), далеко от ядра, кучи,
+// стеков и видеопамяти, уже PRESENT|USER|RW. Один фиксированный слот:
+// повторный "run" во время работы предыдущей программы перезапишет её код -
+// для учебной ОС без отдельных адресных пространств это ожидаемо.
+#define USER_PROGRAM_ADDR     0x100000
+#define USER_PROGRAM_MAX_SIZE 0x8000
+
 // Прототипы функций
 void clear_screen();
 void print_string(char* str);
@@ -420,6 +428,7 @@ void execute_command(char* cmd) {
         print_string("  echo <text> - print text\n");
         print_string("  ls          - list files on FAT12 RAM-disk\n");
         print_string("  cat <file>  - show file contents\n");
+        print_string("  run <file>  - load and run a program from FAT12 (ring3)\n");
         print_string("  usermode    - demo: jump to ring3, call syscall via int 0x80\n");
         print_string("  memtest     - test heap allocator (malloc/free)\n");
         print_string("  ps          - list running tasks\n");
@@ -455,6 +464,14 @@ void execute_command(char* cmd) {
     } else if (str_starts_with(cmd, "cat ")) {
         if (!fat12_cat(cmd + 4)) {
             print_string("File not found.\n");
+        }
+    } else if (str_starts_with(cmd, "run ")) {
+        unsigned int size = fat12_load(cmd + 4, (unsigned char*)USER_PROGRAM_ADDR, USER_PROGRAM_MAX_SIZE);
+        if (size == 0) {
+            print_string("File not found.\n");
+        } else {
+            task_create_user(cmd + 4, (void (*)(void))USER_PROGRAM_ADDR);
+            print_string("Started.\n");
         }
     } else if (str_eq(cmd, "usermode")) {
         // enter_usermode() - билет в один конец (iretd без возврата), так

@@ -179,3 +179,13 @@ int fat12_cat(char* filename) {
     print_string((char*)buf);
     return 1;
 }
+
+unsigned int fat12_load(char* filename, unsigned char* buffer, unsigned int max_size) {
+    char name[8], ext[3];
+    parse_83(filename, name, ext);
+
+    struct fat12_dir_entry* entry = fat12_find(name, ext);
+    if (!entry) return 0;
+
+    return fat12_read_file(entry, buffer, max_size);
+}
