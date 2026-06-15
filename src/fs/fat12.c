@@ -65,6 +65,10 @@ int fat12_is_locked() {
     return fat12_locked;
 }
 
+int fat12_is_ready() {
+    return fat12_ready;
+}
+
 // Загружает FAT12-том (LBA 0-127 на build/disk.img) через IDE в RAM по
 // FAT12_BASE. Возвращает 1, если все 128 секторов прочитаны и BPB похож на
 // валидный FAT12-том (bytes_per_sector == размеру сектора IDE), иначе 0.

@@ -32,4 +32,7 @@ void fat12_set_locked(int locked);
 // Возвращает 1, если диск заблокирован от записи, иначе 0.
 int fat12_is_locked();
 
+// Возвращает 1, если fat12_init() успешно загрузил том, иначе 0.
+int fat12_is_ready();
+
 #endif

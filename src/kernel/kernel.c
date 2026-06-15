@@ -6,6 +6,7 @@
 #include "tss.h" // TSS: переключение стека ring3 -> ring0
 #include "heap.h" // kmalloc/kfree - простой кучевой аллокатор
 #include "tasking.h" // простой preemptive round-robin планировщик
+#include "selftest.h" // команда "selftest" - регрессионные тесты heap/paging/FAT12
 
 #define SCREEN_WIDTH 80
 #define VIDEO_MEMORY 0xB8000
@@ -357,7 +358,7 @@ void usermode_demo() {
 // данные, освобождает часть блоков, выделяет снова — проверяя
 // повторное использование и слияние (coalescing). Печатает PASS/FAIL
 // и диагностику (адреса, размеры).
-void memtest_demo() {
+int memtest_demo() {
     int ok = 1;
 
     print_string("Heap test:\n");
@@ -376,7 +377,7 @@ void memtest_demo() {
 
     if (!a || !b || !c) {
         print_string("  FAIL: malloc returned NULL\n");
-        return;
+        return 0;
     }
 
     for (int i = 0; i < 64; i++)  a[i] = (char)i;
@@ -389,7 +390,7 @@ void memtest_demo() {
 
     if (!ok) {
         print_string("  FAIL: data verification failed\n");
-        return;
+        return 0;
     }
     print_string("  Data write/read-back OK\n");
 
@@ -403,7 +404,7 @@ void memtest_demo() {
 
     if (!d) {
         print_string("  FAIL: malloc(100) after free returned NULL\n");
-        return;
+        return 0;
     }
 
     if ((unsigned int)d != (unsigned int)b) {
@@ -423,7 +424,7 @@ void memtest_demo() {
 
     if (!big) {
         print_string("  FAIL: malloc(300) after freeing all returned NULL (coalescing broken?)\n");
-        return;
+        return 0;
     }
 
     for (int i = 0; i < 300; i++) big[i] = (char)(i & 0xFF);
@@ -431,12 +432,13 @@ void memtest_demo() {
 
     if (!ok) {
         print_string("  FAIL: data verification failed on coalesced block\n");
-        return;
+        return 0;
     }
 
     free(big);
 
     print_string("PASS: heap allocator OK\n");
+    return 1;
 }
 
 // --- Фоновая задача-демо для планировщика (tasking.c) ---
@@ -505,6 +507,7 @@ void execute_command(char* cmd) {
         print_string("  diskwrite <lba> <text> - write text to a sector on the IDE disk\n");
         print_string("  usermode    - demo: jump to ring3, call syscall via int 0x80\n");
         print_string("  memtest     - test heap allocator (malloc/free)\n");
+        print_string("  selftest    - run heap/paging/FAT12 regression tests\n");
         print_string("  ps          - list running tasks\n");
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
@@ -634,6 +637,8 @@ void execute_command(char* cmd) {
         enter_usermode(usermode_demo);
     } else if (str_eq(cmd, "memtest")) {
         memtest_demo();
+    } else if (str_eq(cmd, "selftest")) {
+        run_self_tests();
     } else if (str_eq(cmd, "ps")) {
         print_task_list();
     } else {

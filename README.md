@@ -314,6 +314,7 @@ LBA28-адресация. Без DMA и прерываний: чтение и з
 | `run <file>`    | загрузить и запустить программу с FAT12 (ring3)            |
 | `usermode`      | демо: переход в ring3 и вызов `int 0x80` из user mode      |
 | `memtest`       | тест кучи (`malloc`/`free`): выделение, переиспользование, слияние блоков |
+| `selftest`      | регрессионные тесты heap/paging/FAT12, печатает `SELFTEST: ALL PASS`/`FAILED` |
 | `ps`            | список задач планировщика (id, имя, число тиков)           |
 | `diskinfo`      | модель диска IDE (`build/disk.img`), команда `IDENTIFY DEVICE` |
 | `diskread <lba>`| hexdump сектора с диска IDE (первые 128 из 512 байт)       |
@@ -348,6 +349,8 @@ LBA28-адресация. Без DMA и прерываний: чтение и з
 - `src/kernel/heap.c`/`heap.h` — `malloc`/`free`.
 - `src/kernel/tasking.c`/`tasking.h` — preemptive round-robin планировщик
   (`task_create`, `task_create_user`, `schedule`).
+- `src/kernel/selftest.c`/`selftest.h` — регрессионные тесты heap/paging/FAT12
+  (команда `selftest`, `run_self_tests`).
 - `src/fs/fat12.c`/`fat12.h` — драйвер FAT12-тома на `build/disk.img`
   (`fat12_init`/`fat12_flush` через IDE, чтение и запись).
 - `src/drivers/ide.c`/`ide.h` — PIO-драйвер ATA/IDE (primary master, LBA28),
@@ -365,6 +368,9 @@ LBA28-адресация. Без DMA и прерываний: чтение и з
   не хранится в git (`*.bin` в `.gitignore`).
 - `tools/make_fat12.py`, `tools/nasm.exe` — генератор FAT12-образа и
   ассемблер.
+- `tools/smoke_test.py`, `tools/regression_test.py` — headless-тесты в QEMU
+  через monitor (`smoke_test.py` — загрузка до шелла, `regression_test.py` —
+  команда `selftest`); используются в CI.
 - `build.bat` — основной скрипт сборки, `run.bat` — запуск в QEMU.
 
 ### Легаси / не используется текущей сборкой
@@ -452,10 +458,17 @@ QEMU запускает образ как floppy (`-drive format=raw,file=build\
     `fat12_write()` после успеха зовёт `fat12_flush()` — файлы переживают
     перезапуск QEMU; при отсутствии/невалидности диска `fat12_ready=0` и
     команды файловой системы становятся no-op.
+  - ✅ регрессионные тесты heap/paging/FAT12 (команда `selftest`,
+    `src/kernel/selftest.c`/`selftest.h`): переиспользует `memtest_demo`
+    для кучи, проверяет биты `CR0`/записи таблицы страниц после
+    `init_paging()`, читает/пишет FAT12-файл (один и несколько кластеров) и
+    проверяет блокировку записи; печатает `SELFTEST: ALL PASS` или
+    `SELFTEST: FAILED`. `tools/regression_test.py` гоняет `selftest` в QEMU
+    и проверяет итоговую строку — отдельный шаг CI "Regression tests in
+    QEMU".
 
 - **Долгосрочно:**
-  - VFS-слой над несколькими файловыми системами;
-  - покрытие критичных частей (heap, paging, fat12) регрессионными тестами.
+  - VFS-слой над несколькими файловыми системами.
 
 ## Контрибьюции
 

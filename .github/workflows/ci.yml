@@ -41,3 +41,6 @@ jobs:
 
       - name: Smoke test in QEMU
         run: python tools\smoke_test.py
+
+      - name: Regression tests in QEMU
+        run: python tools\regression_test.py
