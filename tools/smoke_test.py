@@ -95,8 +95,8 @@ def main():
     print("------------------")
 
     ok = True
-    if "AxOS v0.5" not in screen:
-        print("FAIL: boot banner 'AxOS v0.5' not found")
+    if "AxOS v0.6" not in screen:
+        print("FAIL: boot banner 'AxOS v0.6' not found")
         ok = False
     if "AxOS>" not in screen:
         print("FAIL: shell prompt 'AxOS>' not found")

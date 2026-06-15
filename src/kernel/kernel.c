@@ -526,7 +526,7 @@ void execute_command(char* cmd) {
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
     } else if (str_eq(cmd, "about")) {
-        print_string("AxOS v0.5 - hobby OS in C and x86 Assembly\n");
+        print_string("AxOS v0.6 - hobby OS in C and x86 Assembly\n");
         print_string("FAT12 disk: ");
         print_string(vfs_is_locked() ? "locked (read-only)\n" : "unlocked (read-write)\n");
     } else if (str_eq(cmd, "date") || str_eq(cmd, "time")) {
@@ -730,7 +730,7 @@ void kernel_main() {
         print_string("Warning: FAT12 disk (build/disk.img) not found - file commands disabled.\n");
     }
 
-    print_string("AxOS v0.5 [Interrupt Mode]\nAxOS> ");
+    print_string("AxOS v0.6 [Interrupt Mode]\nAxOS> ");
 
     // БЕСКОНЕЧНЫЙ ЦИКЛ ОБЯЗАТЕЛЕН
     while(1) {
