@@ -310,11 +310,11 @@ QEMU запускает образ как floppy (`-drive format=raw,file=build\
   - ✅ куча (`malloc`/`free`);
   - ✅ preemptive round-robin планировщик: задачи ring0 и ring3, per-task
     `TSS.ESP0`, команда `ps`.
+  - ✅ CI (GitHub Actions): сборка `build.bat` + headless smoke-test в QEMU.
 
 - **Среднесрочно:**
   - запись в FAT12-раздел (создание/изменение файлов с `cat`/новой командой);
-  - больше системных вызовов (чтение клавиатуры, работа с файлами из ring3);
-  - настроить CI (GitHub Actions) со сборкой `build.bat` и smoke-test в QEMU.
+  - больше системных вызовов (чтение клавиатуры, работа с файлами из ring3).
 
 - **Долгосрочно:**
   - простой ELF-загрузчик для запуска пользовательских программ из FAT12;
