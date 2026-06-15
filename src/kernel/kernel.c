@@ -1,6 +1,7 @@
 #include "keyboard.h" // Подключаем твои порты ввода-вывода и карту скан-кодов
 #include "../fs/fat12.h" // Драйвер FAT12 для RAM-диска (конфиги/скрипты/файлы программ)
 #include "../user/syscall.h" // ABI системных вызовов, общий с ring3-программами
+#include "ide.h" // PIO-драйвер ATA/IDE (build/disk.img - настоящий диск)
 #include "paging.h" // Защита памяти: paging + read-only код ядра
 #include "tss.h" // TSS: переключение стека ring3 -> ring0
 #include "heap.h" // kmalloc/kfree - простой кучевой аллокатор
@@ -144,6 +145,17 @@ int str_starts_with(char* str, char* prefix) {
     return 1;
 }
 
+// Разбирает десятичное число из начала строки (нецифровые символы после
+// числа игнорируются)
+unsigned int parse_uint(char* s) {
+    unsigned int val = 0;
+    while (*s >= '0' && *s <= '9') {
+        val = val * 10 + (unsigned int)(*s - '0');
+        s++;
+    }
+    return val;
+}
+
 // Читает регистр CMOS/RTC (порт 0x70 — выбор регистра, 0x71 — чтение значения)
 unsigned char cmos_read(unsigned char reg) {
     port_byte_out(0x70, reg);
@@ -226,6 +238,22 @@ static void print_hex(unsigned int val) {
         val >>= 4;
     }
     print_string(buf);
+}
+
+// Печатает один байт как 2-значный hex (без префикса)
+static void print_hex_byte(unsigned char val) {
+    char hex_digits[] = "0123456789ABCDEF";
+    char buf[3] = { hex_digits[val >> 4], hex_digits[val & 0xF], '\0' };
+    print_string(buf);
+}
+
+// Печатает первые size байт buf как hex, по 16 байт на строку
+static void print_hex_dump(unsigned char* buf, unsigned int size) {
+    for (unsigned int i = 0; i < size; i++) {
+        print_hex_byte(buf[i]);
+        print_string((i % 16 == 15) ? "\n" : " ");
+    }
+    if (size % 16 != 0) print_string("\n");
 }
 
 // Перезагружает машину через контроллер клавиатуры 8042 (impulse на линию reset)
@@ -470,6 +498,9 @@ void execute_command(char* cmd) {
         print_string("  cat <file>  - show file contents\n");
         print_string("  write <file> <text> - create/overwrite a file\n");
         print_string("  run <file>  - load and run a program from FAT12 (ring3)\n");
+        print_string("  diskinfo    - show IDE drive model (build/disk.img)\n");
+        print_string("  diskread <lba>  - hexdump a sector from the IDE disk\n");
+        print_string("  diskwrite <lba> <text> - write text to a sector on the IDE disk\n");
         print_string("  usermode    - demo: jump to ring3, call syscall via int 0x80\n");
         print_string("  memtest     - test heap allocator (malloc/free)\n");
         print_string("  ps          - list running tasks\n");
@@ -533,6 +564,52 @@ void execute_command(char* cmd) {
             task_create_user(cmd + 4, (void (*)(void))addr);
             next_user_slot = (next_user_slot + 1) % USER_PROGRAM_SLOTS;
             print_string("Started.\n");
+        }
+    } else if (str_eq(cmd, "diskinfo")) {
+        char model[41];
+        if (ide_identify(model)) {
+            print_string("IDE primary master: ");
+            print_string(model);
+            print_string("\n");
+        } else {
+            print_string("No IDE drive found.\n");
+        }
+    } else if (str_starts_with(cmd, "diskread ")) {
+        char* p = cmd + 9;
+        if (*p < '0' || *p > '9') {
+            print_string("Usage: diskread <lba>\n");
+        } else {
+            unsigned int lba = parse_uint(p);
+            unsigned char buf[IDE_SECTOR_SIZE];
+            if (ide_read_sector(lba, buf)) {
+                print_hex_dump(buf, 128);
+            } else {
+                print_string("Disk read failed (no IDE drive?).\n");
+            }
+        }
+    } else if (str_starts_with(cmd, "diskwrite ")) {
+        char* p = cmd + 10;
+        if (*p < '0' || *p > '9') {
+            print_string("Usage: diskwrite <lba> <text>\n");
+        } else {
+            unsigned int lba = parse_uint(p);
+            while (*p >= '0' && *p <= '9') p++;
+            if (*p == ' ') p++;
+
+            unsigned char buf[IDE_SECTOR_SIZE];
+            for (unsigned int i = 0; i < IDE_SECTOR_SIZE; i++) buf[i] = 0;
+
+            unsigned int i = 0;
+            while (p[i] != '\0' && i < IDE_SECTOR_SIZE) {
+                buf[i] = p[i];
+                i++;
+            }
+
+            if (ide_write_sector(lba, buf)) {
+                print_string("Written.\n");
+            } else {
+                print_string("Disk write failed (no IDE drive?).\n");
+            }
         }
     } else if (str_eq(cmd, "usermode")) {
         // enter_usermode() - билет в один конец (iretd без возврата), так

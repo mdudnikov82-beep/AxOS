@@ -43,6 +43,10 @@ echo Compiling Tasking (C)...
 gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/tasking.c -o build/tasking.o
 if %errorlevel% neq 0 goto :error
 
+echo Compiling IDE driver (C)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/drivers/ide.c -o build/ide.o
+if %errorlevel% neq 0 goto :error
+
 echo Compiling Syscalls...
 .\tools\nasm.exe -f elf32 src\kernel\syscalls.asm -o build\syscalls.o
 if %errorlevel% neq 0 goto :error
@@ -53,7 +57,7 @@ if %errorlevel% neq 0 goto :error
 
 echo Linking to PE...
 :: Линкуем в формат, который он понимает (i386pe)
-ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\tss.o build\heap.o build\tasking.o build\syscalls.o build\usermode.o -o build\kernel.exe
+ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\tss.o build\heap.o build\tasking.o build\ide.o build\syscalls.o build\usermode.o -o build\kernel.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping to Binary...
@@ -91,6 +95,9 @@ powershell -Command "$file = 'build\os-image.bin'; $size = (Get-Item $file).Leng
 
 echo Embedding FAT12 RAM-disk into image (offset 18432 = sector 36)...
 powershell -Command "$img = 'build\os-image.bin'; $fat = [System.IO.File]::ReadAllBytes('build\fat12.bin'); $stream = [System.IO.File]::OpenWrite($img); $stream.Seek(18432, 'Begin'); $stream.Write($fat, 0, $fat.Length); $stream.Close()"
+
+echo Creating IDE disk image (build/disk.img, 10MB) if missing...
+powershell -Command "$file = 'build\disk.img'; if (-not (Test-Path $file)) { $stream = [System.IO.File]::Create($file); $stream.SetLength(10485760); $stream.Close() }"
 
 echo Success!
 pause

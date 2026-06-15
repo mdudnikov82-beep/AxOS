@@ -10,6 +10,7 @@ import sys
 import time
 
 IMAGE = os.path.join("build", "os-image.bin")
+DISK_IMAGE = os.path.join("build", "disk.img")
 MONITOR_PORT = 55590
 DUMP_FILE = "vga_dump.bin"
 BOOT_WAIT_SEC = 10
@@ -49,14 +50,19 @@ def main():
         return 1
 
     qemu = find_qemu()
-    proc = subprocess.Popen([
+    args = [
         qemu,
         "-drive", f"format=raw,file={IMAGE},if=floppy",
+    ]
+    if os.path.isfile(DISK_IMAGE):
+        args += ["-drive", f"format=raw,file={DISK_IMAGE},if=ide,index=0,media=disk"]
+    args += [
         "-boot", "a",
         "-display", "none",
         "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server,nowait",
         "-no-reboot",
-    ])
+    ]
+    proc = subprocess.Popen(args)
 
     try:
         time.sleep(BOOT_WAIT_SEC)

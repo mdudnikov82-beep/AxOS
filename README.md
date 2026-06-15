@@ -226,6 +226,27 @@ ELF-парсер (сегменты ELF не разбираются), а праг
 раньше, если она ещё работает. Для учебной ОС без отдельных адресных
 пространств на задачу это ожидаемо.
 
+### Драйвер IDE/ATA (PIO)
+
+`src/drivers/ide.c`/`ide.h` — PIO-драйвер ATA для primary bus, master-диска,
+LBA28-адресация. Без DMA и прерываний: чтение и запись секторов через порты
+`0x1F0`-`0x1F7` с поллингом регистра статуса (`ide_wait_ready`/`ide_wait_data`,
+ограничены `IDE_WAIT_LIMIT` итерациями, чтобы не зависнуть, если IDE-устройство
+не подключено — `status == 0xFF`).
+
+- `ide_read_sector(lba, buffer)` / `ide_write_sector(lba, buffer)` — команды
+  `READ SECTORS` (`0x20`) / `WRITE SECTORS` (`0x30`), 256 слов (512 байт) за
+  раз; после записи — `CACHE FLUSH` (`0xE7`).
+- `ide_identify(model)` — команда `IDENTIFY DEVICE` (`0xEC`), возвращает строку
+  модели диска (слова 27-46 ответа).
+
+Это настоящий физический диск — `build/disk.img` (10 МБ, нулевой, создаётся
+один раз при сборке и подключается к QEMU как `if=ide`), отдельный от
+встроенного в `os-image.bin` FAT12 RAM-диска. Записи через `diskwrite`
+сохраняются между запусками QEMU. Команды shell: `diskinfo`, `diskread <lba>`,
+`diskwrite <lba> <text>` (см. таблицу команд ниже). Интеграция FAT12 с этим
+диском (вместо RAM-диска) и VFS-слой — следующие шаги (см. Roadmap).
+
 ## Карта памяти
 
 Все адреса — физические, в пределах identity-mapped первых 4 МБ:
@@ -262,6 +283,9 @@ ELF-парсер (сегменты ELF не разбираются), а праг
 | `usermode`      | демо: переход в ring3 и вызов `int 0x80` из user mode      |
 | `memtest`       | тест кучи (`malloc`/`free`): выделение, переиспользование, слияние блоков |
 | `ps`            | список задач планировщика (id, имя, число тиков)           |
+| `diskinfo`      | модель диска IDE (`build/disk.img`), команда `IDENTIFY DEVICE` |
+| `diskread <lba>`| hexdump сектора с диска IDE (первые 128 из 512 байт)       |
+| `diskwrite <lba> <text>` | записать текст в сектор диска IDE                  |
 
 ## Структура репозитория
 
@@ -293,6 +317,8 @@ ELF-парсер (сегменты ELF не разбираются), а праг
 - `src/kernel/tasking.c`/`tasking.h` — preemptive round-robin планировщик
   (`task_create`, `task_create_user`, `schedule`).
 - `src/fs/fat12.c`/`fat12.h` — драйвер FAT12 RAM-диска (чтение и запись).
+- `src/drivers/ide.c`/`ide.h` — PIO-драйвер ATA/IDE (primary master, LBA28),
+  доступ к `build/disk.img` (команды `diskinfo`/`diskread`/`diskwrite`).
 - `src/drivers/keyboard.h` — порты ввода-вывода и таблица скан-кодов
   клавиатуры.
 - `src/user/syscall.h` — общий ABI системных вызовов (`SYS_*`-константы и
@@ -379,9 +405,13 @@ QEMU запускает образ как floppy (`-drive format=raw,file=build\
   - ✅ новые системные вызовы для ring3: `SYS_READ_KEY` (неблокирующее
     чтение клавиатуры), `SYS_WRITE_FILE`/`SYS_READ_FILE` (файлы из ring3),
     общий ABI в `src/user/syscall.h`.
+  - ✅ базовый PIO-драйвер IDE/ATA (`src/drivers/ide.c`/`ide.h`): чтение и
+    запись секторов (LBA28), `IDENTIFY DEVICE`, отдельный физический диск
+    `build/disk.img`, команды `diskinfo`/`diskread`/`diskwrite`.
 
 - **Долгосрочно:**
-  - драйверы для IDE/HDD, чтобы не зависеть от RAM-диска;
+  - интеграция FAT12 с реальным диском (`build/disk.img` через `ide.c`)
+    вместо встроенного в образ RAM-диска;
   - VFS-слой над несколькими файловыми системами;
   - покрытие критичных частей (heap, paging, fat12) регрессионными тестами.
 
