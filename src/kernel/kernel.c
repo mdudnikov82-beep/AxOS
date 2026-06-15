@@ -496,7 +496,9 @@ void execute_command(char* cmd) {
         print_string("  echo <text> - print text\n");
         print_string("  ls          - list files on FAT12 RAM-disk\n");
         print_string("  cat <file>  - show file contents\n");
-        print_string("  write <file> <text> - create/overwrite a file\n");
+        print_string("  write <file> <text> - create/overwrite a file (needs unlock)\n");
+        print_string("  lock        - write-protect the FAT12 disk (default)\n");
+        print_string("  unlock      - allow writes to the FAT12 disk\n");
         print_string("  run <file>  - load and run a program from FAT12 (ring3)\n");
         print_string("  diskinfo    - show IDE drive model (build/disk.img)\n");
         print_string("  diskread <lba>  - hexdump a sector from the IDE disk\n");
@@ -508,6 +510,8 @@ void execute_command(char* cmd) {
         clear_screen();
     } else if (str_eq(cmd, "about")) {
         print_string("AxOS v0.5 - hobby OS in C and x86 Assembly\n");
+        print_string("FAT12 disk: ");
+        print_string(fat12_is_locked() ? "locked (read-only)\n" : "unlocked (read-write)\n");
     } else if (str_eq(cmd, "date") || str_eq(cmd, "time")) {
         print_datetime();
     } else if (str_eq(cmd, "uptime")) {
@@ -541,6 +545,8 @@ void execute_command(char* cmd) {
         char* filename = cmd + 6;
         if (*filename == '\0') {
             print_string("Usage: write <file> <text>\n");
+        } else if (fat12_is_locked()) {
+            print_string("Disk is locked. Use 'unlock' to enable writes.\n");
         } else {
             char* text = filename;
             while (*text != '\0' && *text != ' ') text++;
@@ -555,6 +561,12 @@ void execute_command(char* cmd) {
                 print_string("Write failed (disk full?).\n");
             }
         }
+    } else if (str_eq(cmd, "lock")) {
+        fat12_set_locked(1);
+        print_string("FAT12 disk locked (read-only).\n");
+    } else if (str_eq(cmd, "unlock")) {
+        fat12_set_locked(0);
+        print_string("FAT12 disk unlocked (read-write).\n");
     } else if (str_starts_with(cmd, "run ")) {
         unsigned int addr = USER_PROGRAM_BASE + next_user_slot * USER_PROGRAM_SLOT_SIZE;
         unsigned int size = fat12_load(cmd + 4, (unsigned char*)addr, USER_PROGRAM_SLOT_SIZE);

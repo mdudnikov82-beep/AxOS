@@ -40,6 +40,19 @@ struct fat12_dir_entry {
 
 static struct fat12_bpb* bpb = (struct fat12_bpb*)FAT12_BASE;
 
+// Защита от записи. По умолчанию диск заблокирован (только чтение) -
+// команды "unlock"/"lock" в shell переключают это состояние через
+// fat12_set_locked(). fat12_write() отказывает, пока диск заблокирован.
+static int fat12_locked = 1;
+
+void fat12_set_locked(int locked) {
+    fat12_locked = locked;
+}
+
+int fat12_is_locked() {
+    return fat12_locked;
+}
+
 // Возвращает значение 12-битной записи FAT для кластера cluster
 static unsigned int fat12_get_entry(unsigned int cluster) {
     unsigned char* fat = (unsigned char*)FAT12_BASE + (unsigned int)bpb->reserved_sectors * bpb->bytes_per_sector;
@@ -291,6 +304,8 @@ unsigned int fat12_load(char* filename, unsigned char* buffer, unsigned int max_
 }
 
 int fat12_write(char* filename, unsigned char* data, unsigned int size) {
+    if (fat12_locked) return 0;
+
     char name[8], ext[3];
     parse_83(filename, name, ext);
 
