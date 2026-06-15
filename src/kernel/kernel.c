@@ -457,7 +457,13 @@ void execute_command(char* cmd) {
             print_string("File not found.\n");
         }
     } else if (str_eq(cmd, "usermode")) {
+        // enter_usermode() - билет в один конец (iretd без возврата), так
+        // что код после execute_command() в keyboard_handler_main (сброс
+        // command_len и печать приглашения) для этого вызова не выполнится.
+        // Делаем это здесь заранее, иначе следующий ввод склеится с "usermode".
+        command_len = 0;
         print_string("Switching to ring3...\n");
+        print_string("AxOS> ");
         enter_usermode(usermode_demo);
     } else if (str_eq(cmd, "memtest")) {
         memtest_demo();
