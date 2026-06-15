@@ -9,6 +9,7 @@
 // не сможет записать в них (случайно или намеренно).
 
 #include "paging.h"
+#include "tasking.h"
 
 #define PAGE_PRESENT 0x1
 #define PAGE_RW      0x2
@@ -55,12 +56,6 @@ void init_paging() {
     );
 }
 
-// Виртуальное окно [0x100000, 0x108000) - 8 страниц (32 КБ ==
-// USER_PROGRAM_SLOT_SIZE в kernel.c), куда переотображается физический слот
-// изолированной задачи.
-#define USER_WINDOW_BASE  0x100000
-#define USER_WINDOW_PAGES 8
-
 unsigned int paging_create_user_directory(int user_slot_index, unsigned int phys_slot_base) {
     unsigned int* src_table = PAGE_TABLE;
     unsigned int* dst_table = (unsigned int*)(PT_POOL_BASE + (unsigned int)user_slot_index * PAGE_SIZE);
@@ -98,9 +93,35 @@ static void print_hex(unsigned int val) {
     print_string(buf);
 }
 
+// Индексы в кадре pusha (idt.asm): после pusha (8 dword) и кода ошибки CPU
+// кладёт EIP, затем CS.
+#define PF_FRAME_EIP 9
+#define PF_FRAME_CS  10
+
 // Вызывается из idt.asm при исключении #14. CR2 содержит адрес,
-// обращение к которому вызвало сбой.
-void page_fault_handler_main(unsigned int faulting_address) {
+// обращение к которому вызвало сбой. frame - указатель на сохранённые
+// pusha-регистры (idt.asm передаёт esp сразу после pusha).
+void page_fault_handler_main(unsigned int faulting_address, unsigned int* frame) {
+    unsigned int cs = frame[PF_FRAME_CS];
+
+    // Ring3-fault изолированной run-задачи - убиваем только её, а не всю
+    // систему: помечаем на удаление (schedule() реапнет на следующем
+    // тике) и перенаправляем EIP на безопасный "jmp $" в её собственном
+    // окне (USER_SPIN_ADDR, записан при создании задачи в tasking.c).
+    if ((cs & 3) == 3 && task_current_is_isolated()) {
+        print_string("\n*** PAGE FAULT in '");
+        print_string(task_current_name());
+        print_string("' at 0x");
+        print_hex(faulting_address);
+        print_string(" - task killed ***\n");
+
+        task_mark_current_exiting();
+        frame[PF_FRAME_EIP] = USER_SPIN_ADDR;
+        return;
+    }
+
+    // Fault в ring0 (баг ядра) или у встроенной демо-задачи без изоляции
+    // (ring3demo/usermode) - как раньше, останавливаем всю систему.
     print_string("\n*** PAGE FAULT at 0x");
     print_hex(faulting_address);
     print_string(" ***\nSystem halted.\n");

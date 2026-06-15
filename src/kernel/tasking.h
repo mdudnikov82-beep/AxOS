@@ -29,10 +29,28 @@ void task_create_user(char* name, void (*entry)(void));
 void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index);
 
 // Вызывается из idt.asm при каждом IRQ0: сохраняет esp текущей задачи,
-// переключается на следующую по кольцу и возвращает её esp.
+// переключается на следующую по кольцу и возвращает её esp. Если
+// текущая задача помечена exiting (task_mark_current_exiting) - убирает
+// её из кольца и освобождает её ресурсы (см. tasking.c).
 unsigned int schedule(unsigned int current_esp);
 
 // Печатает список задач (id, имя, число тиков) - используется командой `ps`.
 void print_task_list();
+
+// Помечает текущую задачу на завершение: schedule() уберёт её из кольца
+// на следующем тике, освободит её kernel-стек/task_t и (если изолирована)
+// её слот run (через on_task_exit, kernel.c). Используется SYS_EXIT
+// (kernel.c) и killом изолированной задачи при page fault (paging.c).
+// No-op, если планировщик ещё не инициализирован (current_task == 0).
+void task_mark_current_exiting();
+
+// true, если текущая задача изолирована (создана через
+// task_create_user_isolated, имеет приватный page_directory и
+// user_slot_index >= 0). Используется paging.c, чтобы решить - убить
+// только эту задачу при page fault или останавливать всю систему.
+int task_current_is_isolated();
+
+// Имя текущей задачи (для сообщений вида "task killed").
+char* task_current_name();
 
 #endif

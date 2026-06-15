@@ -62,12 +62,19 @@ page_fault_handler:
     cld
     pusha
 
+    ; page_fault_handler_main(faulting_address, frame): frame - указатель
+    ; на этот кадр pusha (нужен, чтобы переписать EIP/проверить CS при
+    ; killе изолированной задачи, см. paging.c). EBX используется как
+    ; скретч - его сохранённое здесь значение восстановит popa, текущее
+    ; содержимое регистра уже не важно.
+    mov ebx, esp
     mov eax, cr2
+    push ebx
     push eax
     call _page_fault_handler_main
-    ; page_fault_handler_main не возвращается (вешает систему),
-    ; но для порядка приводим стек в исходный вид
-    add esp, 4
+    add esp, 8
+    ; page_fault_handler_main возвращается только для killed-задачи
+    ; (изменив EIP в кадре); иначе вешает систему сама.
 
     popa
     add esp, 4      ; убираем код ошибки, который положил CPU

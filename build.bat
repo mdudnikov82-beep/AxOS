@@ -94,6 +94,38 @@ echo Copying user program into fs/ for FAT12 image...
 copy /b build\hello.bin fs\HELLO.BIN
 if %errorlevel% neq 0 goto :error
 
+echo Compiling user program (exitdemo.c)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -c src\user\exitdemo.c -o build\exitdemo.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\user_start.o build\exitdemo.o -o build\exitdemo.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\exitdemo.exe build\exitdemo.bin
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\exitdemo.bin fs\EXIT.BIN
+if %errorlevel% neq 0 goto :error
+
+echo Compiling user program (crashdemo.c)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -c src\user\crashdemo.c -o build\crashdemo.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\user_start.o build\crashdemo.o -o build\crashdemo.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\crashdemo.exe build\crashdemo.bin
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\crashdemo.bin fs\CRASH.BIN
+if %errorlevel% neq 0 goto :error
+
 echo Building FAT12 RAM-disk image from fs/...
 python tools\make_fat12.py
 if %errorlevel% neq 0 goto :error

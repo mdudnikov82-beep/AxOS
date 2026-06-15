@@ -14,6 +14,17 @@
 #define PD_POOL_BASE 0x120000
 #define PT_POOL_BASE 0x124000
 
+// Виртуальное окно [0x100000, 0x100000+USER_WINDOW_SIZE) - см.
+// paging_create_user_directory. USER_SPIN_ADDR - последние 2 байта окна:
+// сюда tasking.c пишет "jmp $" (EB FE) при создании задачи, а
+// page_fault_handler_main (при killе изолированной задачи за пределами
+// окна) перенаправляет туда EIP - безопасное место для "добивания" кванта
+// до реапа в schedule().
+#define USER_WINDOW_BASE  0x100000
+#define USER_WINDOW_PAGES 8
+#define USER_WINDOW_SIZE  (USER_WINDOW_PAGES * 0x1000)
+#define USER_SPIN_ADDR    (USER_WINDOW_BASE + USER_WINDOW_SIZE - 2)
+
 // Включает paging с identity-mapping первых 4 МБ (виртуальный адрес = физический).
 // Страницы, целиком занятые кодом ядра (.text), помечаются как read-only,
 // а CR0.WP=1 заставляет процессор соблюдать этот запрет даже в ring0.

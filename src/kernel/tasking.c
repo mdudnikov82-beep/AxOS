@@ -35,11 +35,14 @@ typedef struct task {
     int id;
     char name[MAX_NAME_LEN];
     unsigned long ticks;
+    int user_slot_index; // -1 для task0/heartbeat/ring3demo; 0..3 для run-задач (kernel.c)
+    int exiting;         // 1 - schedule() уберёт задачу из кольца на следующем тике
     struct task* next;
 } task_t;
 
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
+extern void on_task_exit(int user_slot_index); // kernel.c - освобождает слот run-задачи
 
 // task0 - текущий поток выполнения (kernel_main/shell). Его esp
 // записывается лениво, при первом переключении из schedule().
@@ -62,6 +65,8 @@ void init_tasking() {
     copy_name(task0.name, "shell");
     task0.ticks = 0;
     task0.page_directory = (unsigned int)PAGE_DIRECTORY;
+    task0.user_slot_index = -1;
+    task0.exiting = 0;
     task0.next = &task0;
 
     // Отдельный стек ядра для task0: НЕ совпадает с её "живым" стеком
@@ -101,6 +106,8 @@ void task_create(char* name, void (*entry)(void)) {
     copy_name(new_task->name, name);
     new_task->ticks = 0;
     new_task->page_directory = (unsigned int)PAGE_DIRECTORY;
+    new_task->user_slot_index = -1;
+    new_task->exiting = 0;
 
     // Свой стек ядра (ESP0) для единообразия - schedule() обновляет
     // TSS.ESP0 для каждой задачи, даже если она остаётся в ring0.
@@ -147,14 +154,26 @@ void task_create_user(char* name, void (*entry)(void)) {
     copy_name(new_task->name, name);
     new_task->ticks = 0;
     new_task->page_directory = (unsigned int)PAGE_DIRECTORY;
+    new_task->user_slot_index = -1;
+    new_task->exiting = 0;
 
     new_task->next = current_task->next;
     current_task->next = new_task;
 }
 
-// Виртуальные адреса окна 0x100000-0x108000 - см. paging_create_user_directory.
-#define USER_WINDOW_BASE 0x100000
-#define USER_WINDOW_TOP  0x108000
+// Виртуальные адреса окна 0x100000-0x108000 - см. USER_WINDOW_* (paging.h)
+// и paging_create_user_directory.
+#define USER_WINDOW_TOP (USER_WINDOW_BASE + USER_WINDOW_SIZE)
+
+// Начальный ESP задачи - на 16 байт ниже верха окна, а не сам верх:
+// стек растёт вниз, и первый push (адрес возврата из "call _user_main"
+// в start.asm) попадёт в [ESP-4]. Если ESP = USER_WINDOW_TOP, этот push
+// затирает USER_SPIN_ADDR (последние 2 байта окна) ещё до первого page
+// fault - kill-путь в paging.c перенаправляет EIP туда, находит там не
+// "jmp $", а данные со стека задачи, и снова падает. 16-байтовый зазор
+// оставляет USER_SPIN_ADDR выше начального ESP - туда стек никогда не
+// дорастёт (растёт вниз).
+#define USER_STACK_TOP (USER_WINDOW_TOP - 16)
 
 void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index) {
     unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
@@ -168,7 +187,7 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     // переотображается на физический слот этой задачи в её приватном PD).
     unsigned int* sp = (unsigned int*)(kstack + KSTACK_SIZE);
     *(--sp) = USER_DATA_SEG | 3;     // SS
-    *(--sp) = USER_WINDOW_TOP;       // ESP: верх окна, стек растёт вниз
+    *(--sp) = USER_STACK_TOP;        // ESP: ниже верха окна (см. USER_STACK_TOP)
     *(--sp) = 0x202;                 // EFLAGS: IF=1
     *(--sp) = USER_CODE_SEG | 3;     // CS
     *(--sp) = USER_WINDOW_BASE;      // EIP: начало окна
@@ -187,6 +206,18 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     copy_name(new_task->name, name);
     new_task->ticks = 0;
     new_task->page_directory = paging_create_user_directory(user_slot_index, phys_slot_base);
+    new_task->user_slot_index = user_slot_index;
+    new_task->exiting = 0;
+
+    // "jmp $" (EB FE) в последние 2 байта окна задачи - см. USER_SPIN_ADDR
+    // (paging.h). Сюда page_fault_handler_main перенаправляет EIP этой
+    // задачи при killе: безопасный адрес внутри СВОЕГО окна (PRESENT|RW|
+    // USER), задача крутится здесь до реапа в schedule(). Пишем по
+    // физическому адресу - ядро сейчас работает на текущем (не приватном)
+    // PD, где этот адрес identity-mapped.
+    unsigned char* spin = (unsigned char*)(phys_slot_base + USER_WINDOW_SIZE - 2);
+    spin[0] = 0xEB; // jmp
+    spin[1] = 0xFE; // -2 (на себя)
 
     new_task->next = current_task->next;
     current_task->next = new_task;
@@ -197,8 +228,30 @@ unsigned int schedule(unsigned int current_esp) {
 
     current_task->esp = current_esp;
     current_task->ticks++;
-    unsigned int prev_page_directory = current_task->page_directory;
-    current_task = current_task->next;
+
+    task_t* dying = current_task;
+    unsigned int prev_page_directory = dying->page_directory;
+    task_t* next = dying->next;
+
+    // Задача помечена на завершение (SYS_EXIT - kernel.c, или page fault
+    // в ring3 - paging.c) - убираем её из кольца и освобождаем ресурсы.
+    // exiting выставляется ТОЛЬКО у задач с user_slot_index >= 0 (run);
+    // task0/heartbeat/ring3demo никогда не завершаются, так что кольцо
+    // никогда не опустеет (pred ниже всегда найдётся).
+    if (dying->exiting) {
+        task_t* pred = next;
+        while (pred->next != dying) pred = pred->next;
+        pred->next = next;
+
+        if (dying->user_slot_index >= 0) {
+            on_task_exit(dying->user_slot_index);
+        }
+
+        free((void*)(dying->kernel_stack_top - KSTACK_SIZE));
+        free(dying);
+    }
+
+    current_task = next;
 
     // У каждой задачи свой стек для ring3->ring0 переходов (IRQ/syscall
     // во время выполнения этой задачи) - без этого общий ESP0 пересекался
@@ -213,6 +266,23 @@ unsigned int schedule(unsigned int current_esp) {
     }
 
     return current_task->esp;
+}
+
+// Помечает текущую задачу на завершение - см. tasking.h.
+void task_mark_current_exiting() {
+    if (current_task) {
+        current_task->exiting = 1;
+    }
+}
+
+// true, если текущая задача изолирована (см. tasking.h).
+int task_current_is_isolated() {
+    return current_task && current_task->user_slot_index >= 0;
+}
+
+// Имя текущей задачи (см. tasking.h).
+char* task_current_name() {
+    return current_task->name;
 }
 
 void print_task_list() {

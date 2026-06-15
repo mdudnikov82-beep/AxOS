@@ -13,6 +13,7 @@
 #define SYS_READ_KEY     0x03 // ESI -> char: последний нажатый символ (0, если нет)
 #define SYS_WRITE_FILE   0x04 // ESI -> struct write_file_args
 #define SYS_READ_FILE    0x05 // ESI -> struct read_file_args
+#define SYS_EXIT         0x06 // ESI не используется - текущая задача завершается
 
 // Аргумент SYS_WRITE_FILE: создаёт/перезаписывает файл filename
 // содержимым data (size байт).

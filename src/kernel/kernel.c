@@ -15,16 +15,22 @@
 // Слоты загрузки пользовательских программ командой "run" (см. user.ld).
 // 1 МБ - внутри identity-mapped region (paging.c), далеко от ядра, кучи,
 // стеков и видеопамяти, уже PRESENT|USER|RW. USER_PROGRAM_SLOTS слотов по
-// USER_PROGRAM_SLOT_SIZE байт каждый (0x100000-0x120000), выдаются по
-// кругу: каждый "run" занимает следующий слот, так что несколько программ
-// могут работать одновременно. Слот переиспользуется после полного круга -
-// "run" перезапишет программу, занимавшую этот слот ранее, если она ещё
-// работает (без отдельных адресных пространств на задачу иначе никак).
+// USER_PROGRAM_SLOT_SIZE байт каждый (0x100000-0x120000), каждый со своим
+// приватным Page Directory (paging.c) - несколько программ могут работать
+// одновременно в изоляции друг от друга.
 #define USER_PROGRAM_SLOTS     4
 #define USER_PROGRAM_SLOT_SIZE 0x8000
 #define USER_PROGRAM_BASE      0x100000
 
-static int next_user_slot = 0;
+// slot_free[i] == 1, если слот i свободен. "run" занимает первый свободный
+// слот; при завершении задачи (SYS_EXIT или killed page fault, см.
+// tasking.c::schedule) on_task_exit() освобождает его обратно.
+static int slot_free[USER_PROGRAM_SLOTS] = {1, 1, 1, 1};
+
+// Вызывается из tasking.c::schedule() при реапе изолированной run-задачи.
+void on_task_exit(int user_slot_index) {
+    slot_free[user_slot_index] = 1;
+}
 
 // Прототипы функций
 void clear_screen();
@@ -314,6 +320,13 @@ void sys_read_file(char* arg) {
     a->out_size = vfs_read(a->filename, a->buffer, a->max_size);
 }
 
+// SYS_EXIT: текущая задача завершилась - schedule() уберёт её из кольца
+// планировщика и освободит её ресурсы (kernel-стек, task_t, слот run)
+// на следующем тике (см. tasking.c).
+void sys_exit(char* arg) {
+    task_mark_current_exiting();
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01 — печать строки (ESI -> строка с '\0')
@@ -321,6 +334,7 @@ syscall_fn syscall_table[] = {
     sys_read_key,      // 0x03 — чтение клавиатуры (ESI -> char)
     sys_write_file,    // 0x04 — запись файла (ESI -> struct write_file_args)
     sys_read_file,     // 0x05 — чтение файла (ESI -> struct read_file_args)
+    sys_exit,          // 0x06 — завершение задачи (ESI не используется)
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))
@@ -571,14 +585,23 @@ void execute_command(char* cmd) {
         vfs_set_locked(0);
         print_string("FAT12 disk unlocked (read-write).\n");
     } else if (str_starts_with(cmd, "run ")) {
-        unsigned int addr = USER_PROGRAM_BASE + next_user_slot * USER_PROGRAM_SLOT_SIZE;
-        unsigned int size = vfs_read(cmd + 4, (unsigned char*)addr, USER_PROGRAM_SLOT_SIZE);
-        if (size == 0) {
-            print_string("File not found.\n");
+        int slot = -1;
+        for (int i = 0; i < USER_PROGRAM_SLOTS; i++) {
+            if (slot_free[i]) { slot = i; break; }
+        }
+
+        if (slot == -1) {
+            print_string("No free program slots, try again later.\n");
         } else {
-            task_create_user_isolated(cmd + 4, addr, next_user_slot);
-            next_user_slot = (next_user_slot + 1) % USER_PROGRAM_SLOTS;
-            print_string("Started.\n");
+            unsigned int addr = USER_PROGRAM_BASE + slot * USER_PROGRAM_SLOT_SIZE;
+            unsigned int size = vfs_read(cmd + 4, (unsigned char*)addr, USER_PROGRAM_SLOT_SIZE);
+            if (size == 0) {
+                print_string("File not found.\n");
+            } else {
+                slot_free[slot] = 0;
+                task_create_user_isolated(cmd + 4, addr, slot);
+                print_string("Started.\n");
+            }
         }
     } else if (str_eq(cmd, "diskinfo")) {
         char model[41];
