@@ -9,13 +9,19 @@
 #define VIDEO_MEMORY 0xB8000
 #define DEFAULT_COLOR 0x1F
 
-// Адрес загрузки пользовательских программ командой "run" (см. user.ld).
+// Слоты загрузки пользовательских программ командой "run" (см. user.ld).
 // 1 МБ - внутри identity-mapped region (paging.c), далеко от ядра, кучи,
-// стеков и видеопамяти, уже PRESENT|USER|RW. Один фиксированный слот:
-// повторный "run" во время работы предыдущей программы перезапишет её код -
-// для учебной ОС без отдельных адресных пространств это ожидаемо.
-#define USER_PROGRAM_ADDR     0x100000
-#define USER_PROGRAM_MAX_SIZE 0x8000
+// стеков и видеопамяти, уже PRESENT|USER|RW. USER_PROGRAM_SLOTS слотов по
+// USER_PROGRAM_SLOT_SIZE байт каждый (0x100000-0x120000), выдаются по
+// кругу: каждый "run" занимает следующий слот, так что несколько программ
+// могут работать одновременно. Слот переиспользуется после полного круга -
+// "run" перезапишет программу, занимавшую этот слот ранее, если она ещё
+// работает (без отдельных адресных пространств на задачу иначе никак).
+#define USER_PROGRAM_SLOTS     4
+#define USER_PROGRAM_SLOT_SIZE 0x8000
+#define USER_PROGRAM_BASE      0x100000
+
+static int next_user_slot = 0;
 
 // Прототипы функций
 void clear_screen();
@@ -466,11 +472,13 @@ void execute_command(char* cmd) {
             print_string("File not found.\n");
         }
     } else if (str_starts_with(cmd, "run ")) {
-        unsigned int size = fat12_load(cmd + 4, (unsigned char*)USER_PROGRAM_ADDR, USER_PROGRAM_MAX_SIZE);
+        unsigned int addr = USER_PROGRAM_BASE + next_user_slot * USER_PROGRAM_SLOT_SIZE;
+        unsigned int size = fat12_load(cmd + 4, (unsigned char*)addr, USER_PROGRAM_SLOT_SIZE);
         if (size == 0) {
             print_string("File not found.\n");
         } else {
-            task_create_user(cmd + 4, (void (*)(void))USER_PROGRAM_ADDR);
+            task_create_user(cmd + 4, (void (*)(void))addr);
+            next_user_slot = (next_user_slot + 1) % USER_PROGRAM_SLOTS;
             print_string("Started.\n");
         }
     } else if (str_eq(cmd, "usermode")) {
