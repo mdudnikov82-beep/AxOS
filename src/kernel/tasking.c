@@ -14,12 +14,22 @@
 // стеке - для неё popa+iret действует как "запуск" с адреса entry.
 
 #include "heap.h"
+#include "tss.h"
 
 #define TASK_STACK_SIZE 4096
+// 4096, а не меньше: если IRQ (клавиатура/таймер) застаёт ring3-задачу
+// "текущей", весь обработчик прерывания (включая, например, fat12_cat()
+// с её локальным буфером ~2KB) выполняется на ЭТОМ стеке (ESP0 = он же).
+#define KSTACK_SIZE 4096
 #define MAX_NAME_LEN 16
+
+// Селекторы из gdt.asm (ring3 = младшие 2 бита селектора = 11b).
+#define USER_CODE_SEG 0x18
+#define USER_DATA_SEG 0x20
 
 typedef struct task {
     unsigned int esp;
+    unsigned int kernel_stack_top; // ESP0 этой задачи (для ring3->ring0)
     int id;
     char name[MAX_NAME_LEN];
     unsigned long ticks;
@@ -51,6 +61,13 @@ void init_tasking() {
     task0.ticks = 0;
     task0.next = &task0;
 
+    // Отдельный стек ядра для task0: НЕ совпадает с её "живым" стеком
+    // (растущим вниз от 0x90000), поэтому ring3->ring0 переходы (когда
+    // task0 уходит в ring3 через usermode) не затирают его.
+    unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
+    task0.kernel_stack_top = (unsigned int)(kstack + KSTACK_SIZE);
+    tss_set_esp0(task0.kernel_stack_top);
+
     current_task = &task0;
 }
 
@@ -81,7 +98,51 @@ void task_create(char* name, void (*entry)(void)) {
     copy_name(new_task->name, name);
     new_task->ticks = 0;
 
+    // Свой стек ядра (ESP0) для единообразия - schedule() обновляет
+    // TSS.ESP0 для каждой задачи, даже если она остаётся в ring0.
+    unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
+    new_task->kernel_stack_top = (unsigned int)(kstack + KSTACK_SIZE);
+
     // Вставляем новую задачу сразу после текущей в кольце
+    new_task->next = current_task->next;
+    current_task->next = new_task;
+}
+
+void task_create_user(char* name, void (*entry)(void)) {
+    unsigned char* user_stack = (unsigned char*)malloc(TASK_STACK_SIZE);
+    unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
+    if (!user_stack || !kstack) return;
+
+    task_t* new_task = (task_t*)malloc(sizeof(task_t));
+    if (!new_task) return;
+
+    unsigned int user_stack_top = (unsigned int)(user_stack + TASK_STACK_SIZE);
+
+    // Фабрикуем кадр ring3->ring0 на стеке ядра задачи: [pusha x8 (0)]
+    // [EIP=entry][CS=USER_CODE_SEG|3][EFLAGS=0x202][ESP=user_stack_top]
+    // [SS=USER_DATA_SEG|3] - popa+iret в idt.asm "запустит" задачу прямо
+    // в ring3 (5-словный iret из-за CS с CPL=3).
+    unsigned int* sp = (unsigned int*)(kstack + KSTACK_SIZE);
+    *(--sp) = USER_DATA_SEG | 3;   // SS
+    *(--sp) = user_stack_top;      // ESP
+    *(--sp) = 0x202;               // EFLAGS: IF=1
+    *(--sp) = USER_CODE_SEG | 3;   // CS
+    *(--sp) = (unsigned int)entry; // EIP
+    *(--sp) = 0; // EAX
+    *(--sp) = 0; // ECX
+    *(--sp) = 0; // EDX
+    *(--sp) = 0; // EBX
+    *(--sp) = 0; // ESP - игнорируется popa
+    *(--sp) = 0; // EBP
+    *(--sp) = 0; // ESI
+    *(--sp) = 0; // EDI
+
+    new_task->esp = (unsigned int)sp;
+    new_task->kernel_stack_top = (unsigned int)(kstack + KSTACK_SIZE);
+    new_task->id = next_id++;
+    copy_name(new_task->name, name);
+    new_task->ticks = 0;
+
     new_task->next = current_task->next;
     current_task->next = new_task;
 }
@@ -89,19 +150,15 @@ void task_create(char* name, void (*entry)(void)) {
 unsigned int schedule(unsigned int current_esp) {
     if (!current_task) return current_esp; // tasking ещё не инициализирован
 
-    // Кадр прерывания: [pusha x8][EIP][CS][EFLAGS]{[ESP][SS]] - CS лежит
-    // по смещению +36 от esp независимо от того, было ли переключение
-    // привилегий (ring3->ring0 добавляет ESP/SS ПОСЛЕ EFLAGS, не сдвигая
-    // более ранние поля). Если прерванный код выполнялся в ring3
-    // (usermode-демо), не переключаем задачу в этом тике: совместное
-    // использование ESP0 из TSS планировщиком и ring3->ring0 переходом
-    // приводит к порче стека task0 и тройному сбою.
-    unsigned int cs = *(unsigned int*)(current_esp + 36);
-    if ((cs & 0x3) == 3) return current_esp;
-
     current_task->esp = current_esp;
     current_task->ticks++;
     current_task = current_task->next;
+
+    // У каждой задачи свой стек для ring3->ring0 переходов (IRQ/syscall
+    // во время выполнения этой задачи) - без этого общий ESP0 пересекался
+    // бы с "живым" стеком задачи, которая ушла в ring3 (см. tss.c).
+    tss_set_esp0(current_task->kernel_stack_top);
+
     return current_task->esp;
 }
 

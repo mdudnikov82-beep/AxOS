@@ -15,6 +15,11 @@ void init_tasking();
 // (задача не должна делать return - только бесконечный цикл).
 void task_create(char* name, void (*entry)(void));
 
+// Создаёт ring3-задачу: entry выполняется с CPL=3 на собственном
+// пользовательском стеке; у задачи также есть отдельный стек ядра
+// (используется как TSS.ESP0 при прерываниях/syscall из этой задачи).
+void task_create_user(char* name, void (*entry)(void));
+
 // Вызывается из idt.asm при каждом IRQ0: сохраняет esp текущей задачи,
 // переключается на следующую по кольцу и возвращает её esp.
 unsigned int schedule(unsigned int current_esp);

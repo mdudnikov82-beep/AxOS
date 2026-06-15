@@ -383,6 +383,27 @@ void heartbeat_task() {
     }
 }
 
+// --- Фоновая ring3-задача-демо для планировщика (tasking.c) ---
+// То же самое, что heartbeat_task, но выполняется с CPL=3 (создаётся
+// через task_create_user) - доказывает, что планировщик корректно
+// переключает и резюмирует задачи в ring3 (PAGE_USER разрешает доступ
+// к видеопамяти из ring3, см. paging.c). Без привилегированных
+// инструкций (hlt и т.п. недопустимы в ring3).
+void ring3_spinner_task() {
+    char spinner[] = "+x*.";
+    unsigned int frame = 0;
+
+    while (1) {
+        unsigned char* vidmem = (unsigned char*)0xB8000;
+        int offset = (0 * 80 + 78) * 2; // строка 0, столбец 78
+        vidmem[offset] = spinner[frame % 4];
+        vidmem[offset + 1] = 0x0B; // ярко-голубой на чёрном
+
+        frame++;
+        for (volatile unsigned int i = 0; i < 200000; i++);
+    }
+}
+
 // Разбирает и выполняет введённую команду
 void execute_command(char* cmd) {
     if (str_eq(cmd, "")) {
@@ -498,6 +519,7 @@ void kernel_main() {
     init_heap();
     init_tasking();
     task_create("heartbeat", heartbeat_task);
+    task_create_user("ring3demo", ring3_spinner_task);
     print_string("AxOS v0.5 [Interrupt Mode]\nAxOS> ");
 
     // БЕСКОНЕЧНЫЙ ЦИКЛ ОБЯЗАТЕЛЕН

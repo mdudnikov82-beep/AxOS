@@ -30,3 +30,7 @@ void init_tss() {
 
     __asm__ volatile("ltr %%ax" :: "a"((unsigned short)TSS_SEG));
 }
+
+void tss_set_esp0(unsigned int esp0) {
+    *(unsigned int*)(TSS_BASE + 4) = esp0;
+}
