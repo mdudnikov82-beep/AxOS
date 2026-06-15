@@ -1,13 +1,20 @@
 // =================================================================
-//  Read-only драйвер FAT12 для RAM-диска AxOS
+//  Драйвер FAT12 для AxOS (том на build/disk.img, доступ через IDE)
 // =================================================================
 //
-// Загрузчик (boot.asm) копирует FAT12-раздел с диска в RAM по адресу
-// 0x20000 ещё в реальном режиме. Здесь мы просто читаем эту область
-// памяти как обычный FAT12-том: BPB -> таблица FAT -> корневая
-// директория -> цепочки кластеров с данными файлов.
+// fat12_init() читает FAT12-том (128 секторов = 64 КБ, LBA 0-127 на
+// build/disk.img) через ide_read_sector в RAM по адресу 0x20000. Дальше
+// весь модуль работает с этой RAM-копией как с обычным FAT12-томом: BPB ->
+// таблица FAT -> корневая директория -> цепочки кластеров с данными
+// файлов - в точности как раньше, когда копию грузил загрузчик из
+// встроенного в образ раздела. fat12_write() после успешного изменения
+// зовёт fat12_flush(), которая пишет всю RAM-копию обратно через
+// ide_write_sector - изменения переживают перезапуск QEMU.
+
+#include "ide.h"
 
 #define FAT12_BASE 0x20000
+#define FAT12_TOTAL_SECTORS 128 // 64 КБ / 512 = TOTAL_SECTORS в make_fat12.py
 
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
@@ -40,6 +47,11 @@ struct fat12_dir_entry {
 
 static struct fat12_bpb* bpb = (struct fat12_bpb*)FAT12_BASE;
 
+// 1, если fat12_init() успешно загрузил валидный FAT12-том в RAM.
+// Публичные функции отказывают, пока том не загружен - иначе поля BPB
+// нулевые, и деление на bytes_per_sector/sectors_per_cluster вызовет #DE.
+static int fat12_ready = 0;
+
 // Защита от записи. По умолчанию диск заблокирован (только чтение) -
 // команды "unlock"/"lock" в shell переключают это состояние через
 // fat12_set_locked(). fat12_write() отказывает, пока диск заблокирован.
@@ -51,6 +63,36 @@ void fat12_set_locked(int locked) {
 
 int fat12_is_locked() {
     return fat12_locked;
+}
+
+// Загружает FAT12-том (LBA 0-127 на build/disk.img) через IDE в RAM по
+// FAT12_BASE. Возвращает 1, если все 128 секторов прочитаны и BPB похож на
+// валидный FAT12-том (bytes_per_sector == размеру сектора IDE), иначе 0.
+int fat12_init() {
+    for (unsigned int lba = 0; lba < FAT12_TOTAL_SECTORS; lba++) {
+        unsigned char* dst = (unsigned char*)FAT12_BASE + lba * IDE_SECTOR_SIZE;
+        if (!ide_read_sector(lba, dst)) {
+            fat12_ready = 0;
+            return 0;
+        }
+    }
+
+    if (bpb->bytes_per_sector != IDE_SECTOR_SIZE) {
+        fat12_ready = 0;
+        return 0;
+    }
+
+    fat12_ready = 1;
+    return 1;
+}
+
+// Записывает RAM-копию FAT12-тома обратно на build/disk.img (LBA 0-127),
+// делая изменения от fat12_write() персистентными между запусками QEMU.
+static void fat12_flush() {
+    for (unsigned int lba = 0; lba < FAT12_TOTAL_SECTORS; lba++) {
+        unsigned char* src = (unsigned char*)FAT12_BASE + lba * IDE_SECTOR_SIZE;
+        ide_write_sector(lba, src);
+    }
 }
 
 // Возвращает значение 12-битной записи FAT для кластера cluster
@@ -255,6 +297,8 @@ static unsigned int fat12_read_file(struct fat12_dir_entry* entry, unsigned char
 }
 
 void fat12_list() {
+    if (!fat12_ready) return;
+
     struct fat12_dir_entry* entries = (struct fat12_dir_entry*)((unsigned char*)FAT12_BASE + fat12_root_dir_offset());
 
     for (int i = 0; i < bpb->root_entries; i++) {
@@ -278,6 +322,8 @@ void fat12_list() {
 }
 
 int fat12_cat(char* filename) {
+    if (!fat12_ready) return 0;
+
     char name[8], ext[3];
     parse_83(filename, name, ext);
 
@@ -294,6 +340,8 @@ int fat12_cat(char* filename) {
 }
 
 unsigned int fat12_load(char* filename, unsigned char* buffer, unsigned int max_size) {
+    if (!fat12_ready) return 0;
+
     char name[8], ext[3];
     parse_83(filename, name, ext);
 
@@ -304,6 +352,7 @@ unsigned int fat12_load(char* filename, unsigned char* buffer, unsigned int max_
 }
 
 int fat12_write(char* filename, unsigned char* data, unsigned int size) {
+    if (!fat12_ready) return 0;
     if (fat12_locked) return 0;
 
     char name[8], ext[3];
@@ -327,7 +376,10 @@ int fat12_write(char* filename, unsigned char* data, unsigned int size) {
     entry->start_cluster = 0;
     entry->file_size = 0;
 
-    if (size == 0) return 1;
+    if (size == 0) {
+        fat12_flush();
+        return 1;
+    }
 
     unsigned int cluster_size = (unsigned int)bpb->sectors_per_cluster * bpb->bytes_per_sector;
     unsigned int num_clusters = (size + cluster_size - 1) / cluster_size;
@@ -339,5 +391,6 @@ int fat12_write(char* filename, unsigned char* data, unsigned int size) {
 
     entry->start_cluster = start;
     entry->file_size = size;
+    fat12_flush();
     return 1;
 }

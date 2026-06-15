@@ -697,6 +697,11 @@ void kernel_main() {
     init_tasking();
     task_create("heartbeat", heartbeat_task);
     task_create_user("ring3demo", ring3_spinner_task);
+
+    if (!fat12_init()) {
+        print_string("Warning: FAT12 disk (build/disk.img) not found - file commands disabled.\n");
+    }
+
     print_string("AxOS v0.5 [Interrupt Mode]\nAxOS> ");
 
     // БЕСКОНЕЧНЫЙ ЦИКЛ ОБЯЗАТЕЛЕН

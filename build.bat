@@ -93,11 +93,8 @@ copy /b build\boot.bin + build\kernel.bin build\os-image.bin
 echo Padding image to 1.44MB...
 powershell -Command "$file = 'build\os-image.bin'; $size = (Get-Item $file).Length; $padding = 1474560 - $size; if ($padding -gt 0) { $stream = [System.IO.File]::OpenWrite($file); $stream.Seek($size, 'Begin'); $stream.Write((New-Object byte[] $padding), 0, $padding); $stream.Close() }"
 
-echo Embedding FAT12 RAM-disk into image (offset 18432 = sector 36)...
-powershell -Command "$img = 'build\os-image.bin'; $fat = [System.IO.File]::ReadAllBytes('build\fat12.bin'); $stream = [System.IO.File]::OpenWrite($img); $stream.Seek(18432, 'Begin'); $stream.Write($fat, 0, $fat.Length); $stream.Close()"
-
-echo Creating IDE disk image (build/disk.img, 10MB) if missing...
-powershell -Command "$file = 'build\disk.img'; if (-not (Test-Path $file)) { $stream = [System.IO.File]::Create($file); $stream.SetLength(10485760); $stream.Close() }"
+echo Writing FAT12 filesystem into build/disk.img (first 64KB, LBA 0-127)...
+powershell -Command "$disk = 'build\disk.img'; $fat = [System.IO.File]::ReadAllBytes('build\fat12.bin'); $stream = [System.IO.File]::Open($disk, 'OpenOrCreate', 'Write'); $stream.Write($fat, 0, $fat.Length); if ($stream.Length -lt 10485760) { $stream.SetLength(10485760) }; $stream.Close()"
 
 echo Success!
 pause
