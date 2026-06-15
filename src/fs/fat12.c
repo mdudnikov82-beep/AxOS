@@ -97,6 +97,106 @@ static void parse_83(char* input, char* name, char* ext) {
     }
 }
 
+// Записывает значение value в 12-битную запись FAT для кластера cluster
+// (read-modify-write пары байт, см. set_fat_entry в tools/make_fat12.py)
+static void fat12_set_entry(unsigned int cluster, unsigned int value) {
+    unsigned char* fat = (unsigned char*)FAT12_BASE + (unsigned int)bpb->reserved_sectors * bpb->bytes_per_sector;
+    unsigned int offset = cluster + cluster / 2;
+
+    if (cluster & 1) {
+        fat[offset]     = (fat[offset] & 0x0F) | ((value & 0x0F) << 4);
+        fat[offset + 1] = (value >> 4) & 0xFF;
+    } else {
+        fat[offset]     = value & 0xFF;
+        fat[offset + 1] = (fat[offset + 1] & 0xF0) | ((value >> 8) & 0x0F);
+    }
+}
+
+// Общее количество кластеров данных. Валидные номера кластеров: 2..total+1
+static unsigned int fat12_total_clusters() {
+    unsigned int root_dir_sectors = (bpb->root_entries * 32) / bpb->bytes_per_sector;
+    unsigned int data_sectors = bpb->total_sectors - bpb->reserved_sectors
+        - (unsigned int)bpb->num_fats * bpb->sectors_per_fat - root_dir_sectors;
+    return data_sectors / bpb->sectors_per_cluster;
+}
+
+// Освобождает цепочку кластеров, начиная с start_cluster (обнуляет FAT-записи)
+static void fat12_free_chain(unsigned int start_cluster) {
+    unsigned int cluster = start_cluster;
+    while (cluster >= 2 && cluster < 0xFF8) {
+        unsigned int next = fat12_get_entry(cluster);
+        fat12_set_entry(cluster, 0);
+        cluster = next;
+    }
+}
+
+// Выделяет цепочку из num_clusters свободных кластеров, связывая их в FAT.
+// Возвращает номер первого кластера цепочки или 0, если свободных
+// кластеров не хватило (уже выделенное освобождается обратно).
+static unsigned int fat12_alloc_chain(unsigned int num_clusters) {
+    if (num_clusters == 0) return 0;
+
+    unsigned int total = fat12_total_clusters();
+    unsigned int first = 0;
+    unsigned int prev = 0;
+    unsigned int allocated = 0;
+
+    for (unsigned int c = 2; c <= total + 1 && allocated < num_clusters; c++) {
+        if (fat12_get_entry(c) == 0) {
+            if (prev != 0) {
+                fat12_set_entry(prev, c);
+            } else {
+                first = c;
+            }
+            prev = c;
+            allocated++;
+        }
+    }
+
+    if (allocated < num_clusters) {
+        if (first != 0) fat12_free_chain(first);
+        return 0;
+    }
+
+    fat12_set_entry(prev, 0xFFF); // конец цепочки
+    return first;
+}
+
+// Копирует data (size байт) по кластерам цепочки, начиная с start_cluster
+// (зеркало fat12_read_file, но запись)
+static void fat12_write_chain_data(unsigned int start_cluster, unsigned char* data, unsigned int size) {
+    unsigned int cluster_size = (unsigned int)bpb->sectors_per_cluster * bpb->bytes_per_sector;
+    unsigned char* data_area = (unsigned char*)FAT12_BASE + fat12_data_offset();
+
+    unsigned int cluster = start_cluster;
+    unsigned int written = 0;
+
+    while (cluster >= 2 && cluster < 0xFF8 && written < size) {
+        unsigned int chunk = cluster_size;
+        if (chunk > size - written) chunk = size - written;
+
+        unsigned char* dst = data_area + (cluster - 2) * cluster_size;
+        for (unsigned int i = 0; i < chunk; i++) {
+            dst[i] = data[written + i];
+        }
+
+        written += chunk;
+        cluster = fat12_get_entry(cluster);
+    }
+}
+
+// Ищет первую свободную запись корневой директории (удалённую или конец)
+static struct fat12_dir_entry* fat12_find_free_entry() {
+    struct fat12_dir_entry* entries = (struct fat12_dir_entry*)((unsigned char*)FAT12_BASE + fat12_root_dir_offset());
+
+    for (int i = 0; i < bpb->root_entries; i++) {
+        unsigned char first = (unsigned char)entries[i].name[0];
+        if (first == 0x00 || first == 0xE5) return &entries[i];
+    }
+
+    return 0;
+}
+
 // Ищет файл в корневой директории по имени в формате 8.3
 static struct fat12_dir_entry* fat12_find(char* name, char* ext) {
     struct fat12_dir_entry* entries = (struct fat12_dir_entry*)((unsigned char*)FAT12_BASE + fat12_root_dir_offset());
@@ -188,4 +288,41 @@ unsigned int fat12_load(char* filename, unsigned char* buffer, unsigned int max_
     if (!entry) return 0;
 
     return fat12_read_file(entry, buffer, max_size);
+}
+
+int fat12_write(char* filename, unsigned char* data, unsigned int size) {
+    char name[8], ext[3];
+    parse_83(filename, name, ext);
+
+    struct fat12_dir_entry* entry = fat12_find(name, ext);
+    if (!entry) {
+        entry = fat12_find_free_entry();
+        if (!entry) return 0; // корневая директория полна
+
+        for (int i = 0; i < 8; i++) entry->name[i] = name[i];
+        for (int i = 0; i < 3; i++) entry->ext[i] = ext[i];
+        entry->attr = 0x20; // ARCHIVE
+        for (int i = 0; i < 10; i++) entry->reserved[i] = 0;
+        entry->time = 0;
+        entry->date = 0;
+    } else if (entry->start_cluster != 0) {
+        fat12_free_chain(entry->start_cluster);
+    }
+
+    entry->start_cluster = 0;
+    entry->file_size = 0;
+
+    if (size == 0) return 1;
+
+    unsigned int cluster_size = (unsigned int)bpb->sectors_per_cluster * bpb->bytes_per_sector;
+    unsigned int num_clusters = (size + cluster_size - 1) / cluster_size;
+
+    unsigned int start = fat12_alloc_chain(num_clusters);
+    if (!start) return 0; // не хватило места на диске
+
+    fat12_write_chain_data(start, data, size);
+
+    entry->start_cluster = start;
+    entry->file_size = size;
+    return 1;
 }

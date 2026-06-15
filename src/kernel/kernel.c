@@ -1,5 +1,6 @@
 #include "keyboard.h" // Подключаем твои порты ввода-вывода и карту скан-кодов
-#include "../fs/fat12.h" // Read-only драйвер FAT12 для RAM-диска (конфиги/скрипты)
+#include "../fs/fat12.h" // Драйвер FAT12 для RAM-диска (конфиги/скрипты/файлы программ)
+#include "../user/syscall.h" // ABI системных вызовов, общий с ring3-программами
 #include "paging.h" // Защита памяти: paging + read-only код ядра
 #include "tss.h" // TSS: переключение стека ring3 -> ring0
 #include "heap.h" // kmalloc/kfree - простой кучевой аллокатор
@@ -34,6 +35,12 @@ extern void syscall_handler();
 extern void enter_usermode(void (*entry)(void)); // usermode.asm — переход в ring3
 int command_len = 0;
 char command_buffer[64];
+
+// Последний нажатый символ для SYS_READ_KEY (неблокирующее чтение
+// клавиатуры из ring3). Обновляется в keyboard_handler_main и
+// "потребляется" (обнуляется) при чтении - отдельный канал от
+// command_buffer, не мешает работе shell.
+volatile char last_key = 0;
 
 // Счётчик тиков таймера (PIT, IRQ0). При частоте 100 Гц растёт на 1 каждые 10 мс.
 volatile unsigned long timer_ticks = 0;
@@ -254,10 +261,37 @@ void sys_clear_screen(char* arg) {
     clear_screen();
 }
 
+// SYS_READ_KEY: неблокирующее чтение клавиатуры. ESI -> char, куда
+// записывается последний нажатый символ (0, если ничего не нажато
+// с прошлого опроса). Прочитанный символ "потребляется" - last_key
+// сбрасывается в 0.
+void sys_read_key(char* arg) {
+    if (arg) {
+        *arg = last_key;
+        last_key = 0;
+    }
+}
+
+// SYS_WRITE_FILE: ESI -> struct write_file_args
+void sys_write_file(char* arg) {
+    struct write_file_args* a = (struct write_file_args*)arg;
+    fat12_write(a->filename, a->data, a->size);
+}
+
+// SYS_READ_FILE: ESI -> struct read_file_args. Фактический размер
+// записывается обратно в a->out_size.
+void sys_read_file(char* arg) {
+    struct read_file_args* a = (struct read_file_args*)arg;
+    a->out_size = fat12_load(a->filename, a->buffer, a->max_size);
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01 — печать строки (ESI -> строка с '\0')
     sys_clear_screen,  // 0x02 — очистка экрана
+    sys_read_key,      // 0x03 — чтение клавиатуры (ESI -> char)
+    sys_write_file,    // 0x04 — запись файла (ESI -> struct write_file_args)
+    sys_read_file,     // 0x05 — чтение файла (ESI -> struct read_file_args)
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))
@@ -434,6 +468,7 @@ void execute_command(char* cmd) {
         print_string("  echo <text> - print text\n");
         print_string("  ls          - list files on FAT12 RAM-disk\n");
         print_string("  cat <file>  - show file contents\n");
+        print_string("  write <file> <text> - create/overwrite a file\n");
         print_string("  run <file>  - load and run a program from FAT12 (ring3)\n");
         print_string("  usermode    - demo: jump to ring3, call syscall via int 0x80\n");
         print_string("  memtest     - test heap allocator (malloc/free)\n");
@@ -470,6 +505,24 @@ void execute_command(char* cmd) {
     } else if (str_starts_with(cmd, "cat ")) {
         if (!fat12_cat(cmd + 4)) {
             print_string("File not found.\n");
+        }
+    } else if (str_starts_with(cmd, "write ")) {
+        char* filename = cmd + 6;
+        if (*filename == '\0') {
+            print_string("Usage: write <file> <text>\n");
+        } else {
+            char* text = filename;
+            while (*text != '\0' && *text != ' ') text++;
+            if (*text == ' ') { *text = '\0'; text++; }
+
+            unsigned int len = 0;
+            while (text[len] != '\0') len++;
+
+            if (fat12_write(filename, (unsigned char*)text, len)) {
+                print_string("Written.\n");
+            } else {
+                print_string("Write failed (disk full?).\n");
+            }
         }
     } else if (str_starts_with(cmd, "run ")) {
         unsigned int addr = USER_PROGRAM_BASE + next_user_slot * USER_PROGRAM_SLOT_SIZE;
@@ -509,6 +562,10 @@ void keyboard_handler_main() {
         // Нам нужны только нажатия клавиш
         if (scancode < 128) {
             char letter = scancode_to_char[scancode];
+
+            if (letter != 0) {
+                last_key = letter; // канал для SYS_READ_KEY (ring3)
+            }
 
             if (letter == '\n') {
                 command_buffer[command_len] = '\0';

@@ -13,4 +13,9 @@ int fat12_cat(char* filename);
 // или 0, если файл не найден.
 unsigned int fat12_load(char* filename, unsigned char* buffer, unsigned int max_size);
 
+// Создаёт или перезаписывает файл filename (имя в формате "name.ext")
+// содержимым data (size байт). Возвращает 1 при успехе, 0 если
+// корневая директория или место на диске заняты.
+int fat12_write(char* filename, unsigned char* data, unsigned int size);
+
 #endif
