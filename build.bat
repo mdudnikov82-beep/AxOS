@@ -47,6 +47,10 @@ echo Compiling Self-test (C)...
 gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/selftest.c -o build/selftest.o
 if %errorlevel% neq 0 goto :error
 
+echo Compiling VFS (C)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/vfs.c -o build/vfs.o
+if %errorlevel% neq 0 goto :error
+
 echo Compiling IDE driver (C)...
 gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/drivers/ide.c -o build/ide.o
 if %errorlevel% neq 0 goto :error
@@ -61,7 +65,7 @@ if %errorlevel% neq 0 goto :error
 
 echo Linking to PE...
 :: Линкуем в формат, который он понимает (i386pe)
-ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\ide.o build\syscalls.o build\usermode.o -o build\kernel.exe
+ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\vfs.o build\ide.o build\syscalls.o build\usermode.o -o build\kernel.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping to Binary...

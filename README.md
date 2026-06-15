@@ -70,7 +70,7 @@ qemu-system-i386 -drive format=raw,file=build\os-image.bin,if=floppy -boot a
 1. **`src/boot/boot.asm`** (грузится BIOS по адресу `0x7C00`, реальный
    режим):
    - переключает видеорежим в 80×25 текст;
-   - читает ядро (35 секторов = 17920 байт) с диска в память по адресу
+   - читает ядро (53 сектора = 27136 байт) с диска в память по адресу
      `0x1000`;
    - подключает `src/kernel/gdt.asm` (таблица GDT, включая дескрипторы
      ring3-кода/данных и TSS) и `src/boot/switch_to_pm.asm`;
@@ -283,7 +283,7 @@ LBA28-адресация. Без DMA и прерываний: чтение и з
 
 | Адрес              | Размер     | Назначение                                   |
 |--------------------|------------|-----------------------------------------------|
-| `0x1000`–`0x5600`  | ≤ 17920 Б  | `.text`/`.data`/`.bss` ядра (`kernel.bin`), read-only после `init_paging()` |
+| `0x1000`–`0x7A00`  | ≤ 27136 Б  | `.text`/`.data`/`.bss` ядра (`kernel.bin`), read-only после `init_paging()` |
 | `0x20000`–`0x30000`| 64 КБ      | RAM-копия FAT12-тома (`fat12_init`/`fat12_flush` через IDE с `build/disk.img`) |
 | `0x30000`–`0x90000`| 384 КБ     | Куча (`malloc`/`free`)                         |
 | `0x90000`          | ↓ растёт вниз | Стек ядра (начальный `esp`, он же `ESP0` в TSS) |
@@ -351,6 +351,9 @@ LBA28-адресация. Без DMA и прерываний: чтение и з
   (`task_create`, `task_create_user`, `schedule`).
 - `src/kernel/selftest.c`/`selftest.h` — регрессионные тесты heap/paging/FAT12
   (команда `selftest`, `run_self_tests`).
+- `src/kernel/vfs.c`/`vfs.h` — тонкий VFS-слой (vtable `vfs_driver_t`):
+  `kernel.c`/`selftest.c` обращаются к `vfs_*`, единственный
+  зарегистрированный драйвер - FAT12.
 - `src/fs/fat12.c`/`fat12.h` — драйвер FAT12-тома на `build/disk.img`
   (`fat12_init`/`fat12_flush` через IDE, чтение и запись).
 - `src/drivers/ide.c`/`ide.h` — PIO-драйвер ATA/IDE (primary master, LBA28),
@@ -466,9 +469,16 @@ QEMU запускает образ как floppy (`-drive format=raw,file=build\
     `SELFTEST: FAILED`. `tools/regression_test.py` гоняет `selftest` в QEMU
     и проверяет итоговую строку — отдельный шаг CI "Regression tests in
     QEMU".
+  - ✅ минимальный VFS-слой (`src/kernel/vfs.c`/`vfs.h`): vtable
+    `vfs_driver_t` (`init`/`is_ready`/`is_locked`/`set_locked`/`list`/`cat`/
+    `read`/`write`), один глобальный `vfs_root`, привязанный к FAT12.
+    `kernel.c` и `selftest.c` обращаются только к `vfs_*`, не зная про
+    `fat12_*` напрямую — логика FAT12 не менялась. Без путей и
+    mount-point'ов: один драйвер, имена файлов в формате "name.ext".
 
 - **Долгосрочно:**
-  - VFS-слой над несколькими файловыми системами.
+  - многодрайверная VFS с путями и mount-point'ами — если/когда появится
+    вторая файловая система.
 
 ## Контрибьюции
 
@@ -488,7 +498,7 @@ QEMU запускает образ как floppy (`-drive format=raw,file=build\
   (см. флаги в `build.bat`). Без libc — только то, что реализовано в самом
   ядре.
 - Перед PR: убедитесь, что `build.bat` проходит без ошибок и `kernel.bin`
-  не превышает 17920 байт (лимит — 35 секторов, которые грузит `boot.asm`).
+  не превышает 27136 байт (лимит — 53 сектора, которые грузит `boot.asm`).
 
 ### PR: оформление и чек-лист ревью
 
@@ -511,7 +521,7 @@ QEMU запускает образ как floppy (`-drive format=raw,file=build\
   `build.bat` сам добавляет `w64devkit\bin` в `PATH`.
 
 ### `kernel.bin` слишком большой / `boot.bin` не грузит ядро целиком
-- `boot.asm` читает с диска ровно 35 секторов (17920 байт) под ядро. Если
+- `boot.asm` читает с диска ровно 53 сектора (27136 байт) под ядро. Если
   `build\kernel.bin` больше — урежьте код/данные или увеличьте число секторов
   в `boot.asm`.
 

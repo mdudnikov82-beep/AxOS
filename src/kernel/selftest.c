@@ -2,12 +2,12 @@
 //  Регрессионные тесты: heap, paging, FAT12 (команда shell "selftest")
 // =================================================================
 //
-// "Кнопка проверить всё" перед дальнейшими изменениями (VFS и т.д.):
+// "Кнопка проверить всё" перед дальнейшими изменениями:
 // прогоняет существующий тест кучи (memtest_demo из kernel.c), проверяет
 // биты CR0 и записи таблицы страниц после init_paging(), и читает/пишет
-// FAT12-том на build/disk.img (если он подключён).
+// FAT12-том на build/disk.img (если он подключён) через VFS-интерфейс.
 
-#include "../fs/fat12.h"
+#include "vfs.h"
 
 #define PAGE_PRESENT 0x1
 #define PAGE_RW      0x2
@@ -59,24 +59,24 @@ static unsigned char fat12_test_buf[1100];
 static unsigned char fat12_test_readback[1100];
 
 static int test_fat12() {
-    if (!fat12_is_ready()) {
+    if (!vfs_is_ready()) {
         print_string("FAT12: SKIP (disk not ready)\n");
         return 1;
     }
 
-    int was_locked = fat12_is_locked();
-    fat12_set_locked(0);
+    int was_locked = vfs_is_locked();
+    vfs_set_locked(0);
     int ok = 1;
 
     // Тест 1: один кластер.
     char* msg = "AxOS selftest\n";
     unsigned int msg_len = 14;
-    if (!fat12_write("SELFTST.TXT", (unsigned char*)msg, msg_len)) {
-        print_string("  FAIL: fat12_write (single cluster) failed\n");
+    if (!vfs_write("SELFTST.TXT", (unsigned char*)msg, msg_len)) {
+        print_string("  FAIL: vfs_write (single cluster) failed\n");
         ok = 0;
     } else {
         unsigned char readback[32];
-        unsigned int read_len = fat12_load("SELFTST.TXT", readback, sizeof(readback));
+        unsigned int read_len = vfs_read("SELFTST.TXT", readback, sizeof(readback));
         if (read_len != msg_len || !buf_eq(readback, (unsigned char*)msg, msg_len)) {
             print_string("  FAIL: single-cluster read-back mismatch\n");
             ok = 0;
@@ -87,11 +87,11 @@ static int test_fat12() {
     for (unsigned int i = 0; i < sizeof(fat12_test_buf); i++) {
         fat12_test_buf[i] = (unsigned char)(i & 0xFF);
     }
-    if (!fat12_write("SELFTST.TXT", fat12_test_buf, sizeof(fat12_test_buf))) {
-        print_string("  FAIL: fat12_write (multi-cluster) failed\n");
+    if (!vfs_write("SELFTST.TXT", fat12_test_buf, sizeof(fat12_test_buf))) {
+        print_string("  FAIL: vfs_write (multi-cluster) failed\n");
         ok = 0;
     } else {
-        unsigned int read_len = fat12_load("SELFTST.TXT", fat12_test_readback, sizeof(fat12_test_readback));
+        unsigned int read_len = vfs_read("SELFTST.TXT", fat12_test_readback, sizeof(fat12_test_readback));
         if (read_len != sizeof(fat12_test_buf) || !buf_eq(fat12_test_readback, fat12_test_buf, sizeof(fat12_test_buf))) {
             print_string("  FAIL: multi-cluster read-back mismatch\n");
             ok = 0;
@@ -99,13 +99,13 @@ static int test_fat12() {
     }
 
     // Тест 3: запись должна отказывать, пока диск заблокирован.
-    fat12_set_locked(1);
-    if (fat12_write("SELFTST.TXT", (unsigned char*)msg, msg_len)) {
-        print_string("  FAIL: fat12_write succeeded while disk locked\n");
+    vfs_set_locked(1);
+    if (vfs_write("SELFTST.TXT", (unsigned char*)msg, msg_len)) {
+        print_string("  FAIL: vfs_write succeeded while disk locked\n");
         ok = 0;
     }
 
-    fat12_set_locked(was_locked);
+    vfs_set_locked(was_locked);
 
     if (ok) {
         print_string("FAT12: PASS\n");

@@ -1,5 +1,5 @@
 #include "keyboard.h" // Подключаем твои порты ввода-вывода и карту скан-кодов
-#include "../fs/fat12.h" // Драйвер FAT12 для RAM-диска (конфиги/скрипты/файлы программ)
+#include "vfs.h" // VFS: тонкий слой перенаправления к драйверу ФС (сейчас - FAT12)
 #include "../user/syscall.h" // ABI системных вызовов, общий с ring3-программами
 #include "ide.h" // PIO-драйвер ATA/IDE (build/disk.img - настоящий диск)
 #include "paging.h" // Защита памяти: paging + read-only код ядра
@@ -304,14 +304,14 @@ void sys_read_key(char* arg) {
 // SYS_WRITE_FILE: ESI -> struct write_file_args
 void sys_write_file(char* arg) {
     struct write_file_args* a = (struct write_file_args*)arg;
-    fat12_write(a->filename, a->data, a->size);
+    vfs_write(a->filename, a->data, a->size);
 }
 
 // SYS_READ_FILE: ESI -> struct read_file_args. Фактический размер
 // записывается обратно в a->out_size.
 void sys_read_file(char* arg) {
     struct read_file_args* a = (struct read_file_args*)arg;
-    a->out_size = fat12_load(a->filename, a->buffer, a->max_size);
+    a->out_size = vfs_read(a->filename, a->buffer, a->max_size);
 }
 
 syscall_fn syscall_table[] = {
@@ -514,7 +514,7 @@ void execute_command(char* cmd) {
     } else if (str_eq(cmd, "about")) {
         print_string("AxOS v0.5 - hobby OS in C and x86 Assembly\n");
         print_string("FAT12 disk: ");
-        print_string(fat12_is_locked() ? "locked (read-only)\n" : "unlocked (read-write)\n");
+        print_string(vfs_is_locked() ? "locked (read-only)\n" : "unlocked (read-write)\n");
     } else if (str_eq(cmd, "date") || str_eq(cmd, "time")) {
         print_datetime();
     } else if (str_eq(cmd, "uptime")) {
@@ -539,16 +539,16 @@ void execute_command(char* cmd) {
         print_string(cmd + 5);
         print_string("\n");
     } else if (str_eq(cmd, "ls")) {
-        fat12_list();
+        vfs_list();
     } else if (str_starts_with(cmd, "cat ")) {
-        if (!fat12_cat(cmd + 4)) {
+        if (!vfs_cat(cmd + 4)) {
             print_string("File not found.\n");
         }
     } else if (str_starts_with(cmd, "write ")) {
         char* filename = cmd + 6;
         if (*filename == '\0') {
             print_string("Usage: write <file> <text>\n");
-        } else if (fat12_is_locked()) {
+        } else if (vfs_is_locked()) {
             print_string("Disk is locked. Use 'unlock' to enable writes.\n");
         } else {
             char* text = filename;
@@ -558,21 +558,21 @@ void execute_command(char* cmd) {
             unsigned int len = 0;
             while (text[len] != '\0') len++;
 
-            if (fat12_write(filename, (unsigned char*)text, len)) {
+            if (vfs_write(filename, (unsigned char*)text, len)) {
                 print_string("Written.\n");
             } else {
                 print_string("Write failed (disk full?).\n");
             }
         }
     } else if (str_eq(cmd, "lock")) {
-        fat12_set_locked(1);
+        vfs_set_locked(1);
         print_string("FAT12 disk locked (read-only).\n");
     } else if (str_eq(cmd, "unlock")) {
-        fat12_set_locked(0);
+        vfs_set_locked(0);
         print_string("FAT12 disk unlocked (read-write).\n");
     } else if (str_starts_with(cmd, "run ")) {
         unsigned int addr = USER_PROGRAM_BASE + next_user_slot * USER_PROGRAM_SLOT_SIZE;
-        unsigned int size = fat12_load(cmd + 4, (unsigned char*)addr, USER_PROGRAM_SLOT_SIZE);
+        unsigned int size = vfs_read(cmd + 4, (unsigned char*)addr, USER_PROGRAM_SLOT_SIZE);
         if (size == 0) {
             print_string("File not found.\n");
         } else {
@@ -703,7 +703,7 @@ void kernel_main() {
     task_create("heartbeat", heartbeat_task);
     task_create_user("ring3demo", ring3_spinner_task);
 
-    if (!fat12_init()) {
+    if (!vfs_init()) {
         print_string("Warning: FAT12 disk (build/disk.img) not found - file commands disabled.\n");
     }
 
