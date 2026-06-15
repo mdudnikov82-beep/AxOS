@@ -8,6 +8,8 @@
 // помечаются как read-only — после включения CR0.WP даже код ring0
 // не сможет записать в них (случайно или намеренно).
 
+#include "paging.h"
+
 #define PAGE_PRESENT 0x1
 #define PAGE_RW      0x2
 #define PAGE_USER    0x4
@@ -17,9 +19,7 @@
 // адресам в свободной области между стеком (растёт вниз от 0x90000) и
 // видеопамятью (0xA0000), а не как статические массивы в .bss. Так размер
 // kernel.bin не растёт на 8 КБ и не выходит за пределы региона, который
-// boot.asm грузит с диска.
-#define PAGE_DIRECTORY ((unsigned int*)0x9C000)
-#define PAGE_TABLE     ((unsigned int*)0x9D000)
+// boot.asm грузит с диска. См. PAGE_DIRECTORY/PAGE_TABLE в paging.h.
 
 extern void print_string(char* str);
 extern char _text_end[]; // GCC: __text_end из kernel.ld
@@ -53,6 +53,38 @@ void init_paging() {
         "mov %%eax, %%cr0\n"
         :: "r"(page_directory) : "eax"
     );
+}
+
+// Виртуальное окно [0x100000, 0x108000) - 8 страниц (32 КБ ==
+// USER_PROGRAM_SLOT_SIZE в kernel.c), куда переотображается физический слот
+// изолированной задачи.
+#define USER_WINDOW_BASE  0x100000
+#define USER_WINDOW_PAGES 8
+
+unsigned int paging_create_user_directory(int user_slot_index, unsigned int phys_slot_base) {
+    unsigned int* src_table = PAGE_TABLE;
+    unsigned int* dst_table = (unsigned int*)(PT_POOL_BASE + (unsigned int)user_slot_index * PAGE_SIZE);
+    unsigned int* dst_dir   = (unsigned int*)(PD_POOL_BASE + (unsigned int)user_slot_index * PAGE_SIZE);
+
+    // Копия глобальной PT, но без PAGE_USER - ring3 этой задачи по
+    // умолчанию не видит ничего (kernel-only).
+    for (unsigned int i = 0; i < 1024; i++) {
+        dst_table[i] = src_table[i] & ~(unsigned int)PAGE_USER;
+    }
+
+    // Окно 0x100000-0x108000 -> физический слот этой задачи, PRESENT|RW|USER.
+    unsigned int first_page = USER_WINDOW_BASE / PAGE_SIZE;
+    for (unsigned int i = 0; i < USER_WINDOW_PAGES; i++) {
+        unsigned int addr = phys_slot_base + i * PAGE_SIZE;
+        dst_table[first_page + i] = addr | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+    }
+
+    dst_dir[0] = ((unsigned int)dst_table) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+    for (unsigned int i = 1; i < 1024; i++) {
+        dst_dir[i] = 0;
+    }
+
+    return (unsigned int)dst_dir;
 }
 
 static void print_hex(unsigned int val) {

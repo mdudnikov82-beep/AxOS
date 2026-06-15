@@ -15,6 +15,7 @@
 
 #include "heap.h"
 #include "tss.h"
+#include "paging.h"
 
 #define TASK_STACK_SIZE 4096
 // 4096, а не меньше: если IRQ (клавиатура/таймер) застаёт ring3-задачу
@@ -30,6 +31,7 @@
 typedef struct task {
     unsigned int esp;
     unsigned int kernel_stack_top; // ESP0 этой задачи (для ring3->ring0)
+    unsigned int page_directory;   // CR3 этой задачи (PAGE_DIRECTORY или приватный PD)
     int id;
     char name[MAX_NAME_LEN];
     unsigned long ticks;
@@ -59,6 +61,7 @@ void init_tasking() {
     task0.id = next_id++;
     copy_name(task0.name, "shell");
     task0.ticks = 0;
+    task0.page_directory = (unsigned int)PAGE_DIRECTORY;
     task0.next = &task0;
 
     // Отдельный стек ядра для task0: НЕ совпадает с её "живым" стеком
@@ -97,6 +100,7 @@ void task_create(char* name, void (*entry)(void)) {
     new_task->id = next_id++;
     copy_name(new_task->name, name);
     new_task->ticks = 0;
+    new_task->page_directory = (unsigned int)PAGE_DIRECTORY;
 
     // Свой стек ядра (ESP0) для единообразия - schedule() обновляет
     // TSS.ESP0 для каждой задачи, даже если она остаётся в ring0.
@@ -142,6 +146,47 @@ void task_create_user(char* name, void (*entry)(void)) {
     new_task->id = next_id++;
     copy_name(new_task->name, name);
     new_task->ticks = 0;
+    new_task->page_directory = (unsigned int)PAGE_DIRECTORY;
+
+    new_task->next = current_task->next;
+    current_task->next = new_task;
+}
+
+// Виртуальные адреса окна 0x100000-0x108000 - см. paging_create_user_directory.
+#define USER_WINDOW_BASE 0x100000
+#define USER_WINDOW_TOP  0x108000
+
+void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index) {
+    unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
+    if (!kstack) return;
+
+    task_t* new_task = (task_t*)malloc(sizeof(task_t));
+    if (!new_task) return;
+
+    // Кадр ring3->ring0, как в task_create_user, но EIP/ESP - виртуальные
+    // адреса окна 0x100000-0x108000 (одинаковые для любой задачи: окно
+    // переотображается на физический слот этой задачи в её приватном PD).
+    unsigned int* sp = (unsigned int*)(kstack + KSTACK_SIZE);
+    *(--sp) = USER_DATA_SEG | 3;     // SS
+    *(--sp) = USER_WINDOW_TOP;       // ESP: верх окна, стек растёт вниз
+    *(--sp) = 0x202;                 // EFLAGS: IF=1
+    *(--sp) = USER_CODE_SEG | 3;     // CS
+    *(--sp) = USER_WINDOW_BASE;      // EIP: начало окна
+    *(--sp) = 0; // EAX
+    *(--sp) = 0; // ECX
+    *(--sp) = 0; // EDX
+    *(--sp) = 0; // EBX
+    *(--sp) = 0; // ESP - игнорируется popa
+    *(--sp) = 0; // EBP
+    *(--sp) = 0; // ESI
+    *(--sp) = 0; // EDI
+
+    new_task->esp = (unsigned int)sp;
+    new_task->kernel_stack_top = (unsigned int)(kstack + KSTACK_SIZE);
+    new_task->id = next_id++;
+    copy_name(new_task->name, name);
+    new_task->ticks = 0;
+    new_task->page_directory = paging_create_user_directory(user_slot_index, phys_slot_base);
 
     new_task->next = current_task->next;
     current_task->next = new_task;
@@ -152,12 +197,20 @@ unsigned int schedule(unsigned int current_esp) {
 
     current_task->esp = current_esp;
     current_task->ticks++;
+    unsigned int prev_page_directory = current_task->page_directory;
     current_task = current_task->next;
 
     // У каждой задачи свой стек для ring3->ring0 переходов (IRQ/syscall
     // во время выполнения этой задачи) - без этого общий ESP0 пересекался
     // бы с "живым" стеком задачи, которая ушла в ring3 (см. tss.c).
     tss_set_esp0(current_task->kernel_stack_top);
+
+    // Изолированные задачи (task_create_user_isolated) имеют свой
+    // page_directory - переключаем CR3, только если он изменился
+    // (иначе лишний flush TLB на каждый тик для не-изолированных задач).
+    if (current_task->page_directory != prev_page_directory) {
+        __asm__ volatile("mov %0, %%cr3" :: "r"(current_task->page_directory));
+    }
 
     return current_task->esp;
 }

@@ -576,7 +576,7 @@ void execute_command(char* cmd) {
         if (size == 0) {
             print_string("File not found.\n");
         } else {
-            task_create_user(cmd + 4, (void (*)(void))addr);
+            task_create_user_isolated(cmd + 4, addr, next_user_slot);
             next_user_slot = (next_user_slot + 1) % USER_PROGRAM_SLOTS;
             print_string("Started.\n");
         }

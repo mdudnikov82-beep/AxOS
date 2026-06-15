@@ -20,6 +20,14 @@ void task_create(char* name, void (*entry)(void));
 // (используется как TSS.ESP0 при прерываниях/syscall из этой задачи).
 void task_create_user(char* name, void (*entry)(void));
 
+// Создаёт изолированную ring3-задачу для команды "run" (kernel.c):
+// у задачи свой Page Directory (paging_create_user_directory), в котором
+// виртуальное окно 0x100000-0x108000 переотображено на физический слот
+// phys_slot_base..+0x8000 - код, данные и стек задачи (ESP стартует с
+// 0x108000) живут только в этом окне. user_slot_index (0..
+// USER_PROGRAM_SLOTS-1) выбирает пару PD/PT из пула paging.h.
+void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index);
+
 // Вызывается из idt.asm при каждом IRQ0: сохраняет esp текущей задачи,
 // переключается на следующую по кольцу и возвращает её esp.
 unsigned int schedule(unsigned int current_esp);
