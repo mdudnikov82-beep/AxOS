@@ -16,10 +16,15 @@ keyboard_interrupt_handler:
     cld             ; <--- Очищаем флаг направления (важно для работы Си!)
     pusha           ; Сохраняем все регистры
 
-    call _keyboard_handler_main
-
+    ; EOI отправляем ДО вызова обработчика: keyboard_handler_main может
+    ; выполнить команду "usermode", которая уходит в ring3 через iretd
+    ; и сюда уже не возвращается. Если бы EOI отправлялся после call,
+    ; PIC считал бы IRQ1 "в обработке" навсегда, и клавиатура умирала
+    ; бы после первого "usermode".
     mov al, 0x20    ; EOI
     out 0x20, al
+
+    call _keyboard_handler_main
 
     popa            ; Восстанавливаем регистры
     iret            ; Выход из прерывания
