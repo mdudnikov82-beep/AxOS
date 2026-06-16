@@ -78,6 +78,7 @@ static int kernel_shell_inhibited = 0;
 // foreground_slot == -1: нет активного foreground-процесса (Ctrl+C игнорируется).
 static int ctrl_held       = 0;
 static int shift_held      = 0;
+static int e0_prefix       = 0;
 static int foreground_slot = -1;
 
 // Счётчик тиков таймера (PIT, IRQ0). При частоте 100 Гц растёт на 1 каждые 10 мс.
@@ -998,6 +999,17 @@ void keyboard_handler_main() {
         // Shift (левый 0x2A/0xAA, правый 0x36/0xB6)
         if (scancode == 0x2A || scancode == 0x36) { shift_held = 1; return; }
         if (scancode == 0xAA || scancode == 0xB6) { shift_held = 0; return; }
+
+        // Расширенные клавиши: E0-префикс, затем скан-код.
+        // Стрелка вверх = E0 0x48, вниз = E0 0x50.
+        // Передаём как спецсимволы 0x11/0x12 в last_key для ax_readkey().
+        if (scancode == 0xE0) { e0_prefix = 1; return; }
+        if (e0_prefix) {
+            e0_prefix = 0;
+            if (scancode == 0x48) last_key = '\x11';  // стрелка вверх
+            if (scancode == 0x50) last_key = '\x12';  // стрелка вниз
+            return;
+        }
 
         // Нам нужны только нажатия клавиш
         if (scancode < 128) {
