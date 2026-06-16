@@ -35,5 +35,6 @@ int ax_readdir(struct readdir_args* a);
 void ax_putchar(char c);
 void ax_print_uint(unsigned int n);
 int  ax_readline(char* buf, int max);  // блокирующее чтение строки с клавиатуры
+void ax_printf(const char* fmt, ...);  // %s %d %u %x %c %%
 
 #endif
