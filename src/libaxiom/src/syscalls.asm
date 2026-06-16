@@ -25,6 +25,7 @@ global _ax_set_foreground
 global _ax_get_ticks
 global _ax_sleep_ms
 global _ax_readdir
+global _ax_sbrk
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -277,6 +278,25 @@ _ax_sleep_ms:
     mov ah, 0x10            ; SYS_SLEEP
     int 0x80
     add esp, 4
+    pop ebx
+    pop esi
+    ret
+
+; void* ax_sbrk(int increment)
+; Строит struct sbrk_args { increment, result=0 } на стеке.
+; Возвращает result (старый break) или (unsigned int)-1 при ошибке.
+_ax_sbrk:
+    push esi
+    push ebx
+    ; после двух push: [esp+12] = increment
+    mov eax, [esp+12]
+    push dword 0            ; struct.result = 0  (offset 4)
+    push eax                ; struct.increment   (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x12            ; SYS_SBRK
+    int 0x80
+    mov eax, [esp+4]        ; result (offset 4)
+    add esp, 8
     pop ebx
     pop esi
     ret
