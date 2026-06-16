@@ -1006,10 +1006,13 @@ void keyboard_handler_main() {
         if (scancode == 0xE0) { e0_prefix = 1; return; }
         if (e0_prefix) {
             e0_prefix = 0;
-            if (scancode == 0x48) last_key = '\x11';  // стрелка вверх
-            if (scancode == 0x50) last_key = '\x12';  // стрелка вниз
+            if (scancode == 0x48) last_key = '\x11';  // стрелка вверх (E0 path)
+            if (scancode == 0x50) last_key = '\x12';  // стрелка вниз  (E0 path)
             return;
         }
+        // Фоллбэк: если QEMU/SDL шлёт 0x48/0x50 без E0-префикса
+        if (scancode == 0x48) { last_key = '\x11'; return; }
+        if (scancode == 0x50) { last_key = '\x12'; return; }
 
         // Нам нужны только нажатия клавиш
         if (scancode < 128) {
