@@ -21,9 +21,8 @@ int main(int argc, char** argv) {
         ax_readdir(&a);
         if (!a.result) break;
 
-        print_padded(a.name, 14);
-        ax_print_uint(a.size);
-        ax_print(" bytes\n");
+        print_padded(a.name, 13);
+        ax_printf("  %7u B\n", a.size);
 
         total += a.size;
         count++;
@@ -36,7 +35,7 @@ int main(int argc, char** argv) {
         ax_print_uint(count);
         ax_print(" file(s), ");
         ax_print_uint(total);
-        ax_print(" bytes total\n");
+        ax_print(" B total\n");
     }
     return 0;
 }
