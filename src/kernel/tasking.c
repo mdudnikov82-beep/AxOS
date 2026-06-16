@@ -305,6 +305,12 @@ void print_task_list() {
     } while (t != current_task);
 }
 
+// Возвращает user_slot_index текущей задачи (-1 если не изолирована).
+int task_current_slot_index() {
+    if (!current_task) return -1;
+    return current_task->user_slot_index;
+}
+
 // Ищет изолированную задачу по слоту и помечает её exiting.
 // Вызывается из keyboard_handler_main при Ctrl+C.
 void task_kill_by_slot(int slot) {
