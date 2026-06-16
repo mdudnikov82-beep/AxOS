@@ -540,6 +540,20 @@ void sys_set_foreground(char* arg) {
     foreground_slot = a->slot;
 }
 
+// SYS_GET_TICKS: возвращает текущее значение timer_ticks (100 Гц).
+// Секунды от загрузки = result / 100.
+void sys_get_ticks(char* arg) {
+    struct get_ticks_args* a = (struct get_ticks_args*)arg;
+    a->result = (unsigned int)timer_ticks;
+}
+
+// SYS_SLEEP: блокирует вызывающую задачу на ms миллисекунд.
+// sleep_ms включает прерывания через sti — другие задачи получают CPU во время ожидания.
+void sys_sleep(char* arg) {
+    struct sleep_args* a = (struct sleep_args*)arg;
+    sleep_ms((unsigned long)a->ms);
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01
@@ -556,6 +570,8 @@ syscall_fn syscall_table[] = {
     sys_task_alive,    // 0x0C
     sys_shell_claim,   // 0x0D
     sys_set_foreground,// 0x0E
+    sys_get_ticks,     // 0x0F
+    sys_sleep,         // 0x10
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))

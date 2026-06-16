@@ -22,6 +22,8 @@ global _ax_exec
 global _ax_task_alive
 global _ax_shell_claim
 global _ax_set_foreground
+global _ax_get_ticks
+global _ax_sleep_ms
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -241,6 +243,37 @@ _ax_set_foreground:
     push eax                ; struct.slot  <- esp = &struct
     mov esi, esp
     mov ah, 0x0E            ; SYS_SET_FOREGROUND
+    int 0x80
+    add esp, 4
+    pop ebx
+    pop esi
+    ret
+
+; unsigned int ax_get_ticks(void)
+; Строит struct get_ticks_args { result=0 } на стеке; ядро пишет timer_ticks.
+_ax_get_ticks:
+    push esi
+    push ebx
+    push dword 0            ; struct.result = 0  <- esp = &struct
+    mov esi, esp
+    mov ah, 0x0F            ; SYS_GET_TICKS
+    int 0x80
+    mov eax, [esp]          ; result (offset 0)
+    add esp, 4
+    pop ebx
+    pop esi
+    ret
+
+; void ax_sleep_ms(unsigned int ms)
+; Строит struct sleep_args { ms } на стеке; ядро вызывает sleep_ms(ms).
+_ax_sleep_ms:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=ms
+    mov eax, [esp+12]
+    push eax                ; struct.ms  <- esp = &struct
+    mov esi, esp
+    mov ah, 0x10            ; SYS_SLEEP
     int 0x80
     add esp, 4
     pop ebx

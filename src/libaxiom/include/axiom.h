@@ -23,6 +23,10 @@ int  ax_task_alive(int slot);      // 1 = ещё работает, 0 = заве�
 void ax_shell_claim(int claim);    // 1 = захватить клавиатуру, 0 = вернуть ядру
 void ax_set_foreground(int slot);  // slot >= 0: Ctrl+C убьёт эту задачу; -1: сброс
 
+// Системное время
+unsigned int ax_get_ticks(void);         // тики с момента загрузки (100 Гц)
+void         ax_sleep_ms(unsigned int ms); // sleep ms миллисекунд (другие задачи получают CPU)
+
 // Уровень stdio (реализован в stdio.c)
 void ax_putchar(char c);
 void ax_print_uint(unsigned int n);

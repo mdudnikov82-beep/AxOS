@@ -76,4 +76,15 @@ struct set_fg_args {
     int slot;
 };
 
+#define SYS_GET_TICKS 0x0F
+#define SYS_SLEEP     0x10
+
+struct get_ticks_args {
+    unsigned int result;
+};
+
+struct sleep_args {
+    unsigned int ms;
+};
+
 #endif

@@ -14,6 +14,7 @@
 #define SYS_WRITE_FILE   0x04 // ESI -> struct write_file_args
 #define SYS_READ_FILE    0x05 // ESI -> struct read_file_args
 #define SYS_EXIT         0x06 // ESI не используется - текущая задача завершается
+#define SYS_GET_TICKS    0x0F // ESI -> struct get_ticks_args
 
 // Аргумент SYS_WRITE_FILE: создаёт/перезаписывает файл filename
 // содержимым data (size байт).
@@ -94,6 +95,21 @@ struct task_alive_args {
 
 struct set_fg_args {
     int slot;
+};
+
+// --- Системное время (0x0F-0x10) ---
+#define SYS_GET_TICKS 0x0F  // ESI -> struct get_ticks_args
+#define SYS_SLEEP     0x10  // ESI -> struct sleep_args
+
+// Возвращает timer_ticks (100 Гц с момента загрузки).
+// Секунды = result / 100; мс ≈ result * 10.
+struct get_ticks_args {
+    unsigned int result;
+};
+
+// Блокирует вызывающую задачу на ms миллисекунд (другие задачи получают CPU).
+struct sleep_args {
+    unsigned int ms;
 };
 
 #endif
