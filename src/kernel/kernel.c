@@ -487,6 +487,17 @@ void sys_exec(char* arg) {
     filename[fi] = '\0';
     if (fi == 0) return;
 
+    // Если в имени нет точки — подставляем ".bin" (ls → ls.bin)
+    int has_dot = 0;
+    for (int i = 0; i < fi; i++) if (filename[i] == '.') { has_dot = 1; break; }
+    if (!has_dot && fi <= 19) {
+        filename[fi++] = '.';
+        filename[fi++] = 'b';
+        filename[fi++] = 'i';
+        filename[fi++] = 'n';
+        filename[fi]   = '\0';
+    }
+
     int slot = -1;
     for (int i = 0; i < USER_PROGRAM_SLOTS; i++) {
         if (slot_free[i]) { slot = i; break; }
