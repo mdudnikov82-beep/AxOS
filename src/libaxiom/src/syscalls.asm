@@ -26,6 +26,7 @@ global _ax_get_ticks
 global _ax_sleep_ms
 global _ax_readdir
 global _ax_sbrk
+global _ax_ps
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -297,6 +298,21 @@ _ax_sbrk:
     int 0x80
     mov eax, [esp+4]        ; result (offset 4)
     add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; int ax_ps(struct ps_entry* e)
+; ESI = указатель на struct ps_entry (передаётся напрямую).
+; Возвращает e->result (1=найдена, 0=конец).
+; Раскладка struct: index(0) pid(4) name[16](8) ticks(24) slot(28) heap_brk(32) result(36)
+_ax_ps:
+    push esi
+    push ebx
+    mov esi, [esp+12]       ; ESI -> struct ps_entry
+    mov ah, 0x13            ; SYS_PS
+    int 0x80
+    mov eax, [esi+36]       ; e->result (offset 36)
     pop ebx
     pop esi
     ret

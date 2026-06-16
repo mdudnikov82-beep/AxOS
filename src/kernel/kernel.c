@@ -581,6 +581,15 @@ void sys_readdir(char* arg) {
     a->result = vfs_readdir(a->index, a->name, &a->size);
 }
 
+void sys_ps(char* arg) {
+    struct ps_entry* e = (struct ps_entry*)arg;
+    e->result = task_get_info(e->index, &e->pid, e->name, &e->ticks, &e->slot);
+    if (e->result && e->slot >= 0 && e->slot < USER_PROGRAM_SLOTS)
+        e->heap_brk = slot_heap_brk[e->slot];
+    else
+        e->heap_brk = 0;
+}
+
 // SYS_SBRK: сдвигает heap break задачи на increment байт вперёд.
 // Возвращает старый break (начало выделенного региона) или -1 при переполнении.
 void sys_sbrk(char* arg) {
@@ -618,6 +627,7 @@ syscall_fn syscall_table[] = {
     sys_sleep,         // 0x10
     sys_readdir,       // 0x11
     sys_sbrk,          // 0x12
+    sys_ps,            // 0x13
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))

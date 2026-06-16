@@ -44,12 +44,22 @@ void ax_printf(const char* fmt, ...) {
     for (const char* p = fmt; *p; p++) {
         if (*p != '%') { ax_putchar(*p); continue; }
         p++;
+        int left_align = (*p == '-');
+        if (left_align) p++;
         int zero_pad = (*p == '0');
         if (zero_pad) p++;
         int width = 0;
         while (*p >= '1' && *p <= '9') { width = width * 10 + (*p++ - '0'); }
         switch (*p) {
-            case 's': ax_print(va_arg(ap, char*));                              break;
+            case 's': {
+                char* _s = va_arg(ap, char*);
+                int _len = 0; for (char* _q = _s; *_q; _q++) _len++;
+                int _pad = (width > _len) ? width - _len : 0;
+                if (!left_align) while (_pad-- > 0) ax_putchar(' ');
+                ax_print(_s);
+                if (left_align)  while (_pad-- > 0) ax_putchar(' ');
+                break;
+            }
             case 'd': { int n = va_arg(ap, int);
                         if (n < 0) { ax_putchar('-'); print_uint_padded((unsigned int)(-n), width, zero_pad); }
                         else print_uint_padded((unsigned int)n, width, zero_pad); break; }

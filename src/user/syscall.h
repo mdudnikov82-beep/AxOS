@@ -129,4 +129,20 @@ struct sbrk_args {
     unsigned int result;    // выход: старый break, или (unsigned int)-1 при ошибке
 };
 
+// --- Список задач (0x13) ---
+#define SYS_PS 0x13  // ESI -> struct ps_entry
+
+// Возвращает информацию о задаче с порядковым номером index (0-based).
+// result=1: запись найдена; result=0: конец списка.
+// slot=-1 для ядровых задач; для ring3-задач slot = user_slot_index (0..3).
+struct ps_entry {
+    unsigned int  index;     // вход:  0-based порядковый номер задачи
+    int           pid;       // выход: уникальный ID задачи
+    char          name[16];  // выход: имя задачи
+    unsigned int  ticks;     // выход: тики планировщика
+    int           slot;      // выход: user_slot_index, или -1 для ядра
+    unsigned int  heap_brk;  // выход: текущий heap break (0 для ядровых задач)
+    int           result;    // выход: 1=найдена, 0=конец
+};
+
 #endif

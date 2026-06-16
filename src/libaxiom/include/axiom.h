@@ -31,6 +31,10 @@ void         ax_sleep_ms(unsigned int ms); // sleep ms миллисекунд (�
 // Заполняет *a и возвращает a->result (1 = есть запись, 0 = конец)
 int ax_readdir(struct readdir_args* a);
 
+// Список задач (обёртка над SYS_PS)
+// Заполняет *e и возвращает e->result (1 = запись найдена, 0 = конец)
+int ax_ps(struct ps_entry* e);
+
 // Динамическая память (sbrk + malloc/free)
 void* ax_sbrk(int increment);           // сдвинуть heap break; (void*)-1 при ошибке
 void* ax_malloc(unsigned int size);     // выделить size байт или NULL

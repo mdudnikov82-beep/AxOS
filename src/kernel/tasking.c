@@ -311,6 +311,29 @@ int task_current_slot_index() {
     return current_task->user_slot_index;
 }
 
+// Заполняет информацию о задаче с порядковым номером index (см. tasking.h).
+int task_get_info(unsigned int index, int* pid_out, char* name_out,
+                  unsigned int* ticks_out, int* slot_out) {
+    if (!current_task) return 0;
+    task_t* t = current_task;
+    unsigned int i = 0;
+    do {
+        if (i == index) {
+            *pid_out = t->id;
+            int j;
+            for (j = 0; t->name[j] && j < MAX_NAME_LEN - 1; j++)
+                name_out[j] = t->name[j];
+            name_out[j] = '\0';
+            *ticks_out = (unsigned int)t->ticks;
+            *slot_out = t->user_slot_index;
+            return 1;
+        }
+        i++;
+        t = t->next;
+    } while (t != current_task);
+    return 0;
+}
+
 // Ищет изолированную задачу по слоту и помечает её exiting.
 // Вызывается из keyboard_handler_main при Ctrl+C.
 void task_kill_by_slot(int slot) {

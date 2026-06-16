@@ -101,4 +101,16 @@ struct sbrk_args {
     unsigned int result;    // выход: старый break, или (unsigned int)-1 при ошибке
 };
 
+#define SYS_PS 0x13
+
+struct ps_entry {
+    unsigned int  index;
+    int           pid;
+    char          name[16];
+    unsigned int  ticks;
+    int           slot;
+    unsigned int  heap_brk;
+    int           result;
+};
+
 #endif
