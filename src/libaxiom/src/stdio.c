@@ -64,24 +64,68 @@ void ax_printf(const char* fmt, ...) {
     va_end(ap);
 }
 
-// Блокирующее чтение строки с клавиатуры (эхо, backspace).
-// Используется, когда shell захватил клавиатуру через ax_shell_claim(1).
+// История команд (кольцевой буфер, 8 записей по 64 байта)
+#define HIST_CAP 8
+#define HIST_LEN 64
+static char hist[HIST_CAP][HIST_LEN];
+static int  hist_len = 0;
+
+// Блокирующее чтение строки с клавиатуры (эхо, backspace, история).
+// 0x11 = стрелка вверх, 0x12 = стрелка вниз (выставляет ядро из E0-префикса).
 int ax_readline(char* buf, int max) {
     int i = 0;
+    int hist_pos = hist_len;   // hist_len = «текущий ввод» (за пределами истории)
+    char saved[HIST_LEN];
+    saved[0] = '\0';
+
     while (i < max - 1) {
         char c;
         do { c = ax_readkey(); } while (!c);
+
         if (c == '\n') {
             ax_putchar('\n');
             break;
         }
         if (c == '\b') {
             if (i > 0) { i--; ax_putchar('\b'); }
+        } else if (c == '\x11' || c == '\x12') {
+            int new_pos = hist_pos + (c == '\x11' ? -1 : 1);
+            if (new_pos >= 0 && new_pos <= hist_len) {
+                // Сохраняем текущий ввод перед первым уходом в историю
+                if (hist_pos == hist_len) {
+                    int si;
+                    for (si = 0; si < i && si < HIST_LEN - 1; si++) saved[si] = buf[si];
+                    saved[si] = '\0';
+                }
+                hist_pos = new_pos;
+                // Стираем текущую строку с экрана
+                while (i > 0) { ax_putchar('\b'); i--; }
+                // Выводим выбранную запись (или сохранённый ввод)
+                const char* entry = (hist_pos == hist_len) ? saved : hist[hist_pos];
+                for (i = 0; entry[i] && i < max - 1; i++) {
+                    buf[i] = entry[i];
+                    ax_putchar(buf[i]);
+                }
+            }
         } else {
             buf[i++] = c;
             ax_putchar(c);
         }
     }
     buf[i] = '\0';
+
+    // Добавляем в историю (непустые команды; если буфер полон — сдвигаем)
+    if (i > 0) {
+        if (hist_len == HIST_CAP) {
+            int k, j;
+            for (k = 0; k < HIST_CAP - 1; k++)
+                for (j = 0; j < HIST_LEN; j++) hist[k][j] = hist[k+1][j];
+            hist_len--;
+        }
+        int j;
+        for (j = 0; j < i && j < HIST_LEN - 1; j++) hist[hist_len][j] = buf[j];
+        hist[hist_len][j] = '\0';
+        hist_len++;
+    }
     return i;
 }
