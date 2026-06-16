@@ -164,6 +164,22 @@ echo Copying user program into fs/ for FAT12 image...
 copy /b build\cat.bin fs\CAT.BIN
 if %errorlevel% neq 0 goto :error
 
+echo Compiling user program (sh.c)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\sh.c -o build\sh.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\sh.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\sh.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\sh.exe build\sh.bin
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\sh.bin fs\SH.BIN
+if %errorlevel% neq 0 goto :error
+
 echo Building FAT12 RAM-disk image from fs/...
 python tools\make_fat12.py
 if %errorlevel% neq 0 goto :error

@@ -17,8 +17,15 @@ int  ax_fread(int fd, void* buf, unsigned int n);   // возвращает пр
 int  ax_fwrite(int fd, const void* buf, unsigned int n); // возвращает записанные байты
 void ax_close(int fd);
 
+// Управление процессами
+int  ax_exec(char* cmdline);       // запустить программу, вернуть slot или -1/-2
+int  ax_task_alive(int slot);      // 1 = ещё работает, 0 = завершена
+void ax_shell_claim(int claim);    // 1 = захватить клавиатуру, 0 = вернуть ядру
+void ax_set_foreground(int slot);  // slot >= 0: Ctrl+C убьёт эту задачу; -1: сброс
+
 // Уровень stdio (реализован в stdio.c)
 void ax_putchar(char c);
 void ax_print_uint(unsigned int n);
+int  ax_readline(char* buf, int max);  // блокирующее чтение строки с клавиатуры
 
 #endif

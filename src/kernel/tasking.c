@@ -304,3 +304,17 @@ void print_task_list() {
         t = t->next;
     } while (t != current_task);
 }
+
+// Ищет изолированную задачу по слоту и помечает её exiting.
+// Вызывается из keyboard_handler_main при Ctrl+C.
+void task_kill_by_slot(int slot) {
+    if (slot < 0 || !current_task) return;
+    task_t* t = current_task;
+    do {
+        if (t->user_slot_index == slot) {
+            t->exiting = 1;
+            return;
+        }
+        t = t->next;
+    } while (t != current_task);
+}

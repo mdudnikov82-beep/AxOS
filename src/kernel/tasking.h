@@ -57,4 +57,8 @@ int task_current_is_isolated();
 // Имя текущей задачи (для сообщений вида "task killed").
 char* task_current_name();
 
+// Находит изолированную задачу с user_slot_index == slot и помечает её
+// exiting. Используется для Ctrl+C из shell (kernel.c::keyboard_handler_main).
+void task_kill_by_slot(int slot);
+
 #endif

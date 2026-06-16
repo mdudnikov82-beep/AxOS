@@ -61,6 +61,16 @@ char command_buffer[64];
 // command_buffer, не мешает работе shell.
 volatile char last_key = 0;
 
+// Когда равно 1, kernel shell не обрабатывает ввод — клавиатура принадлежит
+// user-space shell (sh.bin) через SYS_SHELL_CLAIM.
+static int kernel_shell_inhibited = 0;
+
+// Ctrl-флаг и foreground slot для реализации Ctrl+C.
+// foreground_slot >= 0: sh.bin ждёт завершения этой задачи (Ctrl+C убьёт её).
+// foreground_slot == -1: нет активного foreground-процесса (Ctrl+C игнорируется).
+static int ctrl_held       = 0;
+static int foreground_slot = -1;
+
 // Счётчик тиков таймера (PIT, IRQ0). При частоте 100 Гц растёт на 1 каждые 10 мс.
 volatile unsigned long timer_ticks = 0;
 
@@ -452,6 +462,84 @@ void sys_close(char* arg) {
     fd_table[fd].valid = 0;
 }
 
+// SYS_EXEC: загрузить и запустить бинарник из FAT12 по имени.
+// Разбирает cmdline на токены (первый — имя файла, остальные — argv).
+// Возвращает slot-индекс (>= 0) или -1 (файл не найден) / -2 (нет слотов).
+void sys_exec(char* arg) {
+    struct exec_args* a = (struct exec_args*)arg;
+    a->result = -1;
+
+    char* cmdline = a->cmdline;
+    if (!cmdline) return;
+
+    char filename[24];
+    int fi = 0;
+    char* p = cmdline;
+    while (*p && *p != ' ' && fi < 23) filename[fi++] = *p++;
+    filename[fi] = '\0';
+    if (fi == 0) return;
+
+    int slot = -1;
+    for (int i = 0; i < USER_PROGRAM_SLOTS; i++) {
+        if (slot_free[i]) { slot = i; break; }
+    }
+    if (slot < 0) { a->result = -2; return; }
+
+    unsigned int addr = USER_PROGRAM_BASE + slot * USER_PROGRAM_SLOT_SIZE;
+    unsigned int size = vfs_read(filename, (unsigned char*)addr, USER_ARGS_OFFSET);
+    if (size == 0) return;
+
+    char** argv_phys = (char**)(addr + USER_ARGS_OFFSET);
+    char*  sp        = (char*)(addr + USER_ARGS_OFFSET + USER_ARGS_STR_OFF);
+    unsigned int sv  = USER_ARGS_VADDR + USER_ARGS_STR_OFF;
+    int argc = 0;
+
+    argv_phys[argc++] = (char*)sv;
+    for (int i = 0; filename[i]; i++) { *sp++ = filename[i]; sv++; }
+    *sp++ = '\0'; sv++;
+
+    while (*p == ' ') p++;
+    while (*p && argc <= USER_ARGS_MAX_ARGC) {
+        argv_phys[argc++] = (char*)sv;
+        while (*p && *p != ' ') { *sp++ = *p++; sv++; }
+        *sp++ = '\0'; sv++;
+        while (*p == ' ') p++;
+    }
+    argv_phys[argc] = 0;
+
+    slot_free[slot] = 0;
+    task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR);
+    a->result = slot;
+}
+
+// SYS_TASK_ALIVE: неблокирующая проверка — завершена ли задача в слоте.
+// sh.bin вызывает в цикле busy-wait, пока дочерняя задача работает.
+void sys_task_alive(char* arg) {
+    struct task_alive_args* a = (struct task_alive_args*)arg;
+    int slot = a->slot;
+    a->result = (slot >= 0 && slot < USER_PROGRAM_SLOTS && !slot_free[slot]) ? 1 : 0;
+}
+
+// SYS_SHELL_CLAIM: захват/освобождение клавиатуры.
+// arg = (char*)1 — захват (kernel shell пассивен, sh.bin обрабатывает ввод).
+// arg = (char*)0 — освобождение (kernel shell снова активен).
+void sys_shell_claim(char* arg) {
+    int was_inhibited = kernel_shell_inhibited;
+    kernel_shell_inhibited = (arg != (char*)0);
+    if (was_inhibited && !kernel_shell_inhibited) {
+        command_len = 0;
+        print_string("\nAxOS> ");
+    }
+}
+
+// SYS_SET_FOREGROUND: сообщает ядру, какой слот сейчас на переднем плане.
+// sh.bin вызывает перед busy-wait (slot >= 0) и после него (slot = -1).
+// keyboard_handler_main использует foreground_slot для Ctrl+C.
+void sys_set_foreground(char* arg) {
+    struct set_fg_args* a = (struct set_fg_args*)arg;
+    foreground_slot = a->slot;
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01
@@ -464,6 +552,10 @@ syscall_fn syscall_table[] = {
     sys_fread,         // 0x08
     sys_fwrite,        // 0x09
     sys_close,         // 0x0A
+    sys_exec,          // 0x0B
+    sys_task_alive,    // 0x0C
+    sys_shell_claim,   // 0x0D
+    sys_set_foreground,// 0x0E
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))
@@ -836,6 +928,11 @@ void keyboard_handler_main() {
     if (port_byte_in(0x64) & 1) {
         unsigned char scancode = port_byte_in(0x60);
 
+        // Ctrl (левый): 0x1D = нажатие, 0x9D = отпускание.
+        // Обрабатываем до фильтра scancode < 128, т.к. 0x9D >= 128.
+        if (scancode == 0x1D) { ctrl_held = 1; return; }
+        if (scancode == 0x9D) { ctrl_held = 0; return; }
+
         // Нам нужны только нажатия клавиш
         if (scancode < 128) {
             char letter = scancode_to_char[scancode];
@@ -843,6 +940,20 @@ void keyboard_handler_main() {
             if (letter != 0) {
                 last_key = letter; // канал для SYS_READ_KEY (ring3)
             }
+
+            // Ctrl+C: убиваем foreground-процесс (если есть).
+            // Scancode 0x2E = клавиша C независимо от Shift.
+            if (ctrl_held && scancode == 0x2E) {
+                if (foreground_slot >= 0) {
+                    print_string("^C\n");
+                    task_kill_by_slot(foreground_slot);
+                    foreground_slot = -1;
+                }
+                return;
+            }
+
+            // Если user-space shell захватил клавиатуру — не обрабатываем команды.
+            if (kernel_shell_inhibited) return;
 
             if (letter == '\n') {
                 command_buffer[command_len] = '\0';

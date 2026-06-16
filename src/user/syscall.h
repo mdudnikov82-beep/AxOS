@@ -70,4 +70,30 @@ struct close_args {
     int fd;
 };
 
+// --- Управление процессами и shell (0x0B-0x0D) ---
+#define SYS_EXEC        0x0B  // ESI -> struct exec_args
+#define SYS_TASK_ALIVE  0x0C  // ESI -> struct task_alive_args
+#define SYS_SHELL_CLAIM 0x0D  // ESI = 1 (захват), 0 (освобождение) — не указатель
+
+// SYS_EXEC: запустить бинарник из FAT12; result = slot (>= 0) или -1/-2.
+struct exec_args {
+    char* cmdline;   // "filename arg1 arg2..."
+    int   result;    // >= 0: slot-индекс, -1: файл не найден, -2: нет слотов
+};
+
+// SYS_TASK_ALIVE: проверить, жива ли задача в слоте (без блокировки).
+struct task_alive_args {
+    int slot;
+    int result;  // 1 = ещё работает, 0 = завершена
+};
+
+// SYS_SET_FOREGROUND: сообщить ядру, какой слот на переднем плане.
+// slot >= 0: sh.bin ждёт задачу в этом слоте (Ctrl+C убьёт её).
+// slot = -1: foreground сброшен (Ctrl+C игнорируется).
+#define SYS_SET_FOREGROUND 0x0E
+
+struct set_fg_args {
+    int slot;
+};
+
 #endif

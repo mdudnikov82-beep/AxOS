@@ -18,6 +18,10 @@ global _ax_open
 global _ax_fread
 global _ax_fwrite
 global _ax_close
+global _ax_exec
+global _ax_task_alive
+global _ax_shell_claim
+global _ax_set_foreground
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -172,5 +176,73 @@ _ax_close:
     mov ah, 0x0A            ; SYS_CLOSE
     int 0x80
     add esp, 4
+    pop esi
+    ret
+
+; int ax_exec(char* cmdline)
+; Строит struct exec_args { cmdline, result=-1 } на стеке.
+; Возвращает slot >= 0 или -1 (не найден) или -2 (нет слотов).
+_ax_exec:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=cmdline
+    mov eax, [esp+12]
+    push dword -1           ; struct.result = -1  (offset 4)
+    push eax                ; struct.cmdline       (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x0B            ; SYS_EXEC
+    int 0x80
+    mov eax, [esp+4]        ; result (offset 4)
+    add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; int ax_task_alive(int slot)
+; Строит struct task_alive_args { slot, result } на стеке.
+; Возвращает 1 = работает, 0 = завершена.
+_ax_task_alive:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=slot
+    mov eax, [esp+12]
+    push dword 0            ; struct.result = 0  (offset 4)
+    push eax                ; struct.slot         (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x0C            ; SYS_TASK_ALIVE
+    int 0x80
+    mov eax, [esp+4]        ; result (offset 4)
+    add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; void ax_shell_claim(int claim)
+; Передаёт claim (0 или 1) напрямую в ESI — ядро не разыменовывает его.
+; claim=1: захватить клавиатуру (kernel shell пассивен).
+; claim=0: вернуть клавиатуру ядру.
+_ax_shell_claim:
+    push esi
+    mov esi, [esp+8]        ; esi = claim (0 или 1, не указатель!)
+    mov ah, 0x0D            ; SYS_SHELL_CLAIM
+    int 0x80
+    pop esi
+    ret
+
+; void ax_set_foreground(int slot)
+; Строит struct set_fg_args { slot } на стеке.
+; slot >= 0: ядро убьёт эту задачу при Ctrl+C.
+; slot = -1: сброс (нет foreground).
+_ax_set_foreground:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=slot
+    mov eax, [esp+12]
+    push eax                ; struct.slot  <- esp = &struct
+    mov esi, esp
+    mov ah, 0x0E            ; SYS_SET_FOREGROUND
+    int 0x80
+    add esp, 4
+    pop ebx
     pop esi
     ret

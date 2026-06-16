@@ -55,4 +55,25 @@ struct close_args {
     int fd;
 };
 
+// --- Управление процессами и shell (0x0B-0x0D) ---
+#define SYS_EXEC        0x0B
+#define SYS_TASK_ALIVE  0x0C
+#define SYS_SHELL_CLAIM 0x0D
+
+struct exec_args {
+    char* cmdline;
+    int   result;
+};
+
+struct task_alive_args {
+    int slot;
+    int result;
+};
+
+#define SYS_SET_FOREGROUND 0x0E
+
+struct set_fg_args {
+    int slot;
+};
+
 #endif
