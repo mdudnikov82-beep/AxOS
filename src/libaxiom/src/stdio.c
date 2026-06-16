@@ -70,8 +70,7 @@ void ax_printf(const char* fmt, ...) {
 static char hist[HIST_CAP][HIST_LEN];
 static int  hist_len = 0;
 
-// Блокирующее чтение строки с клавиатуры (эхо, backspace, история).
-// 0x11 = стрелка вверх, 0x12 = стрелка вниз (выставляет ядро из E0-префикса).
+// 0x11 = стрелка вверх, 0x12 = стрелка вниз (задаются ядром из E0 48/50).
 int ax_readline(char* buf, int max) {
     int i = 0;
     int hist_pos = hist_len;   // hist_len = «текущий ввод» (за пределами истории)
@@ -107,7 +106,7 @@ int ax_readline(char* buf, int max) {
                     ax_putchar(buf[i]);
                 }
             }
-        } else {
+        } else if ((unsigned char)c >= 32) {
             buf[i++] = c;
             ax_putchar(c);
         }
