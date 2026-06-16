@@ -35,4 +35,10 @@ int fat12_is_locked();
 // Возвращает 1, если fat12_init() успешно загрузил том, иначе 0.
 int fat12_is_ready();
 
+// Перечисление файлов корневой директории по индексу.
+// index=0,1,2,... — 0-based позиция среди действительных файлов.
+// Возвращает 1 и заполняет name_out (макс. 13 байт "NAME.EXT\0") и *size_out,
+// или 0 если записей больше нет.
+int fat12_readdir(unsigned int index, char* name_out, unsigned int* size_out);
+
 #endif
