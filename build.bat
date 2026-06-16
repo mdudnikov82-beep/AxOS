@@ -83,13 +83,15 @@ if %errorlevel% neq 0 goto :error
 if %errorlevel% neq 0 goto :error
 gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\libaxiom\src\stdio.c -o build\libaxiom\stdio.o
 if %errorlevel% neq 0 goto :error
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\libaxiom\src\malloc.c -o build\libaxiom\malloc.o
+if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (hello.c)...
 gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\hello.c -o build\hello.o
 if %errorlevel% neq 0 goto :error
 
 echo Linking user program...
-ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\hello.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\hello.exe
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\hello.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\hello.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping user program to flat binary...
@@ -105,7 +107,7 @@ gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c s
 if %errorlevel% neq 0 goto :error
 
 echo Linking user program...
-ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\exitdemo.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\exitdemo.exe
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\exitdemo.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\exitdemo.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping user program to flat binary...
@@ -121,7 +123,7 @@ gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c s
 if %errorlevel% neq 0 goto :error
 
 echo Linking user program...
-ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\crashdemo.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\crashdemo.exe
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\crashdemo.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\crashdemo.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping user program to flat binary...
@@ -137,7 +139,7 @@ gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c s
 if %errorlevel% neq 0 goto :error
 
 echo Linking user program...
-ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\echo.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\echo.exe
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\echo.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\echo.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping user program to flat binary...
@@ -153,7 +155,7 @@ gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c s
 if %errorlevel% neq 0 goto :error
 
 echo Linking user program...
-ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\cat.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\cat.exe
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\cat.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\cat.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping user program to flat binary...
@@ -169,7 +171,7 @@ gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c s
 if %errorlevel% neq 0 goto :error
 
 echo Linking user program...
-ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\sh.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\sh.exe
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\sh.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\sh.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping user program to flat binary...
@@ -185,7 +187,7 @@ gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c s
 if %errorlevel% neq 0 goto :error
 
 echo Linking user program...
-ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\uptime.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\uptime.exe
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\uptime.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\uptime.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping user program to flat binary...
@@ -201,7 +203,7 @@ gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c s
 if %errorlevel% neq 0 goto :error
 
 echo Linking user program...
-ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\ls.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\ls.exe
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\ls.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\ls.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping user program to flat binary...
@@ -217,7 +219,7 @@ gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c s
 if %errorlevel% neq 0 goto :error
 
 echo Linking user program...
-ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\sleep_test.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\sleep_test.exe
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\sleep_test.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\sleep_test.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping user program to flat binary...
