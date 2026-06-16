@@ -14,6 +14,10 @@ global _ax_readkey
 global _ax_writefile
 global _ax_readfile
 global _ax_exit
+global _ax_open
+global _ax_fread
+global _ax_fwrite
+global _ax_close
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -91,3 +95,82 @@ _ax_exit:
     int 0x80
 .hang:
     jmp .hang
+
+; int ax_open(char* name, int flags)
+; Строит struct open_args { filename, flags, result=-1 } на стеке.
+; Возвращает result (fd >= 0 или -1).
+_ax_open:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=name, [esp+16]=flags
+    mov eax, [esp+12]       ; name
+    mov ecx, [esp+16]       ; flags
+    push dword -1           ; struct.result = -1
+    push ecx                ; struct.flags
+    push eax                ; struct.filename  <- esp = &struct
+    mov esi, esp
+    mov ah, 0x07            ; SYS_OPEN
+    int 0x80
+    mov eax, [esp+8]        ; result (offset 8)
+    add esp, 12
+    pop ebx
+    pop esi
+    ret
+
+; int ax_fread(int fd, void* buf, unsigned int n)
+; Строит struct fread_args { fd, buf, count, result=-1 }.
+_ax_fread:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=fd, [esp+16]=buf, [esp+20]=n
+    mov eax, [esp+12]       ; fd
+    mov ecx, [esp+16]       ; buf
+    mov edx, [esp+20]       ; count
+    push dword -1           ; struct.result = -1
+    push edx                ; struct.count
+    push ecx                ; struct.buf
+    push eax                ; struct.fd  <- esp = &struct
+    mov esi, esp
+    mov ah, 0x08            ; SYS_FREAD
+    int 0x80
+    mov eax, [esp+12]       ; result (offset 12)
+    add esp, 16
+    pop ebx
+    pop esi
+    ret
+
+; int ax_fwrite(int fd, const void* buf, unsigned int n)
+; Строит struct fwrite_args { fd, buf, count, result=-1 }.
+_ax_fwrite:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=fd, [esp+16]=buf, [esp+20]=n
+    mov eax, [esp+12]
+    mov ecx, [esp+16]
+    mov edx, [esp+20]
+    push dword -1           ; struct.result = -1
+    push edx                ; struct.count
+    push ecx                ; struct.buf
+    push eax                ; struct.fd
+    mov esi, esp
+    mov ah, 0x09            ; SYS_FWRITE
+    int 0x80
+    mov eax, [esp+12]       ; result
+    add esp, 16
+    pop ebx
+    pop esi
+    ret
+
+; void ax_close(int fd)
+; Строит struct close_args { fd }.
+_ax_close:
+    push esi
+    ; после push: [esp+8]=fd
+    mov eax, [esp+8]
+    push eax                ; struct.fd  <- esp = &struct
+    mov esi, esp
+    mov ah, 0x0A            ; SYS_CLOSE
+    int 0x80
+    add esp, 4
+    pop esi
+    ret

@@ -338,14 +338,132 @@ void sys_exit(char* arg) {
     task_mark_current_exiting();
 }
 
+// --- fd-based file API (SYS_OPEN/SYS_FREAD/SYS_FWRITE/SYS_CLOSE) ---
+
+#define MAX_FDS       4
+#define MAX_FILE_BUF  4096
+
+struct fd_entry {
+    int            valid;
+    int            flags;
+    char           name[13];
+    unsigned char* buf;
+    unsigned int   size;
+    unsigned int   pos;
+};
+
+static struct fd_entry fd_table[MAX_FDS];
+static int fd_table_inited = 0;
+
+static void fd_table_ensure_init(void) {
+    if (!fd_table_inited) {
+        for (int i = 0; i < MAX_FDS; i++) fd_table[i].valid = 0;
+        fd_table_inited = 1;
+    }
+}
+
+// SYS_OPEN: открыть файл. O_RDONLY — загружает содержимое в буфер;
+// O_WRONLY|O_CREAT — создаёт пустой буфер для записи.
+// Возвращает fd (>= 0) через open_args.result, или -1 при ошибке.
+void sys_open(char* arg) {
+    struct open_args* a = (struct open_args*)arg;
+    a->result = -1;
+    fd_table_ensure_init();
+
+    int slot = -1;
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (!fd_table[i].valid) { slot = i; break; }
+    }
+    if (slot < 0) return;
+
+    char* name = a->filename;
+    int ni = 0;
+    while (name[ni] && ni < 12) { fd_table[slot].name[ni] = name[ni]; ni++; }
+    fd_table[slot].name[ni] = '\0';
+
+    fd_table[slot].flags = a->flags;
+    fd_table[slot].pos   = 0;
+    fd_table[slot].size  = 0;
+    fd_table[slot].buf   = (unsigned char*)malloc(MAX_FILE_BUF);
+    if (!fd_table[slot].buf) return;
+
+    if (a->flags == O_RDONLY) {
+        unsigned int n = vfs_read(fd_table[slot].name,
+                                  fd_table[slot].buf, MAX_FILE_BUF);
+        if (n == 0) { free(fd_table[slot].buf); fd_table[slot].buf = 0; return; }
+        fd_table[slot].size = n;
+    }
+    // O_WRONLY|O_CREAT: буфер пустой, данные пишутся через sys_fwrite
+
+    fd_table[slot].valid = 1;
+    a->result = slot;
+}
+
+// SYS_FREAD: прочитать до count байт из fd в пользовательский buf.
+// fread_args.result = фактически прочитанные байты; 0 = EOF; -1 = ошибка.
+void sys_fread(char* arg) {
+    struct fread_args* a = (struct fread_args*)arg;
+    a->result = -1;
+    int fd = a->fd;
+    if (fd < 0 || fd >= MAX_FDS || !fd_table[fd].valid) return;
+    if (fd_table[fd].flags != O_RDONLY) return;
+
+    unsigned int remaining = fd_table[fd].size - fd_table[fd].pos;
+    unsigned int to_copy   = a->count < remaining ? a->count : remaining;
+
+    unsigned char* src = fd_table[fd].buf + fd_table[fd].pos;
+    unsigned char* dst = a->buf;
+    for (unsigned int i = 0; i < to_copy; i++) dst[i] = src[i];
+    fd_table[fd].pos += to_copy;
+    a->result = (int)to_copy;
+}
+
+// SYS_FWRITE: записать count байт из buf в fd (накапливается в буфере
+// ядра; на диск сбрасывается только при SYS_CLOSE).
+void sys_fwrite(char* arg) {
+    struct fwrite_args* a = (struct fwrite_args*)arg;
+    a->result = -1;
+    int fd = a->fd;
+    if (fd < 0 || fd >= MAX_FDS || !fd_table[fd].valid) return;
+    if (fd_table[fd].flags == O_RDONLY) return;
+
+    unsigned int space    = MAX_FILE_BUF - fd_table[fd].pos;
+    unsigned int to_copy  = a->count < space ? a->count : space;
+
+    unsigned char* src = a->buf;
+    unsigned char* dst = fd_table[fd].buf + fd_table[fd].pos;
+    for (unsigned int i = 0; i < to_copy; i++) dst[i] = src[i];
+    fd_table[fd].pos += to_copy;
+    if (fd_table[fd].pos > fd_table[fd].size) fd_table[fd].size = fd_table[fd].pos;
+    a->result = (int)to_copy;
+}
+
+// SYS_CLOSE: закрыть fd. Если был открыт на запись — сбросить на диск.
+void sys_close(char* arg) {
+    struct close_args* a = (struct close_args*)arg;
+    int fd = a->fd;
+    if (fd < 0 || fd >= MAX_FDS || !fd_table[fd].valid) return;
+
+    if (fd_table[fd].flags != O_RDONLY && fd_table[fd].size > 0)
+        vfs_write(fd_table[fd].name, fd_table[fd].buf, fd_table[fd].size);
+
+    free(fd_table[fd].buf);
+    fd_table[fd].buf   = 0;
+    fd_table[fd].valid = 0;
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
-    sys_print_string,  // 0x01 — печать строки (ESI -> строка с '\0')
-    sys_clear_screen,  // 0x02 — очистка экрана
-    sys_read_key,      // 0x03 — чтение клавиатуры (ESI -> char)
-    sys_write_file,    // 0x04 — запись файла (ESI -> struct write_file_args)
-    sys_read_file,     // 0x05 — чтение файла (ESI -> struct read_file_args)
-    sys_exit,          // 0x06 — завершение задачи (ESI не используется)
+    sys_print_string,  // 0x01
+    sys_clear_screen,  // 0x02
+    sys_read_key,      // 0x03
+    sys_write_file,    // 0x04
+    sys_read_file,     // 0x05
+    sys_exit,          // 0x06
+    sys_open,          // 0x07
+    sys_fread,         // 0x08
+    sys_fwrite,        // 0x09
+    sys_close,         // 0x0A
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))

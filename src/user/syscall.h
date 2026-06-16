@@ -32,4 +32,42 @@ struct read_file_args {
     unsigned int out_size;
 };
 
+// --- fd-based file API (0x07-0x0A) ---
+#define SYS_OPEN    0x07  // ESI -> struct open_args
+#define SYS_FREAD   0x08  // ESI -> struct fread_args
+#define SYS_FWRITE  0x09  // ESI -> struct fwrite_args
+#define SYS_CLOSE   0x0A  // ESI -> struct close_args
+
+#define O_RDONLY 0
+#define O_WRONLY 1
+#define O_CREAT  4
+
+// SYS_OPEN: открыть файл; result = fd (>= 0) или -1 при ошибке.
+struct open_args {
+    char* filename;
+    int   flags;
+    int   result;
+};
+
+// SYS_FREAD: прочитать count байт из fd в buf; result = фактически прочитано (-1 при ошибке).
+struct fread_args {
+    int            fd;
+    unsigned char* buf;
+    unsigned int   count;
+    int            result;
+};
+
+// SYS_FWRITE: записать count байт из buf в fd; result = фактически записано (-1 при ошибке).
+struct fwrite_args {
+    int            fd;
+    unsigned char* buf;
+    unsigned int   count;
+    int            result;
+};
+
+// SYS_CLOSE: закрыть fd (при O_WRONLY сбрасывает данные на диск).
+struct close_args {
+    int fd;
+};
+
 #endif
