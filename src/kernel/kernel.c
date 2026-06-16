@@ -77,6 +77,7 @@ static int kernel_shell_inhibited = 0;
 // foreground_slot >= 0: sh.bin ждёт завершения этой задачи (Ctrl+C убьёт её).
 // foreground_slot == -1: нет активного foreground-процесса (Ctrl+C игнорируется).
 static int ctrl_held       = 0;
+static int shift_held      = 0;
 static int foreground_slot = -1;
 
 // Счётчик тиков таймера (PIT, IRQ0). При частоте 100 Гц растёт на 1 каждые 10 мс.
@@ -994,9 +995,14 @@ void keyboard_handler_main() {
         if (scancode == 0x1D) { ctrl_held = 1; return; }
         if (scancode == 0x9D) { ctrl_held = 0; return; }
 
+        // Shift (левый 0x2A/0xAA, правый 0x36/0xB6)
+        if (scancode == 0x2A || scancode == 0x36) { shift_held = 1; return; }
+        if (scancode == 0xAA || scancode == 0xB6) { shift_held = 0; return; }
+
         // Нам нужны только нажатия клавиш
         if (scancode < 128) {
-            char letter = scancode_to_char[scancode];
+            char letter = shift_held ? scancode_to_char_shifted[scancode]
+                                     : scancode_to_char[scancode];
 
             if (letter != 0) {
                 last_key = letter; // канал для SYS_READ_KEY (ring3)
