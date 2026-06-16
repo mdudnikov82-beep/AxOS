@@ -101,6 +101,14 @@ struct sbrk_args {
     unsigned int result;    // выход: старый break, или (unsigned int)-1 при ошибке
 };
 
+#define SYS_EXEC_REDIR 0x14
+
+struct exec_redir_args {
+    char* cmdline;
+    char* redir_out;
+    int   result;
+};
+
 #define SYS_PS 0x13
 
 struct ps_entry {

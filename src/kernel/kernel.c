@@ -45,10 +45,24 @@ static unsigned int slot_heap_brk[USER_PROGRAM_SLOTS];
 // Heap не должен перекрывать argv-блок. Оставляем 0x200 байт зазора.
 #define USER_HEAP_LIMIT (USER_ARGS_VADDR - 0x200)
 
+// Буферы перенаправления stdout (объявлены здесь — on_task_exit использует их ниже)
+#define REDIR_BUF_SIZE 4096
+static unsigned char* slot_redir_buf[USER_PROGRAM_SLOTS];
+static unsigned int   slot_redir_len[USER_PROGRAM_SLOTS];
+static char           slot_redir_file[USER_PROGRAM_SLOTS][13];
+
 // Вызывается из tasking.c::schedule() при реапе изолированной run-задачи.
 void on_task_exit(int user_slot_index) {
     slot_free[user_slot_index] = 1;
     slot_heap_brk[user_slot_index] = 0;
+    if (slot_redir_buf[user_slot_index]) {
+        vfs_write(slot_redir_file[user_slot_index],
+                  slot_redir_buf[user_slot_index],
+                  slot_redir_len[user_slot_index]);
+        free(slot_redir_buf[user_slot_index]);
+        slot_redir_buf[user_slot_index]  = 0;
+        slot_redir_len[user_slot_index]  = 0;
+    }
 }
 
 // Прототипы функций
@@ -320,6 +334,13 @@ void reboot() {
 typedef void (*syscall_fn)(char*);
 
 void sys_print_string(char* arg) {
+    int slot = task_current_slot_index();
+    if (slot >= 0 && slot < USER_PROGRAM_SLOTS && slot_redir_buf[slot]) {
+        char* s = arg;
+        while (*s && slot_redir_len[slot] < REDIR_BUF_SIZE - 1)
+            slot_redir_buf[slot][slot_redir_len[slot]++] = *s++;
+        return;
+    }
     print_string(arg);
 }
 
@@ -472,24 +493,17 @@ void sys_close(char* arg) {
     fd_table[fd].valid = 0;
 }
 
-// SYS_EXEC: загрузить и запустить бинарник из FAT12 по имени.
-// Разбирает cmdline на токены (первый — имя файла, остальные — argv).
-// Возвращает slot-индекс (>= 0) или -1 (файл не найден) / -2 (нет слотов).
-void sys_exec(char* arg) {
-    struct exec_args* a = (struct exec_args*)arg;
-    a->result = -1;
-
-    char* cmdline = a->cmdline;
-    if (!cmdline) return;
+// Общая логика запуска бинарника. Возвращает slot >= 0 или -1/-2.
+static int do_exec(char* cmdline) {
+    if (!cmdline) return -1;
 
     char filename[24];
     int fi = 0;
     char* p = cmdline;
     while (*p && *p != ' ' && fi < 23) filename[fi++] = *p++;
     filename[fi] = '\0';
-    if (fi == 0) return;
+    if (fi == 0) return -1;
 
-    // Если в имени нет точки — подставляем ".bin" (ls → ls.bin)
     int has_dot = 0;
     for (int i = 0; i < fi; i++) if (filename[i] == '.') { has_dot = 1; break; }
     if (!has_dot && fi <= 19) {
@@ -504,11 +518,11 @@ void sys_exec(char* arg) {
     for (int i = 0; i < USER_PROGRAM_SLOTS; i++) {
         if (slot_free[i]) { slot = i; break; }
     }
-    if (slot < 0) { a->result = -2; return; }
+    if (slot < 0) return -2;
 
     unsigned int addr = USER_PROGRAM_BASE + slot * USER_PROGRAM_SLOT_SIZE;
     unsigned int size = vfs_read(filename, (unsigned char*)addr, USER_ARGS_OFFSET);
-    if (size == 0) return;
+    if (size == 0) return -1;
 
     char** argv_phys = (char**)(addr + USER_ARGS_OFFSET);
     char*  sp        = (char*)(addr + USER_ARGS_OFFSET + USER_ARGS_STR_OFF);
@@ -531,7 +545,31 @@ void sys_exec(char* arg) {
     slot_heap_brk[slot] = USER_WINDOW_BASE + ((size + 15) & ~15u);
     slot_free[slot] = 0;
     task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR);
-    a->result = slot;
+    return slot;
+}
+
+void sys_exec(char* arg) {
+    struct exec_args* a = (struct exec_args*)arg;
+    a->result = do_exec(a->cmdline);
+}
+
+// SYS_EXEC_REDIR: запустить программу, перенаправив её stdout в файл.
+// Атомарно: буфер создаётся до первого тика планировщика новой задачи.
+void sys_exec_redir(char* arg) {
+    struct exec_redir_args* a = (struct exec_redir_args*)arg;
+    a->result = do_exec(a->cmdline);
+    if (a->result >= 0 && a->redir_out && a->redir_out[0]) {
+        int slot = a->result;
+        unsigned char* buf = (unsigned char*)malloc(REDIR_BUF_SIZE);
+        if (buf) {
+            slot_redir_buf[slot] = buf;
+            slot_redir_len[slot] = 0;
+            int fi = 0;
+            char* fn = a->redir_out;
+            while (*fn && fi < 12) slot_redir_file[slot][fi++] = *fn++;
+            slot_redir_file[slot][fi] = '\0';
+        }
+    }
 }
 
 // SYS_TASK_ALIVE: неблокирующая проверка — завершена ли задача в слоте.
@@ -628,6 +666,7 @@ syscall_fn syscall_table[] = {
     sys_readdir,       // 0x11
     sys_sbrk,          // 0x12
     sys_ps,            // 0x13
+    sys_exec_redir,    // 0x14
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))

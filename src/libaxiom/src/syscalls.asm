@@ -27,6 +27,7 @@ global _ax_sleep_ms
 global _ax_readdir
 global _ax_sbrk
 global _ax_ps
+global _ax_exec_redir
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -298,6 +299,27 @@ _ax_sbrk:
     int 0x80
     mov eax, [esp+4]        ; result (offset 4)
     add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; int ax_exec_redir(char* cmdline, char* redir_out)
+; Строит struct exec_redir_args { cmdline, redir_out, result=-1 } на стеке.
+; Возвращает slot >= 0 или -1/-2.
+_ax_exec_redir:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=cmdline, [esp+16]=redir_out
+    mov eax, [esp+12]       ; cmdline
+    mov ecx, [esp+16]       ; redir_out
+    push dword -1           ; struct.result = -1  (offset 8)
+    push ecx                ; struct.redir_out    (offset 4)
+    push eax                ; struct.cmdline      (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x14            ; SYS_EXEC_REDIR
+    int 0x80
+    mov eax, [esp+8]        ; result (offset 8)
+    add esp, 12
     pop ebx
     pop esi
     ret

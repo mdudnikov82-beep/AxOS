@@ -129,6 +129,18 @@ struct sbrk_args {
     unsigned int result;    // выход: старый break, или (unsigned int)-1 при ошибке
 };
 
+// --- Перенаправление вывода (0x14) ---
+#define SYS_EXEC_REDIR 0x14  // ESI -> struct exec_redir_args
+
+// Запускает программу, перенаправляя её stdout в файл redir_out.
+// redir_out должен быть в FAT12-формате (uppercase, max 12 символов).
+// Диск должен быть разблокирован командой unlock.
+struct exec_redir_args {
+    char* cmdline;   // имя программы + аргументы
+    char* redir_out; // имя выходного файла (uppercase FAT12, e.g. "OUT.TXT")
+    int   result;    // >= 0: slot, -1: не найден, -2: нет слотов
+};
+
 // --- Список задач (0x13) ---
 #define SYS_PS 0x13  // ESI -> struct ps_entry
 

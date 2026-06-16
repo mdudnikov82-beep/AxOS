@@ -24,15 +24,41 @@ int main(int argc, char** argv) {
             break;
         }
 
-        int slot = ax_exec(line);
+        // Парсим перенаправление: "cmd > file.txt"
+        char cmd[64];
+        char redir[13];
+        int  has_redir = 0;
+        int  ci = 0;
+        for (int i = 0; line[i]; i++) {
+            if (line[i] == '>') {
+                has_redir = 1;
+                while (ci > 0 && cmd[ci-1] == ' ') ci--;
+                cmd[ci] = '\0';
+                i++;
+                while (line[i] == ' ') i++;
+                int ri = 0;
+                while (line[i] && line[i] != ' ' && ri < 12) {
+                    char c = line[i++];
+                    redir[ri++] = (c >= 'a' && c <= 'z') ? c - 32 : c;
+                }
+                redir[ri] = '\0';
+                break;
+            }
+            if (ci < 63) cmd[ci++] = line[i];
+        }
+        if (!has_redir) cmd[ci] = '\0';
+
+        int slot = has_redir ? ax_exec_redir(cmd, redir) : ax_exec(line);
         if (slot == -1) {
             ax_print("sh: not found\n");
         } else if (slot == -2) {
             ax_print("sh: no free slots\n");
         } else {
-            ax_set_foreground(slot);          // Ctrl+C теперь убьёт эту задачу
+            ax_set_foreground(slot);
             while (ax_task_alive(slot)) { ax_sleep_ms(10); }
-            ax_set_foreground(-1);            // задача завершена — Ctrl+C сброшен
+            ax_set_foreground(-1);
+            if (has_redir && redir[0])
+                ax_printf("-> %s\n", redir);
         }
     }
 
