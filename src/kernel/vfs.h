@@ -9,6 +9,7 @@ typedef struct vfs_driver {
     int (*is_locked)(void);
     void (*set_locked)(int locked);
     void (*list)(void);
+    int (*readdir)(unsigned int index, char* name_out, unsigned int* size_out);
     int (*cat)(char* filename);
     unsigned int (*read)(char* filename, unsigned char* buffer, unsigned int max_size);
     int (*write)(char* filename, unsigned char* data, unsigned int size);
@@ -21,6 +22,7 @@ int vfs_is_ready(void);
 int vfs_is_locked(void);
 void vfs_set_locked(int locked);
 void vfs_list(void);
+int vfs_readdir(unsigned int index, char* name_out, unsigned int* size_out);
 int vfs_cat(char* filename);
 unsigned int vfs_read(char* filename, unsigned char* buffer, unsigned int max_size);
 int vfs_write(char* filename, unsigned char* data, unsigned int size);
