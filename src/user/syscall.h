@@ -122,4 +122,11 @@ struct readdir_args {
     int          result;   // выход: 1 = запись найдена, 0 = конец директории
 };
 
+#define SYS_SBRK 0x12  // ESI -> struct sbrk_args
+
+struct sbrk_args {
+    int          increment; // вход: байт добавить к break (0 = запрос текущего)
+    unsigned int result;    // выход: старый break, или (unsigned int)-1 при ошибке
+};
+
 #endif
