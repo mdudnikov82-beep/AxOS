@@ -325,6 +325,36 @@ void fat12_list() {
     }
 }
 
+int fat12_readdir(unsigned int index, char* name_out, unsigned int* size_out) {
+    if (!fat12_ready) return 0;
+
+    struct fat12_dir_entry* entries = (struct fat12_dir_entry*)((unsigned char*)FAT12_BASE + fat12_root_dir_offset());
+    unsigned int found = 0;
+
+    for (int i = 0; i < bpb->root_entries; i++) {
+        if (entries[i].name[0] == 0x00) break;
+        if ((unsigned char)entries[i].name[0] == 0xE5) continue;
+        if (entries[i].attr & 0x08) continue;
+        if (entries[i].attr & 0x10) continue;
+
+        if (found == index) {
+            int p = 0;
+            for (int j = 0; j < 8 && entries[i].name[j] != ' '; j++)
+                name_out[p++] = entries[i].name[j];
+            if (entries[i].ext[0] != ' ') {
+                name_out[p++] = '.';
+                for (int j = 0; j < 3 && entries[i].ext[j] != ' '; j++)
+                    name_out[p++] = entries[i].ext[j];
+            }
+            name_out[p] = '\0';
+            *size_out = entries[i].file_size;
+            return 1;
+        }
+        found++;
+    }
+    return 0;
+}
+
 int fat12_cat(char* filename) {
     if (!fat12_ready) return 0;
 
