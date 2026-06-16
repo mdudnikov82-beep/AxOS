@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
             ax_print("sh: no free slots\n");
         } else {
             ax_set_foreground(slot);          // Ctrl+C теперь убьёт эту задачу
-            while (ax_task_alive(slot)) {}    // busy-wait; таймер даёт дочерней CPU
+            while (ax_task_alive(slot)) { ax_sleep_ms(10); }
             ax_set_foreground(-1);            // задача завершена — Ctrl+C сброшен
         }
     }
