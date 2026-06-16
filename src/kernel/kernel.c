@@ -1000,8 +1000,34 @@ void keyboard_handler_main() {
     }
 }
 
+// Читает STARTUP.CFG, показывает MOTD.TXT и возвращает 1 если надо
+// автоматически запустить shell (AUTOSTART=shell).
+static int autoboot() {
+    // Показываем MOTD если есть
+    unsigned char motd[512];
+    unsigned int motd_len = vfs_read("MOTD.TXT", motd, sizeof(motd) - 1);
+    if (motd_len > 0) {
+        motd[motd_len] = '\0';
+        print_string((char*)motd);
+        print_string("\n");
+    }
+
+    // Парсим STARTUP.CFG построчно в поисках AUTOSTART=shell
+    unsigned char cfg[256];
+    unsigned int cfg_len = vfs_read("STARTUP.CFG", cfg, sizeof(cfg) - 1);
+    if (cfg_len == 0) return 0;
+    cfg[cfg_len] = '\0';
+
+    char* p = (char*)cfg;
+    while (*p) {
+        if (str_starts_with(p, "AUTOSTART=shell")) return 1;
+        while (*p && *p != '\n') p++;
+        if (*p == '\n') p++;
+    }
+    return 0;
+}
+
 void kernel_main() {
-    // Тестовый вывод для проверки вызова функции
     char* video_memory = (char*) 0xB8000;
     video_memory[0] = 'M';
     video_memory[1] = 0x0F;
@@ -1009,7 +1035,7 @@ void kernel_main() {
     video_memory[3] = 0x0F;
     video_memory[4] = 'N';
     video_memory[5] = 0x0F;
-    
+
     clear_screen();
     init_idt();
     init_paging();
@@ -1023,10 +1049,16 @@ void kernel_main() {
         print_string("Warning: FAT12 disk (build/disk.img) not found - file commands disabled.\n");
     }
 
-    print_string("AxOS v0.6 [Interrupt Mode]\nAxOS> ");
+    print_string("AxOS v0.6 [Interrupt Mode]\n");
+
+    if (autoboot()) {
+        execute_command("run SH.BIN");
+    } else {
+        print_string("AxOS> ");
+    }
 
     // БЕСКОНЕЧНЫЙ ЦИКЛ ОБЯЗАТЕЛЕН
     while(1) {
-        __asm__("hlt"); // Процессор будет спать до прихода прерывания от клавиатуры
+        __asm__("hlt");
     }
 }
