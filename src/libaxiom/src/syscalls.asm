@@ -24,6 +24,7 @@ global _ax_shell_claim
 global _ax_set_foreground
 global _ax_get_ticks
 global _ax_sleep_ms
+global _ax_readdir
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -276,6 +277,22 @@ _ax_sleep_ms:
     mov ah, 0x10            ; SYS_SLEEP
     int 0x80
     add esp, 4
+    pop ebx
+    pop esi
+    ret
+
+; int ax_readdir(struct readdir_args* a)
+; ESI = указатель на struct readdir_args (передаётся напрямую).
+; Возвращает a->result (1 = запись есть, 0 = конец директории).
+; Раскладка struct: index(0) name[13](4) pad(17-19) size(20) result(24)
+_ax_readdir:
+    push esi
+    push ebx
+    ; после двух push: [esp+12] = указатель на struct readdir_args
+    mov esi, [esp+12]       ; ESI -> struct напрямую
+    mov ah, 0x11            ; SYS_READDIR
+    int 0x80
+    mov eax, [esi+24]       ; a->result (offset 24)
     pop ebx
     pop esi
     ret
