@@ -31,6 +31,11 @@ void         ax_sleep_ms(unsigned int ms); // sleep ms миллисекунд (�
 // Заполняет *a и возвращает a->result (1 = есть запись, 0 = конец)
 int ax_readdir(struct readdir_args* a);
 
+// Динамическая память (sbrk + malloc/free)
+void* ax_sbrk(int increment);           // сдвинуть heap break; (void*)-1 при ошибке
+void* ax_malloc(unsigned int size);     // выделить size байт или NULL
+void  ax_free(void* ptr);               // освободить блок
+
 // Уровень stdio (реализован в stdio.c)
 void ax_putchar(char c);
 void ax_print_uint(unsigned int n);
