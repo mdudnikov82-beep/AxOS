@@ -554,6 +554,11 @@ void sys_sleep(char* arg) {
     sleep_ms((unsigned long)a->ms);
 }
 
+void sys_readdir(char* arg) {
+    struct readdir_args* a = (struct readdir_args*)arg;
+    a->result = vfs_readdir(a->index, a->name, &a->size);
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01
@@ -572,6 +577,7 @@ syscall_fn syscall_table[] = {
     sys_set_foreground,// 0x0E
     sys_get_ticks,     // 0x0F
     sys_sleep,         // 0x10
+    sys_readdir,       // 0x11
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))
