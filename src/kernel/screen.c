@@ -57,6 +57,12 @@ void print_string(char* str) {
             continue;
         }
 
+        if (str[i] == '\b') {
+            backspace();
+            i++;
+            continue;
+        }
+
         int offset = (cursor_y * 80 + cursor_x) * 2;
         vidmem[offset] = str[i];
         vidmem[offset + 1] = 0x0F;
