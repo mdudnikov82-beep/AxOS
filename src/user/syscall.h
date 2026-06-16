@@ -112,4 +112,14 @@ struct sleep_args {
     unsigned int ms;
 };
 
+// --- Перечисление файлов директории (0x11) ---
+#define SYS_READDIR 0x11  // ESI -> struct readdir_args
+
+struct readdir_args {
+    unsigned int index;    // вход: 0-based порядковый номер файла
+    char         name[13]; // выход: "NAME.EXT\0"
+    unsigned int size;     // выход: размер файла в байтах
+    int          result;   // выход: 1 = запись найдена, 0 = конец директории
+};
+
 #endif

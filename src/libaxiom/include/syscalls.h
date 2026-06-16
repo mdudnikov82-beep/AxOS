@@ -78,6 +78,7 @@ struct set_fg_args {
 
 #define SYS_GET_TICKS 0x0F
 #define SYS_SLEEP     0x10
+#define SYS_READDIR   0x11
 
 struct get_ticks_args {
     unsigned int result;
@@ -85,6 +86,13 @@ struct get_ticks_args {
 
 struct sleep_args {
     unsigned int ms;
+};
+
+struct readdir_args {
+    unsigned int index;   // вход: 0-based порядковый номер файла
+    char         name[13]; // выход: "NAME.EXT\0"
+    unsigned int size;    // выход: размер файла в байтах
+    int          result;  // выход: 1 = запись найдена, 0 = конец директории
 };
 
 #endif
