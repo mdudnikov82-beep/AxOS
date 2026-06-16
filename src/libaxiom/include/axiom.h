@@ -27,6 +27,10 @@ void ax_set_foreground(int slot);  // slot >= 0: Ctrl+C убьёт эту зад
 unsigned int ax_get_ticks(void);         // тики с момента загрузки (100 Гц)
 void         ax_sleep_ms(unsigned int ms); // sleep ms миллисекунд (другие задачи получают CPU)
 
+// Перечисление файлов (обёртка над SYS_READDIR)
+// Заполняет *a и возвращает a->result (1 = есть запись, 0 = конец)
+int ax_readdir(struct readdir_args* a);
+
 // Уровень stdio (реализован в stdio.c)
 void ax_putchar(char c);
 void ax_print_uint(unsigned int n);
