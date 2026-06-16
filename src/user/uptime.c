@@ -10,15 +10,6 @@ int main(int argc, char** argv) {
     mins %= 60;
     secs %= 60;
 
-    ax_print("Uptime: ");
-    ax_print_uint(h);   ax_putchar(':');
-    // Ведущий ноль для минут и секунд
-    if (mins < 10) ax_putchar('0');
-    ax_print_uint(mins); ax_putchar(':');
-    if (secs < 10) ax_putchar('0');
-    ax_print_uint(secs);
-    ax_print("  (");
-    ax_print_uint(ticks);
-    ax_print(" ticks @ 100 Hz)\n");
+    ax_printf("Uptime: %u:%02u:%02u  (%u ticks @ 100Hz)\n", h, mins, secs, ticks);
     return 0;
 }
