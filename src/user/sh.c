@@ -24,6 +24,18 @@ int main(int argc, char** argv) {
             break;
         }
 
+        // Отрезаем trailing '&' (фоновый запуск)
+        int has_bg = 0;
+        int linelen = 0;
+        while (line[linelen]) linelen++;
+        int last = linelen - 1;
+        while (last >= 0 && line[last] == ' ') last--;
+        if (last >= 0 && line[last] == '&') {
+            has_bg = 1;
+            line[last] = '\0';
+            while (last > 0 && line[last-1] == ' ') line[--last] = '\0';
+        }
+
         // Парсим перенаправление: "cmd > file.txt"
         char cmd[64];
         char redir[13];
@@ -48,11 +60,13 @@ int main(int argc, char** argv) {
         }
         if (!has_redir) cmd[ci] = '\0';
 
-        int slot = has_redir ? ax_exec_redir(cmd, redir) : ax_exec(line);
+        int slot = has_redir ? ax_exec_redir(cmd, redir) : ax_exec(cmd);
         if (slot == -1) {
             ax_print("sh: not found\n");
         } else if (slot == -2) {
             ax_print("sh: no free slots\n");
+        } else if (has_bg) {
+            ax_printf("[%d] bg\n", slot);
         } else {
             ax_set_foreground(slot);
             while (ax_task_alive(slot)) { ax_sleep_ms(10); }
