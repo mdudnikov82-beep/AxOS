@@ -3,27 +3,15 @@
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
 
-    unsigned int before, after, elapsed;
-
-    ax_print("sleep_test: sleeping 3 seconds...\n");
-    ax_print("ticks before: ");
-    before = ax_get_ticks();
-    ax_print_uint(before);
-    ax_print("\n");
+    unsigned int before = ax_get_ticks();
+    ax_printf("sleep_test: ticks before = %u\n", before);
+    ax_printf("sleeping 3 seconds...\n");
 
     ax_sleep_ms(3000);
 
-    after = ax_get_ticks();
-    ax_print("ticks after:  ");
-    ax_print_uint(after);
-    ax_print("\n");
-
-    elapsed = after - before;
-    ax_print("elapsed ticks: ");
-    ax_print_uint(elapsed);
-    ax_print(" (~");
-    ax_print_uint(elapsed / 100);
-    ax_print("s at 100Hz)\n");
-
+    unsigned int after = ax_get_ticks();
+    unsigned int elapsed = after - before;
+    ax_printf("ticks after  = %u\n", after);
+    ax_printf("elapsed      = %u ticks (~%u sec)\n", elapsed, elapsed / 100);
     return 0;
 }
