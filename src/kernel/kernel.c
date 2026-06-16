@@ -22,6 +22,17 @@
 #define USER_PROGRAM_SLOT_SIZE 0x8000
 #define USER_PROGRAM_BASE      0x100000
 
+// Аргументы командной строки для run-программ.
+// Блок sizeof(char*)*8 + строки живёт в конце каждого слота:
+//   физический:  phys_slot_base + USER_ARGS_OFFSET
+//   виртуальный: USER_ARGS_VADDR (одинаков для всех задач — разные PD)
+// Ядро пишет char*[] указатели и строки по физическому адресу (identity-map),
+// задача видит их по USER_ARGS_VADDR через свой приватный PD.
+#define USER_ARGS_OFFSET   0x7C00
+#define USER_ARGS_VADDR    (USER_WINDOW_BASE + USER_ARGS_OFFSET)
+#define USER_ARGS_MAX_ARGC 7       // максимум 7 аргументов (argv[0]..argv[6] + NULL)
+#define USER_ARGS_STR_OFF  32      // строки после 8 указателей (8 * sizeof(char*) = 32)
+
 // slot_free[i] == 1, если слот i свободен. "run" занимает первый свободный
 // слот; при завершении задачи (SYS_EXIT или killed page fault, см.
 // tasking.c::schedule) on_task_exit() освобождает его обратно.
@@ -585,6 +596,13 @@ void execute_command(char* cmd) {
         vfs_set_locked(0);
         print_string("FAT12 disk unlocked (read-write).\n");
     } else if (str_starts_with(cmd, "run ")) {
+        // Разбиваем "FILENAME [ARG1 ARG2 ...]"
+        char* rest = cmd + 4;
+        char filename[24];
+        int fi = 0;
+        while (rest[fi] && rest[fi] != ' ' && fi < 23) { filename[fi] = rest[fi]; fi++; }
+        filename[fi] = '\0';
+
         int slot = -1;
         for (int i = 0; i < USER_PROGRAM_SLOTS; i++) {
             if (slot_free[i]) { slot = i; break; }
@@ -594,12 +612,36 @@ void execute_command(char* cmd) {
             print_string("No free program slots, try again later.\n");
         } else {
             unsigned int addr = USER_PROGRAM_BASE + slot * USER_PROGRAM_SLOT_SIZE;
-            unsigned int size = vfs_read(cmd + 4, (unsigned char*)addr, USER_PROGRAM_SLOT_SIZE);
+            // Загружаем бинарник только в первые USER_ARGS_OFFSET байт слота
+            unsigned int size = vfs_read(filename, (unsigned char*)addr, USER_ARGS_OFFSET);
             if (size == 0) {
                 print_string("File not found.\n");
             } else {
+                // Строим argv-блок по физическому адресу (identity-mapped ядром).
+                // USER_ARGS_VADDR — виртуальный адрес того же места для задачи.
+                char** argv_phys = (char**)(addr + USER_ARGS_OFFSET);
+                char*  sp = (char*)(addr + USER_ARGS_OFFSET + USER_ARGS_STR_OFF);
+                unsigned int sv = USER_ARGS_VADDR + USER_ARGS_STR_OFF;
+                int argc = 0;
+
+                // argv[0] = имя файла
+                argv_phys[argc++] = (char*)sv;
+                for (int i = 0; filename[i]; i++) { *sp++ = filename[i]; sv++; }
+                *sp++ = '\0'; sv++;
+
+                // argv[1..] — остаток командной строки, токен за токеном
+                char* p = rest + fi;
+                while (*p == ' ') p++;
+                while (*p && argc <= USER_ARGS_MAX_ARGC) {
+                    argv_phys[argc++] = (char*)sv;
+                    while (*p && *p != ' ') { *sp++ = *p++; sv++; }
+                    *sp++ = '\0'; sv++;
+                    while (*p == ' ') p++;
+                }
+                argv_phys[argc] = 0;  // argv[argc] = NULL (POSIX)
+
                 slot_free[slot] = 0;
-                task_create_user_isolated(cmd + 4, addr, slot);
+                task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR);
                 print_string("Started.\n");
             }
         }

@@ -175,7 +175,8 @@ void task_create_user(char* name, void (*entry)(void)) {
 // дорастёт (растёт вниз).
 #define USER_STACK_TOP (USER_WINDOW_TOP - 16)
 
-void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index) {
+void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index,
+                               int argc, unsigned int argv_vaddr) {
     unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
     if (!kstack) return;
 
@@ -190,11 +191,11 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     *(--sp) = USER_STACK_TOP;        // ESP: ниже верха окна (см. USER_STACK_TOP)
     *(--sp) = 0x202;                 // EFLAGS: IF=1
     *(--sp) = USER_CODE_SEG | 3;     // CS
-    *(--sp) = USER_WINDOW_BASE;      // EIP: начало окна
-    *(--sp) = 0; // EAX
-    *(--sp) = 0; // ECX
-    *(--sp) = 0; // EDX
-    *(--sp) = 0; // EBX
+    *(--sp) = USER_WINDOW_BASE;        // EIP: начало окна (_start crt0)
+    *(--sp) = 0;                       // EAX
+    *(--sp) = argv_vaddr;              // ECX = virtual ptr to argv[] array (0x107C00)
+    *(--sp) = 0;                       // EDX
+    *(--sp) = (unsigned int)argc;      // EBX = argc
     *(--sp) = 0; // ESP - игнорируется popa
     *(--sp) = 0; // EBP
     *(--sp) = 0; // ESI

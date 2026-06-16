@@ -75,15 +75,21 @@ echo Stripping to Binary...
 objcopy -O binary -R .reloc build\kernel.exe build\kernel.bin
 if %errorlevel% neq 0 goto :error
 
-echo Compiling user program (hello.c)...
-.\tools\nasm.exe -f elf32 src\user\start.asm -o build\user_start.o
+echo Building libaxiom...
+if not exist build\libaxiom mkdir build\libaxiom
+.\tools\nasm.exe -f elf32 src\libaxiom\src\crt0.asm -o build\libaxiom\crt0.o
+if %errorlevel% neq 0 goto :error
+.\tools\nasm.exe -f elf32 src\libaxiom\src\syscalls.asm -o build\libaxiom\syscalls.o
+if %errorlevel% neq 0 goto :error
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\libaxiom\src\stdio.c -o build\libaxiom\stdio.o
 if %errorlevel% neq 0 goto :error
 
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -c src\user\hello.c -o build\hello.o
+echo Compiling user program (hello.c)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\hello.c -o build\hello.o
 if %errorlevel% neq 0 goto :error
 
 echo Linking user program...
-ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\user_start.o build\hello.o -o build\hello.exe
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\hello.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\hello.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping user program to flat binary...
@@ -95,11 +101,11 @@ copy /b build\hello.bin fs\HELLO.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (exitdemo.c)...
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -c src\user\exitdemo.c -o build\exitdemo.o
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\exitdemo.c -o build\exitdemo.o
 if %errorlevel% neq 0 goto :error
 
 echo Linking user program...
-ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\user_start.o build\exitdemo.o -o build\exitdemo.exe
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\exitdemo.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\exitdemo.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping user program to flat binary...
@@ -111,11 +117,11 @@ copy /b build\exitdemo.bin fs\EXIT.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (crashdemo.c)...
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -c src\user\crashdemo.c -o build\crashdemo.o
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\crashdemo.c -o build\crashdemo.o
 if %errorlevel% neq 0 goto :error
 
 echo Linking user program...
-ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\user_start.o build\crashdemo.o -o build\crashdemo.exe
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\crashdemo.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\crashdemo.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping user program to flat binary...
@@ -124,6 +130,22 @@ if %errorlevel% neq 0 goto :error
 
 echo Copying user program into fs/ for FAT12 image...
 copy /b build\crashdemo.bin fs\CRASH.BIN
+if %errorlevel% neq 0 goto :error
+
+echo Compiling user program (echo.c)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\echo.c -o build\echo.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\echo.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\echo.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\echo.exe build\echo.bin
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\echo.bin fs\ECHO.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Building FAT12 RAM-disk image from fs/...

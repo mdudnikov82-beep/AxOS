@@ -26,7 +26,11 @@ void task_create_user(char* name, void (*entry)(void));
 // phys_slot_base..+0x8000 - код, данные и стек задачи (ESP стартует с
 // 0x108000) живут только в этом окне. user_slot_index (0..
 // USER_PROGRAM_SLOTS-1) выбирает пару PD/PT из пула paging.h.
-void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index);
+// argc/argv_vaddr - аргументы командной строки: kernel.c записывает блок
+// argv[] в phys_slot_base+USER_ARGS_OFFSET; argv_vaddr - его виртуальный
+// адрес (0x107C00). Задача получает argc в EBX, argv_vaddr в ECX при старте.
+void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index,
+                               int argc, unsigned int argv_vaddr);
 
 // Вызывается из idt.asm при каждом IRQ0: сохраняет esp текущей задачи,
 // переключается на следующую по кольцу и возвращает её esp. Если
