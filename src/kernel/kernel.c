@@ -38,9 +38,17 @@
 // tasking.c::schedule) on_task_exit() освобождает его обратно.
 static int slot_free[USER_PROGRAM_SLOTS] = {1, 1, 1, 1};
 
+// Виртуальный адрес текущего heap break для каждого слота.
+// Инициализируется при запуске задачи (после загрузки кода), сбрасывается при выходе.
+static unsigned int slot_heap_brk[USER_PROGRAM_SLOTS];
+
+// Heap не должен перекрывать argv-блок. Оставляем 0x200 байт зазора.
+#define USER_HEAP_LIMIT (USER_ARGS_VADDR - 0x200)
+
 // Вызывается из tasking.c::schedule() при реапе изолированной run-задачи.
 void on_task_exit(int user_slot_index) {
     slot_free[user_slot_index] = 1;
+    slot_heap_brk[user_slot_index] = 0;
 }
 
 // Прототипы функций
@@ -507,6 +515,7 @@ void sys_exec(char* arg) {
     }
     argv_phys[argc] = 0;
 
+    slot_heap_brk[slot] = USER_WINDOW_BASE + ((size + 15) & ~15u);
     slot_free[slot] = 0;
     task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR);
     a->result = slot;
@@ -559,6 +568,23 @@ void sys_readdir(char* arg) {
     a->result = vfs_readdir(a->index, a->name, &a->size);
 }
 
+// SYS_SBRK: сдвигает heap break задачи на increment байт вперёд.
+// Возвращает старый break (начало выделенного региона) или -1 при переполнении.
+void sys_sbrk(char* arg) {
+    struct sbrk_args* a = (struct sbrk_args*)arg;
+    int slot = task_current_slot_index();
+    if (slot < 0) { a->result = (unsigned int)-1; return; }
+
+    unsigned int old_brk = slot_heap_brk[slot];
+    unsigned int new_brk = old_brk + (unsigned int)a->increment;
+    if (a->increment > 0 && new_brk > USER_HEAP_LIMIT) {
+        a->result = (unsigned int)-1;
+        return;
+    }
+    slot_heap_brk[slot] = new_brk;
+    a->result = old_brk;
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01
@@ -578,6 +604,7 @@ syscall_fn syscall_table[] = {
     sys_get_ticks,     // 0x0F
     sys_sleep,         // 0x10
     sys_readdir,       // 0x11
+    sys_sbrk,          // 0x12
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))
@@ -872,6 +899,7 @@ void execute_command(char* cmd) {
                 }
                 argv_phys[argc] = 0;  // argv[argc] = NULL (POSIX)
 
+                slot_heap_brk[slot] = USER_WINDOW_BASE + ((size + 15) & ~15u);
                 slot_free[slot] = 0;
                 task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR);
                 print_string("Started.\n");
