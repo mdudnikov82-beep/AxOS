@@ -196,6 +196,22 @@ echo Copying user program into fs/ for FAT12 image...
 copy /b build\uptime.bin fs\UPTIME.BIN
 if %errorlevel% neq 0 goto :error
 
+echo Compiling user program (ls.c)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\ls.c -o build\ls.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\ls.o build\libaxiom\syscalls.o build\libaxiom\stdio.o -o build\ls.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\ls.exe build\ls.bin
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\ls.bin fs\LS.BIN
+if %errorlevel% neq 0 goto :error
+
 echo Compiling user program (sleep_test.c)...
 gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\sleep_test.c -o build\sleep_test.o
 if %errorlevel% neq 0 goto :error
