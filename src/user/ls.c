@@ -22,9 +22,12 @@ int main(int argc, char** argv) {
         if (!a.result) break;
 
         print_padded(a.name, 13);
-        ax_printf("  %7u B\n", a.size);
-
-        total += a.size;
+        if (a.is_dir) {
+            ax_print("  <DIR>\n");
+        } else {
+            ax_printf("  %7u B\n", a.size);
+            total += a.size;
+        }
         count++;
     }
 

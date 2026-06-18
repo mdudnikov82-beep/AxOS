@@ -28,6 +28,9 @@ global _ax_readdir
 global _ax_sbrk
 global _ax_ps
 global _ax_exec_redir
+global _ax_unlink
+global _ax_mkdir
+global _ax_disk_lock
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -336,6 +339,54 @@ _ax_ps:
     int 0x80
     mov eax, [esi+36]       ; e->result (offset 36)
     pop ebx
+    pop esi
+    ret
+
+; int ax_unlink(char* filename)
+; Строит struct unlink_args { filename, result=-1 } на стеке.
+; Возвращает 1 (удалён) или 0 (не найден / диск заблокирован).
+_ax_unlink:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=filename
+    mov eax, [esp+12]
+    push dword -1           ; struct.result = -1  (offset 4)
+    push eax                ; struct.filename      (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x15            ; SYS_UNLINK
+    int 0x80
+    mov eax, [esp+4]        ; result (offset 4)
+    add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; int ax_mkdir(char* dirname)
+; Строит struct mkdir_args { dirname, result=-1 } на стеке.
+; Возвращает 1 (создана) или 0 (ошибка).
+_ax_mkdir:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=dirname
+    mov eax, [esp+12]
+    push dword -1           ; struct.result = -1  (offset 4)
+    push eax                ; struct.dirname      (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x16            ; SYS_MKDIR
+    int 0x80
+    mov eax, [esp+4]        ; result (offset 4)
+    add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; void ax_disk_lock(int locked)
+; ESI = locked (0 или 1, не указатель) — та же схема, что ax_shell_claim.
+_ax_disk_lock:
+    push esi
+    mov esi, [esp+8]        ; esi = locked (0 или 1)
+    mov ah, 0x17            ; SYS_FS_LOCK
+    int 0x80
     pop esi
     ret
 

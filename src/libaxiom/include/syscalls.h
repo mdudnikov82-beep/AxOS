@@ -94,6 +94,7 @@ struct readdir_args {
     char         name[13]; // выход: "NAME.EXT\0"
     unsigned int size;    // выход: размер файла в байтах
     int          result;  // выход: 1 = запись найдена, 0 = конец директории
+    int          is_dir;  // выход: 1 = директория, 0 = файл
 };
 
 struct sbrk_args {
@@ -108,6 +109,22 @@ struct exec_redir_args {
     char* redir_out;
     int   result;
 };
+
+#define SYS_UNLINK 0x15
+
+struct unlink_args {
+    char* filename;
+    int   result;
+};
+
+#define SYS_MKDIR 0x16
+
+struct mkdir_args {
+    char* dirname;
+    int   result;
+};
+
+#define SYS_FS_LOCK 0x17  // ESI = 0 (разблокировать) или 1 (заблокировать)
 
 #define SYS_PS 0x13
 

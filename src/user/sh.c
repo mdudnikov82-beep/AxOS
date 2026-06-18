@@ -5,6 +5,14 @@ static int sh_streq(const char* a, const char* b) {
     return *a == *b;
 }
 
+static int sh_strncmp(const char* a, const char* b, int n) {
+    for (int i = 0; i < n; i++) {
+        if (a[i] != b[i]) return a[i] - b[i];
+        if (!a[i]) return 0;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
 
@@ -14,14 +22,76 @@ int main(int argc, char** argv) {
     ax_print("Run: <program> [args]  |  exit\n\n");
 
     char line[64];
-    while (1) {
-        ax_print("$ ");
+    char current_dir[13] = ""; // Пусто = корневой каталог
+        while (1) {
+        // Внутри цикла while(1), перед ax_readline:
+        if (current_dir[0] == '\0') {
+            ax_print("$ ");
+        } else {
+            ax_printf("[%s]$ ", current_dir);
+        }
         int len = ax_readline(line, sizeof(line));
         if (len == 0) continue;
 
         if (sh_streq(line, "exit")) {
             ax_print("Goodbye.\n");
             break;
+        }
+
+        if (sh_streq(line, "unlock")) {
+            ax_disk_lock(0);
+            ax_print("disk: unlocked\n");
+            continue;
+        }
+
+        if (sh_streq(line, "lock")) {
+            ax_disk_lock(1);
+            ax_print("disk: locked\n");
+            continue;
+        }
+
+        // Логика команды cd
+        if (sh_strncmp(line, "cd", 2) == 0 && (line[2] == ' ' || line[2] == '\0')) {
+            if (sh_streq(line, "cd ..") || sh_streq(line, "cd /") || sh_streq(line, "cd")) {
+                current_dir[0] = '\0'; // В корень
+            } else {
+                char* target = line + 3;
+                // Trim trailing spaces
+                int tlen = 0;
+                while (target[tlen]) tlen++;
+                while (tlen > 0 && target[tlen-1] == ' ') tlen--;
+                // Конвертируем в uppercase
+                char upper[13];
+                int k = 0;
+                while (k < tlen && k < 12) {
+                    char c = target[k];
+                    upper[k++] = (c >= 'a' && c <= 'z') ? c - 32 : c;
+                }
+                upper[k] = '\0';
+                // Проверяем, что директория реально существует
+                struct readdir_args da;
+                int found = 0;
+                for (unsigned int i = 0; ; i++) {
+                    da.index = i;
+                    da.result = 0;
+                    ax_readdir(&da);
+                    if (!da.result) break;
+                    if (da.is_dir) {
+                        int match = 1;
+                        for (int j = 0; upper[j] || da.name[j]; j++) {
+                            if (upper[j] != da.name[j]) { match = 0; break; }
+                        }
+                        if (match) { found = 1; break; }
+                    }
+                }
+                if (!found) {
+                    ax_print("cd: not found\n");
+                } else {
+                    for (k = 0; upper[k]; k++) current_dir[k] = upper[k];
+                    current_dir[k] = '\0';
+                }
+            }
+            continue;
         }
 
         // Отрезаем trailing '&' (фоновый запуск)

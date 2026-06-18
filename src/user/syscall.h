@@ -120,6 +120,7 @@ struct readdir_args {
     char         name[13]; // выход: "NAME.EXT\0"
     unsigned int size;     // выход: размер файла в байтах
     int          result;   // выход: 1 = запись найдена, 0 = конец директории
+    int          is_dir;   // выход: 1 = директория, 0 = файл
 };
 
 #define SYS_SBRK 0x12  // ESI -> struct sbrk_args
@@ -140,6 +141,29 @@ struct exec_redir_args {
     char* redir_out; // имя выходного файла (uppercase FAT12, e.g. "OUT.TXT")
     int   result;    // >= 0: slot, -1: не найден, -2: нет слотов
 };
+
+// --- Удаление файла (0x15) ---
+#define SYS_UNLINK 0x15  // ESI -> struct unlink_args
+
+// Удаляет файл с диска. Диск должен быть разблокирован.
+// result=1: удалён, 0: не найден или диск заблокирован.
+struct unlink_args {
+    char* filename;  // имя файла (uppercase FAT12, e.g. "OUT.TXT")
+    int   result;
+};
+
+// --- Создание директории (0x16) ---
+#define SYS_MKDIR 0x16  // ESI -> struct mkdir_args
+
+// Создаёт директорию в корне. Диск должен быть разблокирован.
+// result=1: создана, 0: уже существует, нет места, или диск заблокирован.
+struct mkdir_args {
+    char* dirname;
+    int   result;
+};
+
+// --- Блокировка файловой системы (0x17) ---
+#define SYS_FS_LOCK 0x17  // ESI = 0 (разблокировать) или 1 (заблокировать), не указатель
 
 // --- Список задач (0x13) ---
 #define SYS_PS 0x13  // ESI -> struct ps_entry

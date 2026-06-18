@@ -9,10 +9,12 @@ typedef struct vfs_driver {
     int (*is_locked)(void);
     void (*set_locked)(int locked);
     void (*list)(void);
-    int (*readdir)(unsigned int index, char* name_out, unsigned int* size_out);
+    int (*readdir)(unsigned int index, char* name_out, unsigned int* size_out, int* is_dir_out);
     int (*cat)(char* filename);
     unsigned int (*read)(char* filename, unsigned char* buffer, unsigned int max_size);
     int (*write)(char* filename, unsigned char* data, unsigned int size);
+    int (*delete)(char* filename);
+    int (*mkdir)(char* dirname);
 } vfs_driver_t;
 
 // Минимальная VFS: один глобальный корень (vfs_root), привязанный к FAT12.
@@ -22,9 +24,11 @@ int vfs_is_ready(void);
 int vfs_is_locked(void);
 void vfs_set_locked(int locked);
 void vfs_list(void);
-int vfs_readdir(unsigned int index, char* name_out, unsigned int* size_out);
+int vfs_readdir(unsigned int index, char* name_out, unsigned int* size_out, int* is_dir_out);
 int vfs_cat(char* filename);
 unsigned int vfs_read(char* filename, unsigned char* buffer, unsigned int max_size);
 int vfs_write(char* filename, unsigned char* data, unsigned int size);
+int vfs_delete(char* filename);
+int vfs_mkdir(char* dirname);
 
 #endif

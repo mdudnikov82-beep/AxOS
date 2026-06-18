@@ -616,7 +616,18 @@ void sys_sleep(char* arg) {
 
 void sys_readdir(char* arg) {
     struct readdir_args* a = (struct readdir_args*)arg;
-    a->result = vfs_readdir(a->index, a->name, &a->size);
+    int is_dir = 0;
+    a->result = vfs_readdir(a->index, a->name, &a->size, &is_dir);
+    a->is_dir = is_dir;
+}
+
+void sys_mkdir(char* arg) {
+    struct mkdir_args* a = (struct mkdir_args*)arg;
+    a->result = vfs_mkdir(a->dirname);
+}
+
+void sys_fs_lock(char* arg) {
+    vfs_set_locked(arg != (char*)0);
 }
 
 void sys_ps(char* arg) {
@@ -645,6 +656,11 @@ void sys_sbrk(char* arg) {
     a->result = old_brk;
 }
 
+void sys_unlink(char* arg) {
+    struct unlink_args* a = (struct unlink_args*)arg;
+    a->result = vfs_delete(a->filename);
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01
@@ -667,6 +683,9 @@ syscall_fn syscall_table[] = {
     sys_sbrk,          // 0x12
     sys_ps,            // 0x13
     sys_exec_redir,    // 0x14
+    sys_unlink,        // 0x15
+    sys_mkdir,         // 0x16
+    sys_fs_lock,       // 0x17
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))
@@ -1136,6 +1155,13 @@ static int autoboot() {
     return 0;
 }
 
+/* Diagnostic: write char at (row=24, col) with attribute */
+#define VGA_MARK(col, ch, attr) do { \
+    volatile unsigned char* _v = (volatile unsigned char*)0xB8000; \
+    _v[(24*80+(col))*2]   = (ch); \
+    _v[(24*80+(col))*2+1] = (attr); \
+} while(0)
+
 void kernel_main() {
     char* video_memory = (char*) 0xB8000;
     video_memory[0] = 'M';
@@ -1146,24 +1172,32 @@ void kernel_main() {
     video_memory[5] = 0x0F;
 
     clear_screen();
+    VGA_MARK(70, 'A', 0x4F); /* pre-paging VGA write */
+
     init_idt();
     init_paging();
+    VGA_MARK(71, 'B', 0x4F); /* post-paging VGA write */
+
     init_tss();
     init_heap();
     init_tasking();
     task_create("heartbeat", heartbeat_task);
     task_create_user("ring3demo", ring3_spinner_task);
 
-    if (!vfs_init()) {
-        print_string("Warning: FAT12 disk (build/disk.img) not found - file commands disabled.\n");
-    }
+    VGA_MARK(72, 'C', 0x4F); /* pre-vfs_init */
 
-    print_string("AxOS v0.6 [Interrupt Mode]\n");
+    vfs_init();
+    VGA_MARK(73, 'D', 0x4F); /* post-vfs_init */
+
+    print_string("X");
+    VGA_MARK(74, 'E', 0x4F); /* post-print_string-one-char */
 
     if (autoboot()) {
         execute_command("run SH.BIN");
+        VGA_MARK(74, 'E', 0x4F); /* post-execute_command */
     } else {
         print_string("AxOS> ");
+        VGA_MARK(74, 'F', 0x4F); /* post-fallback-prompt */
     }
 
     // БЕСКОНЕЧНЫЙ ЦИКЛ ОБЯЗАТЕЛЕН

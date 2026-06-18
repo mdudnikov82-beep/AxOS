@@ -14,7 +14,7 @@
 // свободным и сливает его с соседними свободными блоками в списке
 // (coalescing).
 
-#define HEAP_START 0x30000
+#define HEAP_START 0x40000  /* must be > FAT12_BASE + FAT12_TOTAL_SECTORS*512 = 0x3FFFF */
 #define HEAP_END   0x90000
 #define HEAP_SIZE  (HEAP_END - HEAP_START)
 

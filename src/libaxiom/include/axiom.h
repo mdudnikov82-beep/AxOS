@@ -11,6 +11,17 @@ void         ax_writefile(char* name, unsigned char* data, unsigned int size);
 unsigned int ax_readfile(char* name, unsigned char* buf, unsigned int max);
 void         ax_exit(void);
 
+// Удалить файл с диска. Диск должен быть разблокирован.
+// Возвращает 1 при успехе, 0 если файл не найден или диск заблокирован.
+int ax_unlink(char* filename);
+
+// Создать директорию. Диск должен быть разблокирован.
+// Возвращает 1 при успехе, 0 если имя занято, нет места, или диск заблокирован.
+int ax_mkdir(char* dirname);
+
+// Разблокировать (locked=0) или заблокировать (locked=1) файловую систему.
+void ax_disk_lock(int locked);
+
 // fd-based file API
 int  ax_open(char* name, int flags);          // возвращает fd или -1
 int  ax_fread(int fd, void* buf, unsigned int n);   // возвращает прочитанные байты

@@ -14,7 +14,7 @@
 #include "ide.h"
 
 #define FAT12_BASE 0x20000
-#define FAT12_TOTAL_SECTORS 128 // 64 КБ / 512 = TOTAL_SECTORS в make_fat12.py
+#define FAT12_TOTAL_SECTORS 256 // 128 КБ / 512 = TOTAL_SECTORS в make_fat12.py
 
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
@@ -325,7 +325,7 @@ void fat12_list() {
     }
 }
 
-int fat12_readdir(unsigned int index, char* name_out, unsigned int* size_out) {
+int fat12_readdir(unsigned int index, char* name_out, unsigned int* size_out, int* is_dir_out) {
     if (!fat12_ready) return 0;
 
     struct fat12_dir_entry* entries = (struct fat12_dir_entry*)((unsigned char*)FAT12_BASE + fat12_root_dir_offset());
@@ -334,8 +334,7 @@ int fat12_readdir(unsigned int index, char* name_out, unsigned int* size_out) {
     for (int i = 0; i < bpb->root_entries; i++) {
         if (entries[i].name[0] == 0x00) break;
         if ((unsigned char)entries[i].name[0] == 0xE5) continue;
-        if (entries[i].attr & 0x08) continue;
-        if (entries[i].attr & 0x10) continue;
+        if (entries[i].attr & 0x08) continue;  // volume label
 
         if (found == index) {
             int p = 0;
@@ -348,11 +347,69 @@ int fat12_readdir(unsigned int index, char* name_out, unsigned int* size_out) {
             }
             name_out[p] = '\0';
             *size_out = entries[i].file_size;
+            *is_dir_out = (entries[i].attr & 0x10) ? 1 : 0;
             return 1;
         }
         found++;
     }
     return 0;
+}
+
+int fat12_mkdir(char* dirname) {
+    if (!fat12_ready) return 0;
+    if (fat12_locked) return 0;
+
+    char name[8], ext[3];
+    parse_83(dirname, name, ext);
+
+    if (fat12_find(name, ext)) return 0;  // already exists
+
+    struct fat12_dir_entry* entry = fat12_find_free_entry();
+    if (!entry) return 0;
+
+    unsigned int cluster = fat12_alloc_chain(1);
+    if (!cluster) return 0;
+
+    for (int i = 0; i < 8; i++) entry->name[i] = name[i];
+    for (int i = 0; i < 3; i++) entry->ext[i] = ext[i];
+    entry->attr = 0x10;
+    for (int i = 0; i < 10; i++) entry->reserved[i] = 0;
+    entry->time = 0;
+    entry->date = 0;
+    entry->start_cluster = (unsigned short)cluster;
+    entry->file_size = 0;
+
+    unsigned int cluster_size = (unsigned int)bpb->sectors_per_cluster * bpb->bytes_per_sector;
+    unsigned char* data_area = (unsigned char*)FAT12_BASE + fat12_data_offset();
+    unsigned char* cluster_data = data_area + (cluster - 2) * cluster_size;
+
+    for (unsigned int i = 0; i < cluster_size; i++)
+        cluster_data[i] = 0;
+
+    struct fat12_dir_entry* dots = (struct fat12_dir_entry*)cluster_data;
+
+    // "." entry
+    dots[0].name[0] = '.';
+    for (int i = 1; i < 8; i++) dots[0].name[i] = ' ';
+    for (int i = 0; i < 3; i++) dots[0].ext[i] = ' ';
+    dots[0].attr = 0x10;
+    for (int i = 0; i < 10; i++) dots[0].reserved[i] = 0;
+    dots[0].time = 0; dots[0].date = 0;
+    dots[0].start_cluster = (unsigned short)cluster;
+    dots[0].file_size = 0;
+
+    // ".." entry — points to root (cluster 0)
+    dots[1].name[0] = '.'; dots[1].name[1] = '.';
+    for (int i = 2; i < 8; i++) dots[1].name[i] = ' ';
+    for (int i = 0; i < 3; i++) dots[1].ext[i] = ' ';
+    dots[1].attr = 0x10;
+    for (int i = 0; i < 10; i++) dots[1].reserved[i] = 0;
+    dots[1].time = 0; dots[1].date = 0;
+    dots[1].start_cluster = 0;
+    dots[1].file_size = 0;
+
+    fat12_flush();
+    return 1;
 }
 
 int fat12_cat(char* filename) {
@@ -383,6 +440,24 @@ unsigned int fat12_load(char* filename, unsigned char* buffer, unsigned int max_
     if (!entry) return 0;
 
     return fat12_read_file(entry, buffer, max_size);
+}
+
+int fat12_delete(char* filename) {
+    if (!fat12_ready) return 0;
+    if (fat12_locked)  return 0;
+
+    char name[8], ext[3];
+    parse_83(filename, name, ext);
+
+    struct fat12_dir_entry* entry = fat12_find(name, ext);
+    if (!entry) return 0;
+
+    if (entry->start_cluster != 0)
+        fat12_free_chain(entry->start_cluster);
+
+    entry->name[0] = (char)0xE5; // помечаем запись как удалённую
+    fat12_flush();
+    return 1;
 }
 
 int fat12_write(char* filename, unsigned char* data, unsigned int size) {
