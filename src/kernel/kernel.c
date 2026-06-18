@@ -911,12 +911,8 @@ void execute_command(char* cmd) {
         print_string("  clear       - clear the screen\n");
         print_string("  about       - show OS info\n");
         print_string("  date        - show current date and time\n");
-        print_string("  uptime      - show time since boot\n");
         print_string("  sleep <sec> - pause for N seconds (0-9)\n");
         print_string("  reboot      - restart the OS\n");
-        print_string("  echo <text> - print text\n");
-        print_string("  ls          - list files on FAT12 RAM-disk\n");
-        print_string("  cat <file>  - show file contents\n");
         print_string("  write <file> <text> - create/overwrite a file (needs unlock)\n");
         print_string("  lock        - write-protect the FAT12 disk (default)\n");
         print_string("  unlock      - allow writes to the FAT12 disk\n");
@@ -927,8 +923,8 @@ void execute_command(char* cmd) {
         print_string("  usermode    - demo: jump to ring3, call syscall via int 0x80\n");
         print_string("  memtest     - test heap allocator (malloc/free)\n");
         print_string("  selftest    - run heap/paging/FAT12 regression tests\n");
-        print_string("  ps          - list running tasks\n");
         print_string("  Ctrl+Alt+F1/F2 - switch virtual console (TTY)\n");
+        print_string("  (echo/ls/cat/ps/uptime moved to userspace - use \"run X.BIN\")\n");
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
     } else if (str_eq(cmd, "about")) {
@@ -937,12 +933,6 @@ void execute_command(char* cmd) {
         print_string(vfs_is_locked() ? "locked (read-only)\n" : "unlocked (read-write)\n");
     } else if (str_eq(cmd, "date") || str_eq(cmd, "time")) {
         print_datetime();
-    } else if (str_eq(cmd, "uptime")) {
-        print_string("Uptime: ");
-        print_uint(timer_ticks / 100);
-        print_string(" sec (");
-        print_uint(timer_ticks);
-        print_string(" ticks)\n");
     } else if (str_starts_with(cmd, "sleep ")) {
         char digit = cmd[6];
         if (digit >= '0' && digit <= '9') {
@@ -955,15 +945,6 @@ void execute_command(char* cmd) {
     } else if (str_eq(cmd, "reboot")) {
         print_string("Rebooting...\n");
         reboot();
-    } else if (str_starts_with(cmd, "echo ")) {
-        print_string(cmd + 5);
-        print_string("\n");
-    } else if (str_eq(cmd, "ls")) {
-        vfs_list();
-    } else if (str_starts_with(cmd, "cat ")) {
-        if (!vfs_cat(cmd + 4)) {
-            print_string("File not found.\n");
-        }
     } else if (str_starts_with(cmd, "write ")) {
         char* filename = cmd + 6;
         if (*filename == '\0') {
@@ -1105,8 +1086,6 @@ void execute_command(char* cmd) {
         memtest_demo();
     } else if (str_eq(cmd, "selftest")) {
         run_self_tests();
-    } else if (str_eq(cmd, "ps")) {
-        print_task_list();
     } else {
         print_string("Unknown command: ");
         print_string(cmd);
