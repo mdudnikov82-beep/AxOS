@@ -76,6 +76,7 @@ void tty_switch(int n);
 int tty_active();
 extern void keyboard_interrupt_handler();
 extern void timer_interrupt_handler();
+extern void ide_interrupt_handler(); // idt.asm - IRQ14, см. init_idt и ide.c
 extern void syscall_handler();
 extern void enter_usermode(void (*entry)(void)); // usermode.asm — переход в ring3
 
@@ -158,6 +159,7 @@ void init_idt() {
     set_idt_gate(14, (unsigned long)page_fault_handler); // #PF — для отладки paging
     set_idt_gate(32, (unsigned long)timer_interrupt_handler);
     set_idt_gate(33, (unsigned long)keyboard_interrupt_handler);
+    set_idt_gate(0x2E, (unsigned long)ide_interrupt_handler); // IRQ14 (slave PIC) — см. ide.c
     set_idt_gate(0x80, (unsigned long)syscall_handler); // int 0x80 — системные вызовы AxOS
     IDT[0x80].type_attr = 0xEE; // DPL=3 — int 0x80 разрешён из ring3
     // type_attr у 0x80 (как и у 32/33 выше) оканчивается на E - interrupt
@@ -178,11 +180,18 @@ void init_idt() {
     __asm__("outb %0, %1" : : "a"((unsigned char)0x01), "Nd"(0x21));
     __asm__("outb %0, %1" : : "a"((unsigned char)0x01), "Nd"(0xA1));
 
-    // Маскируем все IRQ, кроме таймера (IRQ0) и клавиатуры (IRQ1) —
-    // для остальных у нас нет обработчиков, их срабатывание без
-    // IDT-записи приводит к тройному сбою.
-    __asm__("outb %0, %1" : : "a"((unsigned char)0xFC), "Nd"(0x21));
-    __asm__("outb %0, %1" : : "a"((unsigned char)0xFF), "Nd"(0xA1));
+    // Маскируем все IRQ, кроме таймера (IRQ0), клавиатуры (IRQ1) и IDE
+    // (IRQ14, slave PIC) — для остальных у нас нет обработчиков, их
+    // срабатывание без IDT-записи приводит к тройному сбою.
+    //
+    // IRQ14 идёт через slave PIC, а slave каскадирован в master через
+    // IRQ2 - значит, IRQ2 тоже должен быть размаскирован на master,
+    // иначе сигнал со slave физически не дойдёт до CPU. Маска мастера:
+    // 0xF8 = 11111000 - открыты биты 0,1,2 (IRQ0,1,2). Маска слейва:
+    // 0xBF = 10111111 - открыт бит 6 (IRQ8+6 = IRQ14), всё остальное
+    // на слейве для нас пока не нужно.
+    __asm__("outb %0, %1" : : "a"((unsigned char)0xF8), "Nd"(0x21));
+    __asm__("outb %0, %1" : : "a"((unsigned char)0xBF), "Nd"(0xA1));
 
     __asm__("sti");
 }

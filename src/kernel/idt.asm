@@ -2,6 +2,7 @@
 extern _keyboard_handler_main ; GCC на Windows добавляет подчёркивание к C-функциям
 extern _timer_handler_main
 extern _page_fault_handler_main
+extern _ide_irq_handler_main ; ide.c - просто ставит флаг, см. комментарий там
 extern _schedule ; tasking.c - переключение задач (round-robin)
 
 global _keyboard_interrupt_handler
@@ -10,6 +11,8 @@ global _timer_interrupt_handler
 global timer_interrupt_handler
 global _page_fault_handler
 global page_fault_handler
+global _ide_interrupt_handler
+global ide_interrupt_handler
 
 _keyboard_interrupt_handler:
 keyboard_interrupt_handler:
@@ -78,4 +81,24 @@ page_fault_handler:
 
     popa
     add esp, 4      ; убираем код ошибки, который положил CPU
+    iret
+
+; --- Обработчик IRQ14 (IDE, первичный канал) ---
+; IRQ14 идёт через slave PIC (он каскадирован в master через IRQ2), поэтому
+; EOI нужно отправить ОБОИМ контроллерам - сначала slave (0xA0), затем
+; master (0x20). Иначе master продолжит считать IRQ2 (= "слейв занят")
+; обрабатываемым и больше не пропустит ни один прерывание со slave PIC,
+; включая повторные IRQ14 - диск "зависнет" после первой операции.
+_ide_interrupt_handler:
+ide_interrupt_handler:
+    cld
+    pusha
+
+    mov al, 0x20
+    out 0xA0, al    ; EOI слейву (сам IRQ14)
+    out 0x20, al    ; EOI мастеру (каскадная линия IRQ2)
+
+    call _ide_irq_handler_main
+
+    popa
     iret

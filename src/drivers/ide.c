@@ -2,10 +2,16 @@
 //  PIO-драйвер ATA/IDE (primary bus, master, LBA28)
 // =================================================================
 //
-// Без DMA и прерываний - чтение/запись через порты 0x1F0-0x1F7 с
-// поллингом статус-регистра. Достаточно для одного диска в QEMU
-// (build/disk.img, см. build.bat/run.bat) - настоящий диск, в отличие
-// от встроенного в образ FAT12 RAM-диска (fat12.c).
+// Передача данных - всё ещё PIO через порты 0x1F0-0x1F7 (без DMA), но
+// ожидание готовности контроллера идёт через настоящее прерывание IRQ14
+// (idt.asm/kernel.c), а не через busy-poll статус-регистра, как было
+// раньше. Используется только из disktool.bin (SYS_DISK_*) - встроенный
+// в образ FAT12 RAM-диск (fat12.c) тут не задействован, у него своя
+// in-memory копия.
+//
+// ide_wait_ready() (ждём, что контроллер вообще отвечает, до выдачи
+// команды) остался поллингом - это проверка "жив ли диск", не связанная
+// с конкретной командой, IRQ тут ни при чём.
 
 #define IDE_REG_DATA       0x1F0
 #define IDE_REG_SECCOUNT   0x1F2
@@ -26,6 +32,16 @@
 #define IDE_CMD_IDENTIFY      0xEC
 
 #define IDE_WAIT_LIMIT 100000
+
+// Ставится обработчиком IRQ14 (idt.asm -> ide_irq_handler_main ниже).
+// Сбрасывается в 0 непосредственно перед каждой командой, которая должна
+// вызвать прерывание - так ide_wait_irq() не примет "эхо" от предыдущей
+// операции за готовность текущей.
+static volatile int ide_irq_fired = 0;
+
+void ide_irq_handler_main() {
+    ide_irq_fired = 1;
+}
 
 static unsigned char port_byte_in(unsigned short port) {
     unsigned char result;
@@ -61,6 +77,9 @@ static int ide_wait_ready() {
 }
 
 // Ждёт готовности данных (BSY=0, DRQ=1). Возвращает 0 при ERR или таймауте.
+// Используется только там, где прерывание по спецификации ATA не
+// гарантировано (DRQ для первого блока команды WRITE SECTORS - см.
+// ide_write_sector) - во всех остальных случаях ждём IRQ14, не статус-регистр.
 static int ide_wait_data() {
     for (unsigned int i = 0; i < IDE_WAIT_LIMIT; i++) {
         unsigned char status = port_byte_in(IDE_REG_STATUS);
@@ -68,6 +87,31 @@ static int ide_wait_data() {
         if (!(status & IDE_STATUS_BSY) && (status & IDE_STATUS_DRQ)) return 1;
     }
     return 0; // таймаут
+}
+
+// Ждёт прерывания от контроллера (вместо опроса статус-регистра) после
+// команды, которая по спецификации ATA гарантированно его генерирует.
+// Возвращает 0 при ERR-бите или если IRQ не пришёл за отведённое время
+// (не должно происходить при включённом IRQ14, но не должно и подвесить
+// систему намертво, если что-то пошло не так).
+//
+// sti() ОБЯЗАТЕЛЕН здесь: эти функции вызываются из syscall'ов (int 0x80),
+// а IDT-gate syscall'а - interrupt gate, CPU сам гасит IF при входе (см.
+// комментарий у IDT[0x80] в kernel.c - на этом ещё и критические секции
+// heap.c держатся). Значит, всё время выполнения syscall'а прерывания
+// глобально выключены - IRQ14 физически не сможет быть доставлен, и этот
+// цикл провисел бы все IDE_WAIT_LIMIT*10 итераций впустую при КАЖДОМ
+// вызове, независимо от того, ответил диск или нет (что и происходило,
+// пока тут не было sti - PIC и IDT были настроены верно, но прерывание
+// просто не могло прийти).
+static int ide_wait_irq() {
+    __asm__ volatile("sti");
+    for (unsigned int i = 0; i < IDE_WAIT_LIMIT * 10; i++) {
+        if (ide_irq_fired) {
+            return !(port_byte_in(IDE_REG_STATUS) & IDE_STATUS_ERR);
+        }
+    }
+    return 0; // таймаут - прерывание не пришло
 }
 
 static void ide_select_lba(unsigned int lba) {
@@ -82,9 +126,11 @@ int ide_read_sector(unsigned int lba, unsigned char* buffer) {
     if (!ide_wait_ready()) return 0;
 
     ide_select_lba(lba);
+    ide_irq_fired = 0; // сбрасываем до команды - иначе примем "эхо" от предыдущей операции
     port_byte_out(IDE_REG_COMMAND, IDE_CMD_READ_SECTORS);
 
-    if (!ide_wait_data()) return 0;
+    // READ SECTORS гарантированно генерирует IRQ при готовности данных.
+    if (!ide_wait_irq()) return 0;
 
     for (int i = 0; i < 256; i++) {
         unsigned short word = port_word_in(IDE_REG_DATA);
@@ -101,6 +147,11 @@ int ide_write_sector(unsigned int lba, unsigned char* buffer) {
     ide_select_lba(lba);
     port_byte_out(IDE_REG_COMMAND, IDE_CMD_WRITE_SECTORS);
 
+    // Особый случай: по спецификации ATA контроллер НЕ обязан слать IRQ
+    // перед первым (тут и единственным, SECCOUNT=1) блоком данных команды
+    // WRITE SECTORS - хост должен сам опросить DRQ. IRQ гарантирован только
+    // ПОСЛЕ того, как этот блок принят - вот его и ждём ниже через
+    // ide_wait_irq(), а не статус-регистр.
     if (!ide_wait_data()) return 0;
 
     for (int i = 0; i < 256; i++) {
@@ -108,8 +159,12 @@ int ide_write_sector(unsigned int lba, unsigned char* buffer) {
         port_word_out(IDE_REG_DATA, word);
     }
 
+    ide_irq_fired = 0; // сбрасываем перед ожиданием завершения записи блока
+    if (!ide_wait_irq()) return 0;
+
+    ide_irq_fired = 0; // и перед ожиданием завершения CACHE FLUSH
     port_byte_out(IDE_REG_COMMAND, IDE_CMD_CACHE_FLUSH);
-    return ide_wait_ready();
+    return ide_wait_irq();
 }
 
 int ide_identify(char* model) {
@@ -120,10 +175,13 @@ int ide_identify(char* model) {
     port_byte_out(IDE_REG_LBA_LOW, 0);
     port_byte_out(IDE_REG_LBA_MID, 0);
     port_byte_out(IDE_REG_LBA_HIGH, 0);
+    ide_irq_fired = 0;
     port_byte_out(IDE_REG_COMMAND, IDE_CMD_IDENTIFY);
 
     if (port_byte_in(IDE_REG_STATUS) == 0) return 0; // нет устройства
-    if (!ide_wait_data()) return 0;
+    // IDENTIFY DEVICE гарантированно генерирует IRQ при готовности данных,
+    // как и READ SECTORS.
+    if (!ide_wait_irq()) return 0;
 
     unsigned short data[256];
     for (int i = 0; i < 256; i++) {
