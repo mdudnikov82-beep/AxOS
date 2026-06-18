@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Vendored dev toolkit (large, fetched separately)
 /w64devkit/
 
@@ -14,7 +13,7 @@
 *.bak
 /Unknown/
 /Ненужное/
-=======
+
 # Prerequisites
 *.d
 
@@ -70,4 +69,3 @@ dkms.conf
 
 # debug information files
 *.dwo
->>>>>>> 0d791b232dad60f882dcff60f5aab736673474f6
