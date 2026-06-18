@@ -913,7 +913,6 @@ void execute_command(char* cmd) {
         print_string("  date        - show current date and time\n");
         print_string("  sleep <sec> - pause for N seconds (0-9)\n");
         print_string("  reboot      - restart the OS\n");
-        print_string("  write <file> <text> - create/overwrite a file (needs unlock)\n");
         print_string("  lock        - write-protect the FAT12 disk (default)\n");
         print_string("  unlock      - allow writes to the FAT12 disk\n");
         print_string("  run <file>  - load and run a program from FAT12 (ring3)\n");
@@ -924,7 +923,7 @@ void execute_command(char* cmd) {
         print_string("  memtest     - test heap allocator (malloc/free)\n");
         print_string("  selftest    - run heap/paging/FAT12 regression tests\n");
         print_string("  Ctrl+Alt+F1/F2 - switch virtual console (TTY)\n");
-        print_string("  (echo/ls/cat/ps/uptime moved to userspace - use \"run X.BIN\")\n");
+        print_string("  (echo/ls/cat/ps/uptime/write moved to userspace - use \"run X.BIN\")\n");
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
     } else if (str_eq(cmd, "about")) {
@@ -945,26 +944,6 @@ void execute_command(char* cmd) {
     } else if (str_eq(cmd, "reboot")) {
         print_string("Rebooting...\n");
         reboot();
-    } else if (str_starts_with(cmd, "write ")) {
-        char* filename = cmd + 6;
-        if (*filename == '\0') {
-            print_string("Usage: write <file> <text>\n");
-        } else if (vfs_is_locked()) {
-            print_string("Disk is locked. Use 'unlock' to enable writes.\n");
-        } else {
-            char* text = filename;
-            while (*text != '\0' && *text != ' ') text++;
-            if (*text == ' ') { *text = '\0'; text++; }
-
-            unsigned int len = 0;
-            while (text[len] != '\0') len++;
-
-            if (vfs_write(filename, (unsigned char*)text, len)) {
-                print_string("Written.\n");
-            } else {
-                print_string("Write failed (disk full?).\n");
-            }
-        }
     } else if (str_eq(cmd, "lock")) {
         vfs_set_locked(1);
         print_string("FAT12 disk locked (read-only).\n");
