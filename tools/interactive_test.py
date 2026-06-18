@@ -24,6 +24,13 @@ KEYMAP = {
     ' ': 'spc', '\n': 'ret', '.': 'dot', '/': 'slash', '-': 'minus',
 }
 
+# Символы, набираемые через Shift на US-раскладке: QEMU sendkey принимает
+# комбинацию "shift-<base>" как один press/release обоих клавиш.
+SHIFT_MAP = {
+    '_': 'minus', '&': '7', '!': '1', '@': '2', '#': '3', '$': '4',
+    '%': '5', '^': '6', '*': '8', '(': '9', ')': '0', '+': 'equal',
+}
+
 def find_qemu():
     for c in QEMU_CANDIDATES:
         if os.path.isfile(c):
@@ -49,15 +56,22 @@ def decode_vga(data):
 
 def sendkey_str(sock, text):
     for c in text:
-        key = KEYMAP.get(c, c.lower())
+        if c in SHIFT_MAP:
+            key = f"shift-{SHIFT_MAP[c]}"
+        else:
+            key = KEYMAP.get(c, c.lower())
         sock.sendall(f"sendkey {key}\n".encode())
-        sock.recv(4096)
-        time.sleep(0.12)
+        time.sleep(0.35)
 
 
 def dump(sock, label):
+    if os.path.isfile(DUMP_FILE):
+        os.remove(DUMP_FILE)
     sock.sendall(f"pmemsave 0xb8000 4000 {DUMP_FILE}\n".encode())
-    time.sleep(0.5)
+    for _ in range(20):
+        if os.path.isfile(DUMP_FILE):
+            break
+        time.sleep(0.2)
     with open(DUMP_FILE, "rb") as f:
         data = f.read()
     os.remove(DUMP_FILE)
@@ -88,19 +102,18 @@ def main():
 
         dump(sock, "after boot")
 
-        for label, cmd in [
-            ("after unlock", "unlock\n"),
-            ("after ls", "ls\n"),
-            ("after mkdir TESTDIR", "mkdir TESTDIR\n"),
-            ("after ls (should show TESTDIR)", "ls\n"),
-            ("after cd TESTDIR", "cd TESTDIR\n"),
-            ("after ls inside TESTDIR", "ls\n"),
-            ("after cd ..", "cd ..\n"),
-            ("after rm HELLO.BIN", "rm HELLO.BIN\n"),
-            ("after ls (HELLO.BIN gone?)", "ls\n"),
+        for label, cmd, extra_wait in [
+            ("after unlock", "unlock\n", 0),
+            ("launch sleep in background", "sleep &\n", 0),
+            ("prompt returned immediately?", "ps\n", 0),
+            ("ps again 1.5s later (still sleeping?)", "ps\n", 1.5),
+            ("ps after ~4s total (background should have exited)", "ps\n", 2.5),
+            ("launch top in background, then ls", "top &\n", 0.5),
+            ("confirm shell still responsive after launching top bg", "ls\n", 0),
+            ("ps with top still looping in background", "ps\n", 1.5),
         ]:
             sendkey_str(sock, cmd)
-            time.sleep(1)
+            time.sleep(1 + extra_wait)
             dump(sock, label)
             alive = proc.poll() is None
             print(f"QEMU process alive: {alive}")
