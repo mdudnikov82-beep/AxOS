@@ -1,29 +1,16 @@
-static int cursor_x = 0;
-static int cursor_y = 0;
-
-// Текущий атрибут текста (низкий нибл = foreground, высокий = background),
-// меняется командой SGR (\033[...m) и применяется к каждому новому символу.
-static unsigned char current_attr = 0x0F; // белый на чёрном (старое поведение по умолчанию)
-
 // ANSI SGR использует цвета 0-7 в порядке black,red,green,yellow,blue,magenta,cyan,white;
 // в VGA-атрибуте те же восемь цветов лежат в другом порядке - таблица переводит один в другой.
 static const unsigned char ansi_to_vga[8] = {0, 4, 2, 6, 1, 5, 3, 7};
 
-// Состояние разбора escape-последовательности. Статическое (не локальное
-// внутри print_string), потому что программа может слать её по одному
-// символу за вызов (см. ax_putchar) - разбор должен переживать между вызовами.
+// Состояние разбора escape-последовательности.
 enum { ANSI_TEXT, ANSI_ESC, ANSI_BRACKET };
-static int ansi_state = ANSI_TEXT;
-static int ansi_params[4];
-static int ansi_param_count = 0;
-static int ansi_param_active = 0;
 
-// Виртуальные консоли (TTY): только активная отражается в реальной VGA-
-// памяти (0xB8000); неактивные хранят свой экран в обычной RAM и не видны,
-// пока на них не переключатся (Ctrl+Alt+F1/F2, см. kernel.c). Курсор, цвет
-// и состояние ANSI-парсера тоже отдельные на каждую консоль - иначе,
-// например, печать команды на одной консоли продолжалась бы с цветом,
-// оставшимся от другой.
+// Виртуальные консоли (TTY): у каждой свой буфер экрана, курсор, цвет и
+// состояние ANSI-парсера - печать на одной никогда не задевает другую,
+// даже если консоль не видна на экране в данный момент (например, фоновая
+// задача печатает что-то на неактивной консоли). Только активная консоль
+// зеркалится в реальную VGA-память (0xB8000); print_string_to() пишет
+// одновременно и в буфер своей консоли, и (если она активна) в VGA.
 #define TTY_COUNT  2
 #define TTY_BUFSZ  (80 * 25 * 2)
 
@@ -52,130 +39,110 @@ struct tty_state {
 static struct tty_state* const ttys = (struct tty_state*) TTYS_BASE;
 static int active_tty = 0;
 
-// Заполняет неактивные консоли пустым экраном при загрузке - иначе их
-// буфер (нулевые байты) выглядел бы иначе, чем настоящий "пустой" экран
-// (символ 0x00, а не пробел с обычным атрибутом).
-void init_ttys() {
-    for (int n = 1; n < TTY_COUNT; n++) {
-        for (int i = 0; i < TTY_BUFSZ; i += 2) {
-            ttys[n].buffer[i] = ' ';
-            ttys[n].buffer[i + 1] = 0x0F;
-        }
-        ttys[n].cursor_x = 0;
-        ttys[n].cursor_y = 0;
-        ttys[n].attr = 0x0F;
-        ttys[n].ansi_state = ANSI_TEXT;
-        ttys[n].ansi_param_count = 0;
-        ttys[n].ansi_param_active = 0;
-    }
-}
-
-static void tty_save(int n) {
-    unsigned char* vidmem = (unsigned char*) 0xB8000;
-    for (int i = 0; i < TTY_BUFSZ; i++) ttys[n].buffer[i] = vidmem[i];
-    ttys[n].cursor_x = cursor_x;
-    ttys[n].cursor_y = cursor_y;
-    ttys[n].attr = current_attr;
-    ttys[n].ansi_state = ansi_state;
-    ttys[n].ansi_param_count = ansi_param_count;
-    ttys[n].ansi_param_active = ansi_param_active;
-    for (int i = 0; i < 4; i++) ttys[n].ansi_params[i] = ansi_params[i];
-}
-
-static void tty_load(int n) {
-    unsigned char* vidmem = (unsigned char*) 0xB8000;
-    for (int i = 0; i < TTY_BUFSZ; i++) vidmem[i] = ttys[n].buffer[i];
-    cursor_x = ttys[n].cursor_x;
-    cursor_y = ttys[n].cursor_y;
-    current_attr = ttys[n].attr;
-    ansi_state = ttys[n].ansi_state;
-    ansi_param_count = ttys[n].ansi_param_count;
-    ansi_param_active = ttys[n].ansi_param_active;
-    for (int i = 0; i < 4; i++) ansi_params[i] = ttys[n].ansi_params[i];
-}
-
 int tty_active() {
     return active_tty;
 }
 
+// Переключение консоли - это просто "что показываем" (active_tty + копия
+// буфера новой консоли в VGA). Буфер консоли всегда актуален независимо от
+// того, активна она или нет (см. tty_putc выше), так что сохранять старую
+// консоль перед переключением не нужно - в отличие от первой версии этой
+// фичи, где переключение делало memcpy и в обе стороны.
 void tty_switch(int n) {
     if (n < 0 || n >= TTY_COUNT || n == active_tty) return;
-    tty_save(active_tty);
     active_tty = n;
-    tty_load(n);
+    unsigned char* vidmem = (unsigned char*) 0xB8000;
+    for (int i = 0; i < TTY_BUFSZ; i++) vidmem[i] = ttys[n].buffer[i];
+}
+
+// Пишет один символ+атрибут в буфер консоли tty и, если она сейчас активна,
+// тем же движением - в реальную VGA-память. Через эту функцию проходит весь
+// вывод (print_string_to/clear_screen_tty/backspace_tty/scroll_tty) - так
+// буфер неактивной консоли и видимый экран активной никогда не расходятся.
+static void tty_putc(int tty, int offset, unsigned char ch, unsigned char attr) {
+    ttys[tty].buffer[offset] = ch;
+    ttys[tty].buffer[offset + 1] = attr;
+    if (tty == active_tty) {
+        unsigned char* vidmem = (unsigned char*) 0xB8000;
+        vidmem[offset] = ch;
+        vidmem[offset + 1] = attr;
+    }
+}
+
+void clear_screen_tty(int tty) {
+    for (int i = 0; i < TTY_BUFSZ; i += 2) tty_putc(tty, i, ' ', ttys[tty].attr);
+    ttys[tty].cursor_x = 0;
+    ttys[tty].cursor_y = 0;
 }
 
 void clear_screen() {
-    char* vidmem = (char*) 0xB8000;
-    for (int i = 0; i < 80 * 25 * 2; i += 2) {
-        vidmem[i] = ' ';
-        vidmem[i+1] = current_attr;
-    }
-    cursor_x = 0;
-    cursor_y = 0;
+    clear_screen_tty(active_tty);
 }
 
 // Стирает символ перед курсором (используется клавишей Backspace)
-void backspace() {
-    if (cursor_x == 0 && cursor_y == 0) return;
+void backspace_tty(int tty) {
+    if (ttys[tty].cursor_x == 0 && ttys[tty].cursor_y == 0) return;
 
-    if (cursor_x == 0) {
-        cursor_x = 79;
-        cursor_y--;
+    if (ttys[tty].cursor_x == 0) {
+        ttys[tty].cursor_x = 79;
+        ttys[tty].cursor_y--;
     } else {
-        cursor_x--;
+        ttys[tty].cursor_x--;
     }
 
-    unsigned char* vidmem = (unsigned char*) 0xB8000;
-    int offset = (cursor_y * 80 + cursor_x) * 2;
-    vidmem[offset] = ' ';
-    vidmem[offset + 1] = current_attr;
+    int offset = (ttys[tty].cursor_y * 80 + ttys[tty].cursor_x) * 2;
+    tty_putc(tty, offset, ' ', ttys[tty].attr);
 }
 
-// Сдвигает содержимое экрана на одну строку вверх и очищает последнюю
-// строку — вызывается, когда курсор выходит за нижнюю границу (25 строк).
-static void scroll() {
-    unsigned char* vidmem = (unsigned char*) 0xB8000;
+void backspace() {
+    backspace_tty(active_tty);
+}
 
-    for (int i = 0; i < 80 * 24 * 2; i++) {
-        vidmem[i] = vidmem[i + 80 * 2];
-    }
+// Сдвигает содержимое консоли на одну строку вверх и очищает последнюю -
+// вызывается, когда курсор выходит за нижнюю границу (25 строк).
+static void scroll_tty(int tty) {
+    unsigned char* buf = ttys[tty].buffer;
 
+    for (int i = 0; i < 80 * 24 * 2; i++) buf[i] = buf[i + 80 * 2];
     for (int i = 80 * 24 * 2; i < 80 * 25 * 2; i += 2) {
-        vidmem[i] = ' ';
-        vidmem[i + 1] = current_attr;
+        buf[i] = ' ';
+        buf[i + 1] = ttys[tty].attr;
     }
+    ttys[tty].cursor_y--;
 
-    cursor_y--;
+    if (tty == active_tty) {
+        unsigned char* vidmem = (unsigned char*) 0xB8000;
+        for (int i = 0; i < TTY_BUFSZ; i++) vidmem[i] = buf[i];
+    }
 }
 
-static void ansi_reset_params() {
-    for (int i = 0; i < 4; i++) ansi_params[i] = 0;
-    ansi_param_count = 0;
-    ansi_param_active = 0;
+static void ansi_reset_params(int tty) {
+    for (int i = 0; i < 4; i++) ttys[tty].ansi_params[i] = 0;
+    ttys[tty].ansi_param_count = 0;
+    ttys[tty].ansi_param_active = 0;
 }
 
 // SGR (Select Graphic Rendition) - \033[<params>m - меняет текущий цвет.
-static void ansi_apply_sgr() {
-    if (ansi_param_count == 0) { current_attr = 0x0F; return; }
+static void ansi_apply_sgr(int tty) {
+    if (ttys[tty].ansi_param_count == 0) { ttys[tty].attr = 0x0F; return; }
 
-    for (int i = 0; i < ansi_param_count; i++) {
-        int p = ansi_params[i];
-        unsigned char fg = current_attr & 0x0F;
-        unsigned char bg = (current_attr >> 4) & 0x0F;
+    for (int i = 0; i < ttys[tty].ansi_param_count; i++) {
+        int p = ttys[tty].ansi_params[i];
+        unsigned char fg = ttys[tty].attr & 0x0F;
+        unsigned char bg = (ttys[tty].attr >> 4) & 0x0F;
 
         if (p == 0) {
-            current_attr = 0x0F;                                            // reset
+            ttys[tty].attr = 0x0F;                                            // reset
         } else if (p == 1) {
-            current_attr = (unsigned char)((bg << 4) | (fg | 0x08));         // bold -> яркий foreground
+            ttys[tty].attr = (unsigned char)((bg << 4) | (fg | 0x08));         // bold -> яркий foreground
         } else if (p >= 30 && p <= 37) {
-            current_attr = (unsigned char)((bg << 4) | ((fg & 0x08) | ansi_to_vga[p - 30]));
+            ttys[tty].attr = (unsigned char)((bg << 4) | ((fg & 0x08) | ansi_to_vga[p - 30]));
         } else if (p >= 40 && p <= 47) {
-            current_attr = (unsigned char)((ansi_to_vga[p - 40] << 4) | fg);
+            ttys[tty].attr = (unsigned char)((ansi_to_vga[p - 40] << 4) | fg);
         } else if (p >= 90 && p <= 97) {
-            current_attr = (unsigned char)((bg << 4) | (0x08 | ansi_to_vga[p - 90]));
+            ttys[tty].attr = (unsigned char)((bg << 4) | (0x08 | ansi_to_vga[p - 90]));
         } else if (p >= 100 && p <= 107) {
-            current_attr = (unsigned char)(((0x08 | ansi_to_vga[p - 100]) << 4) | fg);
+            ttys[tty].attr = (unsigned char)(((0x08 | ansi_to_vga[p - 100]) << 4) | fg);
         }
         // остальные коды (2 - dim, 4 - underline, 7 - reverse...) у VGA не
         // имеют аналога в атрибуте символа - молча игнорируются.
@@ -185,26 +152,26 @@ static void ansi_apply_sgr() {
 // Финальный байт CSI-последовательности (буква после параметров) решает,
 // какую команду выполнить. Поддержаны только реально нужные шеллу: цвет,
 // очистка экрана и позиционирование курсора.
-static void ansi_dispatch(char final) {
+static void ansi_dispatch(int tty, char final) {
     switch (final) {
         case 'm':
-            ansi_apply_sgr();
+            ansi_apply_sgr(tty);
             break;
         case 'J':
             // Поддерживается только полная очистка (\033[2J); вариантов
             // "очистить от курсора" (\033[0J/\033[1J) пока нет.
-            if (ansi_param_count == 0 || ansi_params[0] == 2) clear_screen();
+            if (ttys[tty].ansi_param_count == 0 || ttys[tty].ansi_params[0] == 2) clear_screen_tty(tty);
             break;
         case 'H':
         case 'f': {
-            int row = ansi_param_count > 0 ? ansi_params[0] : 1;
-            int col = ansi_param_count > 1 ? ansi_params[1] : 1;
+            int row = ttys[tty].ansi_param_count > 0 ? ttys[tty].ansi_params[0] : 1;
+            int col = ttys[tty].ansi_param_count > 1 ? ttys[tty].ansi_params[1] : 1;
             if (row < 1) row = 1;
             if (row > 25) row = 25;
             if (col < 1) col = 1;
             if (col > 80) col = 80;
-            cursor_y = row - 1;
-            cursor_x = col - 1;
+            ttys[tty].cursor_y = row - 1;
+            ttys[tty].cursor_x = col - 1;
             break;
         }
         default:
@@ -212,65 +179,92 @@ static void ansi_dispatch(char final) {
     }
 }
 
-void print_string(char* str) {
-    unsigned char* vidmem = (unsigned char*) 0xB8000;
+void print_string_to(int tty, char* str) {
     int i = 0;
     while (str[i] != '\0') {
         char c = str[i];
 
-        if (ansi_state == ANSI_ESC) {
+        if (ttys[tty].ansi_state == ANSI_ESC) {
             if (c == '[') {
-                ansi_state = ANSI_BRACKET;
-                ansi_reset_params();
+                ttys[tty].ansi_state = ANSI_BRACKET;
+                ansi_reset_params(tty);
             } else {
-                ansi_state = ANSI_TEXT; // не CSI - отбрасываем одинокий ESC
+                ttys[tty].ansi_state = ANSI_TEXT; // не CSI - отбрасываем одинокий ESC
             }
             i++;
             continue;
         }
 
-        if (ansi_state == ANSI_BRACKET) {
+        if (ttys[tty].ansi_state == ANSI_BRACKET) {
             if (c >= '0' && c <= '9') {
-                ansi_params[ansi_param_count] = ansi_params[ansi_param_count] * 10 + (c - '0');
-                ansi_param_active = 1;
+                ttys[tty].ansi_params[ttys[tty].ansi_param_count] =
+                    ttys[tty].ansi_params[ttys[tty].ansi_param_count] * 10 + (c - '0');
+                ttys[tty].ansi_param_active = 1;
             } else if (c == ';') {
-                if (ansi_param_count < 3) ansi_param_count++;
-                ansi_param_active = 0;
+                if (ttys[tty].ansi_param_count < 3) ttys[tty].ansi_param_count++;
+                ttys[tty].ansi_param_active = 0;
             } else {
-                if (ansi_param_active && ansi_param_count < 4) ansi_param_count++;
-                ansi_dispatch(c);
-                ansi_state = ANSI_TEXT;
+                if (ttys[tty].ansi_param_active && ttys[tty].ansi_param_count < 4) ttys[tty].ansi_param_count++;
+                ansi_dispatch(tty, c);
+                ttys[tty].ansi_state = ANSI_TEXT;
             }
             i++;
             continue;
         }
 
-        if (c == '\033') { ansi_state = ANSI_ESC; i++; continue; }
+        if (c == '\033') { ttys[tty].ansi_state = ANSI_ESC; i++; continue; }
 
         if (c == '\n') {
-            cursor_x = 0;
-            cursor_y++;
-            if (cursor_y >= 25) scroll();
+            ttys[tty].cursor_x = 0;
+            ttys[tty].cursor_y++;
+            if (ttys[tty].cursor_y >= 25) scroll_tty(tty);
             i++;
             continue;
         }
 
         if (c == '\b') {
-            backspace();
+            backspace_tty(tty);
             i++;
             continue;
         }
 
-        int offset = (cursor_y * 80 + cursor_x) * 2;
-        vidmem[offset] = c;
-        vidmem[offset + 1] = current_attr;
+        int offset = (ttys[tty].cursor_y * 80 + ttys[tty].cursor_x) * 2;
+        tty_putc(tty, offset, c, ttys[tty].attr);
 
-        cursor_x++;
-        if (cursor_x >= 80) {
-            cursor_x = 0;
-            cursor_y++;
-            if (cursor_y >= 25) scroll();
+        ttys[tty].cursor_x++;
+        if (ttys[tty].cursor_x >= 80) {
+            ttys[tty].cursor_x = 0;
+            ttys[tty].cursor_y++;
+            if (ttys[tty].cursor_y >= 25) scroll_tty(tty);
         }
         i++;
     }
+}
+
+void print_string(char* str) {
+    print_string_to(active_tty, str);
+}
+
+// Инициализирует ВСЕ консоли (включая активную - 0) одинаковым пустым
+// экраном с обычным атрибутом и сбрасывает курсор/ANSI-состояние, а затем
+// зеркалит активную в VGA. Вызывается один раз при загрузке, до этого
+// ttys[] лежит по фиксированному адресу с произвольным мусором в памяти
+// (не .bss - см. комментарий у TTYS_BASE), поэтому даже "своя" консоль 0
+// нуждается в явной инициализации, а не только запасные 1..N-1.
+void init_ttys() {
+    for (int n = 0; n < TTY_COUNT; n++) {
+        ttys[n].cursor_x = 0;
+        ttys[n].cursor_y = 0;
+        ttys[n].attr = 0x0F;
+        ttys[n].ansi_state = ANSI_TEXT;
+        ttys[n].ansi_param_count = 0;
+        ttys[n].ansi_param_active = 0;
+        for (int i = 0; i < TTY_BUFSZ; i += 2) {
+            ttys[n].buffer[i] = ' ';
+            ttys[n].buffer[i + 1] = 0x0F;
+        }
+    }
+
+    unsigned char* vidmem = (unsigned char*) 0xB8000;
+    for (int i = 0; i < TTY_BUFSZ; i++) vidmem[i] = ttys[active_tty].buffer[i];
 }

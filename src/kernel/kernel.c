@@ -68,6 +68,7 @@ void on_task_exit(int user_slot_index) {
 // Прототипы функций
 void clear_screen();
 void print_string(char* str);
+void print_string_to(int tty, char* str);
 void backspace();
 void init_idt();
 void init_ttys();
@@ -77,27 +78,50 @@ extern void keyboard_interrupt_handler();
 extern void timer_interrupt_handler();
 extern void syscall_handler();
 extern void enter_usermode(void (*entry)(void)); // usermode.asm — переход в ring3
-int command_len = 0;
-char command_buffer[64];
+
+// Должно совпадать с TTY_COUNT в screen.c - там нет общего заголовка,
+// поэтому константа продублирована (как TSS_SEG в tss.c/gdt.asm).
+#define KERNEL_TTY_COUNT 2
+
+// Всё ниже было одной общей переменной на всю систему, пока на каждой
+// консоли мог быть только kernel shell. Теперь у каждой TTY (см. screen.c)
+// свой независимый AxSH, так что и состояние ввода/shell'а должно быть
+// своим на консоль - иначе ввод с одной консоли путался бы с другой.
+int command_len[KERNEL_TTY_COUNT] = {0};
+char command_buffer[KERNEL_TTY_COUNT][64];
 
 // Последний нажатый символ для SYS_READ_KEY (неблокирующее чтение
-// клавиатуры из ring3). Обновляется в keyboard_handler_main и
+// клавиатуры из ring3), отдельно на каждую консоль. Обновляется в
+// keyboard_handler_main только для активной (см. tty_active()) и
 // "потребляется" (обнуляется) при чтении - отдельный канал от
 // command_buffer, не мешает работе shell.
-volatile char last_key = 0;
+volatile char tty_last_key[KERNEL_TTY_COUNT] = {0};
 
-// Когда равно 1, kernel shell не обрабатывает ввод — клавиатура принадлежит
-// user-space shell (sh.bin) через SYS_SHELL_CLAIM.
-static int kernel_shell_inhibited = 0;
+// tty_kernel_shell_inhibited[t] == 1: kernel shell консоли t не обрабатывает
+// ввод — клавиатура принадлежит user-space shell (sh.bin) через SYS_SHELL_CLAIM.
+static int tty_kernel_shell_inhibited[KERNEL_TTY_COUNT] = {0};
 
-// Ctrl-флаг и foreground slot для реализации Ctrl+C.
-// foreground_slot >= 0: sh.bin ждёт завершения этой задачи (Ctrl+C убьёт её).
-// foreground_slot == -1: нет активного foreground-процесса (Ctrl+C игнорируется).
+// Запущен ли уже на консоли t какой-нибудь shell (kernel или AxSH). tty 0
+// получает его либо через autoboot(), либо как kernel shell сразу при
+// загрузке - считаем, что он там уже "есть". Остальные консоли изначально
+// пустые: первое же переключение на них (Ctrl+Alt+F2 и т.д., см.
+// keyboard_handler_main) запускает там "run SH.BIN".
+static int tty_shell_launched[KERNEL_TTY_COUNT] = {1};
+
+// Привязка слота программы (run/exec) к консоли, на которой её запустили
+// (tty_active() в момент запуска - см. do_exec и ветку "run " в
+// execute_command). По ней SYS_READ_KEY/SYS_SHELL_CLAIM/SYS_SET_FOREGROUND
+// узнают, какую консоль обслуживает текущая задача.
+static int slot_tty[USER_PROGRAM_SLOTS];
+
+// Ctrl-флаг и foreground slot (для Ctrl+C) - тоже на каждую консоль.
+// tty_foreground_slot[t] >= 0: shell консоли t ждёт завершения этой задачи.
+// tty_foreground_slot[t] == -1: нет активного foreground-процесса на t.
 static int ctrl_held       = 0;
 static int shift_held      = 0;
 static int alt_held        = 0;
 static int e0_prefix       = 0;
-static int foreground_slot = -1;
+static int tty_foreground_slot[KERNEL_TTY_COUNT] = {-1, -1};
 
 // Счётчик тиков таймера (PIT, IRQ0). При частоте 100 Гц растёт на 1 каждые 10 мс.
 volatile unsigned long timer_ticks = 0;
@@ -357,14 +381,25 @@ void sys_clear_screen(char* arg) {
     clear_screen();
 }
 
+// Консоль, которой принадлежит ВЫЗЫВАЮЩАЯ задача (run/exec-слот -> tty,
+// см. slot_tty). Для задач без слота (kernel-демо без изоляции) считаем,
+// что речь про активную консоль - они не вызывают эти syscall'ы напрямую.
+static int caller_tty() {
+    int slot = task_current_slot_index();
+    if (slot >= 0 && slot < USER_PROGRAM_SLOTS) return slot_tty[slot];
+    return tty_active();
+}
+
 // SYS_READ_KEY: неблокирующее чтение клавиатуры. ESI -> char, куда
 // записывается последний нажатый символ (0, если ничего не нажато
 // с прошлого опроса). Прочитанный символ "потребляется" - last_key
-// сбрасывается в 0.
+// сбрасывается в 0. Читает канал ИМЕННО своей консоли (caller_tty),
+// поэтому AxSH на неактивной консоли не видит чужих нажатий.
 void sys_read_key(char* arg) {
+    int t = caller_tty();
     if (arg) {
-        *arg = last_key;
-        last_key = 0;
+        *arg = tty_last_key[t];
+        tty_last_key[t] = 0;
     }
 }
 
@@ -553,6 +588,14 @@ static int do_exec(char* cmdline) {
 
     slot_heap_brk[slot] = USER_WINDOW_BASE + ((size + 15) & ~15u);
     slot_free[slot] = 0;
+    // Слот наследует консоль вызывающей задачи (caller_tty уже определена
+    // ниже по файлу для syscall'ов, но do_exec идёт раньше - дублируем
+    // ту же логику здесь напрямую через task_current_slot_index()).
+    {
+        int caller_slot = task_current_slot_index();
+        slot_tty[slot] = (caller_slot >= 0 && caller_slot < USER_PROGRAM_SLOTS)
+            ? slot_tty[caller_slot] : tty_active();
+    }
     task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR);
     return slot;
 }
@@ -589,24 +632,26 @@ void sys_task_alive(char* arg) {
     a->result = (slot >= 0 && slot < USER_PROGRAM_SLOTS && !slot_free[slot]) ? 1 : 0;
 }
 
-// SYS_SHELL_CLAIM: захват/освобождение клавиатуры.
-// arg = (char*)1 — захват (kernel shell пассивен, sh.bin обрабатывает ввод).
-// arg = (char*)0 — освобождение (kernel shell снова активен).
+// SYS_SHELL_CLAIM: захват/освобождение клавиатуры НА СВОЕЙ консоли (caller_tty).
+// arg = (char*)1 — захват (kernel shell этой консоли пассивен, sh.bin обрабатывает ввод).
+// arg = (char*)0 — освобождение (kernel shell консоли снова активен).
 void sys_shell_claim(char* arg) {
-    int was_inhibited = kernel_shell_inhibited;
-    kernel_shell_inhibited = (arg != (char*)0);
-    if (was_inhibited && !kernel_shell_inhibited) {
-        command_len = 0;
-        print_string("\nAxOS> ");
+    int t = caller_tty();
+    int was_inhibited = tty_kernel_shell_inhibited[t];
+    tty_kernel_shell_inhibited[t] = (arg != (char*)0);
+    if (was_inhibited && !tty_kernel_shell_inhibited[t]) {
+        command_len[t] = 0;
+        print_string_to(t, "\nAxOS> ");
     }
 }
 
-// SYS_SET_FOREGROUND: сообщает ядру, какой слот сейчас на переднем плане.
-// sh.bin вызывает перед busy-wait (slot >= 0) и после него (slot = -1).
-// keyboard_handler_main использует foreground_slot для Ctrl+C.
+// SYS_SET_FOREGROUND: сообщает ядру, какой слот сейчас на переднем плане
+// НА СВОЕЙ консоли (caller_tty). sh.bin вызывает перед busy-wait (slot >= 0)
+// и после него (slot = -1). keyboard_handler_main использует
+// tty_foreground_slot[tty_active()] для Ctrl+C.
 void sys_set_foreground(char* arg) {
     struct set_fg_args* a = (struct set_fg_args*)arg;
-    foreground_slot = a->slot;
+    tty_foreground_slot[caller_tty()] = a->slot;
 }
 
 // SYS_GET_TICKS: возвращает текущее значение timer_ticks (100 Гц).
@@ -992,6 +1037,11 @@ void execute_command(char* cmd) {
 
                 slot_heap_brk[slot] = USER_WINDOW_BASE + ((size + 15) & ~15u);
                 slot_free[slot] = 0;
+                // Запущенное отсюда (kernel-shell команда "run", в т.ч. из
+                // autoboot() и из авто-запуска AxSH при первом переключении
+                // на консоль) привязывается к консоли, с которой эта команда
+                // пришла - см. KERNEL_TTY_COUNT/slot_tty выше.
+                slot_tty[slot] = tty_active();
                 task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR);
                 print_string("Started.\n");
             }
@@ -1047,7 +1097,7 @@ void execute_command(char* cmd) {
         // что код после execute_command() в keyboard_handler_main (сброс
         // command_len и печать приглашения) для этого вызова не выполнится.
         // Делаем это здесь заранее, иначе следующий ввод склеится с "usermode".
-        command_len = 0;
+        command_len[tty_active()] = 0;
         print_string("Switching to ring3...\n");
         print_string("AxOS> ");
         enter_usermode(usermode_demo);
@@ -1083,70 +1133,78 @@ void keyboard_handler_main() {
         if (scancode == 0xB8) { alt_held = 0; return; }
 
         // Ctrl+Alt+F1 / Ctrl+Alt+F2: переключение виртуальной консоли (TTY).
-        // F1 = 0x3B, F2 = 0x3C. tty_switch (screen.c) сохраняет содержимое
-        // и курсор текущей консоли в RAM и подгружает целевую в 0xB8000.
+        // F1 = 0x3B, F2 = 0x3C. tty_switch (screen.c) подгружает буфер
+        // целевой консоли в 0xB8000 - сохранять исходную не нужно, её
+        // буфер обновлялся всё это время независимо от того, видна она
+        // или нет (см. tty_putc в screen.c). Если на этой консоли ещё
+        // никогда не было shell'а - запускаем там AxSH, как при autoboot().
         if (ctrl_held && alt_held && (scancode == 0x3B || scancode == 0x3C)) {
             int target = scancode - 0x3B;
             if (target != tty_active()) {
                 tty_switch(target);
-                command_len = 0; // не путать ввод между разными консолями
-                print_string("\nAxOS> ");
+                if (!tty_shell_launched[target]) {
+                    tty_shell_launched[target] = 1;
+                    execute_command("run SH.BIN");
+                }
             }
             return;
         }
 
         // Расширенные клавиши: E0-префикс, затем скан-код.
         // Стрелка вверх = E0 0x48, вниз = E0 0x50.
-        // Передаём как спецсимволы 0x11/0x12 в last_key для ax_readkey().
+        // Передаём как спецсимволы 0x11/0x12 в last_key активной консоли
+        // для ax_readkey().
         if (scancode == 0xE0) { e0_prefix = 1; return; }
         if (e0_prefix) {
             e0_prefix = 0;
-            if (scancode == 0x48) last_key = '\x11';  // стрелка вверх (E0 path)
-            if (scancode == 0x50) last_key = '\x12';  // стрелка вниз  (E0 path)
+            if (scancode == 0x48) tty_last_key[tty_active()] = '\x11';  // стрелка вверх (E0 path)
+            if (scancode == 0x50) tty_last_key[tty_active()] = '\x12';  // стрелка вниз  (E0 path)
             return;
         }
         // Фоллбэк: если QEMU/SDL шлёт 0x48/0x50 без E0-префикса
-        if (scancode == 0x48) { last_key = '\x11'; return; }
-        if (scancode == 0x50) { last_key = '\x12'; return; }
+        if (scancode == 0x48) { tty_last_key[tty_active()] = '\x11'; return; }
+        if (scancode == 0x50) { tty_last_key[tty_active()] = '\x12'; return; }
 
         // Нам нужны только нажатия клавиш
         if (scancode < 128) {
             char letter = shift_held ? scancode_to_char_shifted[scancode]
                                      : scancode_to_char[scancode];
+            int t = tty_active();
 
             if (letter != 0) {
-                last_key = letter; // канал для SYS_READ_KEY (ring3)
+                tty_last_key[t] = letter; // канал для SYS_READ_KEY (ring3)
             }
 
-            // Ctrl+C: убиваем foreground-процесс (если есть).
+            // Ctrl+C: убиваем foreground-процесс активной консоли (если есть).
             // Scancode 0x2E = клавиша C независимо от Shift.
             if (ctrl_held && scancode == 0x2E) {
-                if (foreground_slot >= 0) {
+                if (tty_foreground_slot[t] >= 0) {
                     print_string("^C\n");
-                    task_kill_by_slot(foreground_slot);
-                    foreground_slot = -1;
+                    task_kill_by_slot(tty_foreground_slot[t]);
+                    tty_foreground_slot[t] = -1;
                 }
                 return;
             }
 
-            // Если user-space shell захватил клавиатуру — не обрабатываем команды.
-            if (kernel_shell_inhibited) return;
+            // Если user-space shell захватил клавиатуру этой консоли — не
+            // обрабатываем команды.
+            if (tty_kernel_shell_inhibited[t]) return;
 
             if (letter == '\n') {
-                command_buffer[command_len] = '\0';
+                command_buffer[t][command_len[t]] = '\0';
                 print_string("\n");
-                execute_command(command_buffer);
-                command_len = 0;
+                execute_command(command_buffer[t]);
+                command_len[t] = 0;
                 print_string("AxOS> ");
             } else if (letter == '\b') {
-                if (command_len > 0) {
-                    command_len--;
+                if (command_len[t] > 0) {
+                    command_len[t]--;
                     backspace();
                 }
             } else if (letter != 0) {
-                if (command_len < (int)sizeof(command_buffer) - 1) {
-                    command_buffer[command_len] = letter;
-                    command_len++;
+                if (command_len[t] < (int)sizeof(command_buffer[t]) - 1) {
+                    command_buffer[t][command_len[t]] = letter;
+                    command_len[t]++;
                     char str[2] = {letter, '\0'};
                     print_string(str); // Печатаем символ асинхронно!
                 }
@@ -1198,8 +1256,7 @@ void kernel_main() {
     video_memory[4] = 'N';
     video_memory[5] = 0x0F;
 
-    clear_screen();
-    init_ttys();
+    init_ttys(); // инициализирует все консоли (включая активную) и зеркалит в VGA
     VGA_MARK(70, 'A', 0x4F); /* pre-paging VGA write */
 
     init_idt();
