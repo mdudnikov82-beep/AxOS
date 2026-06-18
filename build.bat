@@ -16,43 +16,43 @@ echo Compiling IDT...
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Kernel (C)...
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/kernel.c -o build/kernel.o
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/kernel.c -o build/kernel.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Screen (C)...
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/screen.c -o build/screen.o
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/screen.c -o build/screen.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling FAT12 driver (C)...
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/fs/fat12.c -o build/fat12.o
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/fs/fat12.c -o build/fat12.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Paging (C)...
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/paging.c -o build/paging.o
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/paging.c -o build/paging.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling TSS (C)...
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/tss.c -o build/tss.o
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/tss.c -o build/tss.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Heap allocator (C)...
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/heap.c -o build/heap.o
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/heap.c -o build/heap.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Tasking (C)...
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/tasking.c -o build/tasking.o
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/tasking.c -o build/tasking.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Self-test (C)...
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/selftest.c -o build/selftest.o
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/selftest.c -o build/selftest.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling VFS (C)...
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/vfs.c -o build/vfs.o
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/vfs.c -o build/vfs.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling IDE driver (C)...
-gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/drivers/ide.c -o build/ide.o
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/drivers/ide.c -o build/ide.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Syscalls...
