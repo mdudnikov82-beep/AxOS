@@ -345,6 +345,8 @@ void sys_print_string(char* arg) {
 }
 
 void sys_clear_screen(char* arg) {
+    int slot = task_current_slot_index();
+    if (slot >= 0 && slot < USER_PROGRAM_SLOTS && slot_redir_buf[slot]) return;
     clear_screen();
 }
 
