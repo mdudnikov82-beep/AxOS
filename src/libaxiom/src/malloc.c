@@ -40,10 +40,44 @@ void* ax_malloc(unsigned int size) {
     return (void*)((char*)b + HDR);
 }
 
+// free_list - не упорядочен по адресу, поэтому слияние с физически
+// соседними блоками требует двух проходов по списку (но он короткий -
+// у задачи единицы-десятки блоков в её ~30 КБ окне).
 void ax_free(void* ptr) {
     if (!ptr) return;
     struct block* b = (struct block*)((char*)ptr - HDR);
     b->free = 1;
+
+    // 1) Слияние со следующим физическим блоком, если он свободен:
+    // ищем в free_list блок, начинающийся ровно там, где кончается b.
+    struct block* next_adj = (struct block*)((char*)b + HDR + b->size);
+    struct block* prev = 0;
+    struct block* cur = free_list;
+    while (cur) {
+        if (cur == next_adj) {
+            b->size += HDR + cur->size;
+            if (prev) prev->next = cur->next;
+            else      free_list  = cur->next;
+            break;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+
+    // 2) Слияние с предыдущим физическим блоком, если он свободен:
+    // ищем блок, который кончается ровно там, где начинается b
+    // (b уже мог "подрасти" на шаге 1 - это не меняет его адрес начала).
+    cur = free_list;
+    while (cur) {
+        if ((char*)cur + HDR + cur->size == (char*)b) {
+            cur->size += HDR + b->size;
+            return; // cur уже в free_list, b в него поглощён целиком
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+
+    // Соседей не нашли (или нашли только следующего) - добавляем b сам.
     b->next = free_list;
     free_list = b;
 }

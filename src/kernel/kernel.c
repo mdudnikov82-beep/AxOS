@@ -132,6 +132,9 @@ void init_idt() {
     set_idt_gate(33, (unsigned long)keyboard_interrupt_handler);
     set_idt_gate(0x80, (unsigned long)syscall_handler); // int 0x80 — системные вызовы AxOS
     IDT[0x80].type_attr = 0xEE; // DPL=3 — int 0x80 разрешён из ring3
+    // type_attr у 0x80 (как и у 32/33 выше) оканчивается на E - interrupt
+    // gate, CPU сам обнуляет IF на входе. heap.c (malloc/free) рассчитывает
+    // именно на это - см. ENTER_CRITICAL/LEAVE_CRITICAL и комментарий там.
     struct { unsigned short limit; unsigned long base; } __attribute__((packed)) idtr = { 256 * 8 - 1, (unsigned long)IDT };
     __asm__("lidt %0" : : "m"(idtr));
 

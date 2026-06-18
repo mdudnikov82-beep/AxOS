@@ -36,6 +36,29 @@ typedef struct block_header {
 
 static block_header_t* heap_head = (block_header_t*)HEAP_START;
 
+// --- Критическая секция ---
+// malloc()/free() не реентерабельны: они мутируют общий связный список
+// heap_head шаг за шагом (без атомарности отдельных записей). Сегодня
+// от реентерабельного вызова их спасает только то, что IDT[0x80] и
+// IRQ0 (idt.asm) - оба interrupt gate (type_attr оканчивается на E),
+// и CPU сам обнуляет IF на входе: пока ядро внутри malloc()/free()
+// (в т.ч. вызванных из schedule() при реапе задачи - kernel.c:62,
+// tasking.c:251), таймер физически не может прервать и вызвать
+// schedule()->free() повторно на той же куче.
+//
+// ВНИМАНИЕ: это неявное соглашение. Если когда-нибудь в пути от int 0x80
+// до malloc()/free() появится sti() (как уже сделано в sleep_ms(),
+// kernel.c:173, просто пока не на одном пути с кучей) - получим гонку
+// и порчу heap_head. ENTER/LEAVE_CRITICAL ниже защищают явно: сохраняют
+// и восстанавливают реальный IF, а не включают прерывания "вслепую" -
+// безусловный sti в конце free(), вызванного из глубины schedule()
+// (до его iret, idt.asm:50-55), мог бы включить прерывания раньше
+// времени и впустить вложенное прерывание в недопереключённый планировщик.
+#define ENTER_CRITICAL(flags) \
+    __asm__ volatile("pushfl\n\tpopl %0\n\tcli" : "=r"(flags) :: "memory")
+#define LEAVE_CRITICAL(flags) \
+    __asm__ volatile("pushl %0\n\tpopfl" :: "r"(flags) : "memory", "cc")
+
 void init_heap() {
     heap_head = (block_header_t*)HEAP_START;
     heap_head->size = HEAP_SIZE - HEADER_SIZE;
@@ -47,6 +70,10 @@ void* malloc(unsigned int size) {
     if (size == 0) return 0;
     size = ALIGN4(size);
 
+    unsigned long flags;
+    ENTER_CRITICAL(flags);
+
+    void* result = 0;
     block_header_t* current = heap_head;
 
     while (current) {
@@ -64,17 +91,22 @@ void* malloc(unsigned int size) {
             }
 
             current->free = 0;
-            return (void*)((unsigned char*)current + HEADER_SIZE);
+            result = (void*)((unsigned char*)current + HEADER_SIZE);
+            break;
         }
 
         current = current->next;
     }
 
-    return 0;
+    LEAVE_CRITICAL(flags);
+    return result;
 }
 
 void free(void* ptr) {
     if (!ptr) return;
+
+    unsigned long flags;
+    ENTER_CRITICAL(flags);
 
     block_header_t* block = (block_header_t*)((unsigned char*)ptr - HEADER_SIZE);
     block->free = 1;
@@ -94,4 +126,6 @@ void free(void* ptr) {
         current->size += HEADER_SIZE + block->size;
         current->next = block->next;
     }
+
+    LEAVE_CRITICAL(flags);
 }
