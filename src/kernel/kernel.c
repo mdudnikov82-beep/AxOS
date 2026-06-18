@@ -684,6 +684,24 @@ void sys_fs_lock(char* arg) {
     vfs_set_locked(arg != (char*)0);
 }
 
+// Низкоуровневый доступ к IDE-диску, минуя FAT12 - для disktool.bin
+// (диагностика, см. ide.c). a->model/a->buf - буферы, выделенные вызывающей
+// userspace-программой; ядро только читает/пишет в них через указатель.
+void sys_disk_identify(char* arg) {
+    struct disk_identify_args* a = (struct disk_identify_args*)arg;
+    a->result = ide_identify(a->model);
+}
+
+void sys_disk_read_sector(char* arg) {
+    struct disk_sector_args* a = (struct disk_sector_args*)arg;
+    a->result = ide_read_sector(a->lba, a->buf);
+}
+
+void sys_disk_write_sector(char* arg) {
+    struct disk_sector_args* a = (struct disk_sector_args*)arg;
+    a->result = ide_write_sector(a->lba, a->buf);
+}
+
 void sys_ps(char* arg) {
     struct ps_entry* e = (struct ps_entry*)arg;
     e->result = task_get_info(e->index, &e->pid, e->name, &e->ticks, &e->slot);
@@ -740,6 +758,9 @@ syscall_fn syscall_table[] = {
     sys_unlink,        // 0x15
     sys_mkdir,         // 0x16
     sys_fs_lock,       // 0x17
+    sys_disk_identify,     // 0x18
+    sys_disk_read_sector,  // 0x19
+    sys_disk_write_sector, // 0x1A
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))
@@ -916,14 +937,12 @@ void execute_command(char* cmd) {
         print_string("  lock        - write-protect the FAT12 disk (default)\n");
         print_string("  unlock      - allow writes to the FAT12 disk\n");
         print_string("  run <file>  - load and run a program from FAT12 (ring3)\n");
-        print_string("  diskinfo    - show IDE drive model (build/disk.img)\n");
-        print_string("  diskread <lba>  - hexdump a sector from the IDE disk\n");
-        print_string("  diskwrite <lba> <text> - write text to a sector on the IDE disk\n");
         print_string("  usermode    - demo: jump to ring3, call syscall via int 0x80\n");
         print_string("  memtest     - test heap allocator (malloc/free)\n");
         print_string("  selftest    - run heap/paging/FAT12 regression tests\n");
         print_string("  Ctrl+Alt+F1/F2 - switch virtual console (TTY)\n");
-        print_string("  (echo/ls/cat/ps/uptime/write moved to userspace - use \"run X.BIN\")\n");
+        print_string("  (echo/ls/cat/ps/uptime/write/diskinfo/diskread/diskwrite moved to\n");
+        print_string("   userspace - use \"run X.BIN\", e.g. \"run disktool.bin info\")\n");
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
     } else if (str_eq(cmd, "about")) {
@@ -1004,52 +1023,6 @@ void execute_command(char* cmd) {
                 slot_tty[slot] = tty_active();
                 task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR);
                 print_string("Started.\n");
-            }
-        }
-    } else if (str_eq(cmd, "diskinfo")) {
-        char model[41];
-        if (ide_identify(model)) {
-            print_string("IDE primary master: ");
-            print_string(model);
-            print_string("\n");
-        } else {
-            print_string("No IDE drive found.\n");
-        }
-    } else if (str_starts_with(cmd, "diskread ")) {
-        char* p = cmd + 9;
-        if (*p < '0' || *p > '9') {
-            print_string("Usage: diskread <lba>\n");
-        } else {
-            unsigned int lba = parse_uint(p);
-            unsigned char buf[IDE_SECTOR_SIZE];
-            if (ide_read_sector(lba, buf)) {
-                print_hex_dump(buf, 128);
-            } else {
-                print_string("Disk read failed (no IDE drive?).\n");
-            }
-        }
-    } else if (str_starts_with(cmd, "diskwrite ")) {
-        char* p = cmd + 10;
-        if (*p < '0' || *p > '9') {
-            print_string("Usage: diskwrite <lba> <text>\n");
-        } else {
-            unsigned int lba = parse_uint(p);
-            while (*p >= '0' && *p <= '9') p++;
-            if (*p == ' ') p++;
-
-            unsigned char buf[IDE_SECTOR_SIZE];
-            for (unsigned int i = 0; i < IDE_SECTOR_SIZE; i++) buf[i] = 0;
-
-            unsigned int i = 0;
-            while (p[i] != '\0' && i < IDE_SECTOR_SIZE) {
-                buf[i] = p[i];
-                i++;
-            }
-
-            if (ide_write_sector(lba, buf)) {
-                print_string("Written.\n");
-            } else {
-                print_string("Disk write failed (no IDE drive?).\n");
             }
         }
     } else if (str_eq(cmd, "usermode")) {

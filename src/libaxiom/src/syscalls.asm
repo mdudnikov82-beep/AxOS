@@ -31,6 +31,9 @@ global _ax_exec_redir
 global _ax_unlink
 global _ax_mkdir
 global _ax_disk_lock
+global _ax_disk_identify
+global _ax_disk_read_sector
+global _ax_disk_write_sector
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -387,6 +390,66 @@ _ax_disk_lock:
     mov esi, [esp+8]        ; esi = locked (0 или 1)
     mov ah, 0x17            ; SYS_FS_LOCK
     int 0x80
+    pop esi
+    ret
+
+; int ax_disk_identify(char* model)
+; Строит struct disk_identify_args { model, result=0 } на стеке.
+; model - буфер не менее 41 байта. Возвращает 1 (успех) или 0 (нет диска).
+_ax_disk_identify:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=model
+    mov eax, [esp+12]
+    push dword 0            ; struct.result = 0  (offset 4)
+    push eax                ; struct.model        (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x18            ; SYS_DISK_IDENTIFY
+    int 0x80
+    mov eax, [esp+4]        ; result (offset 4)
+    add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; int ax_disk_read_sector(unsigned int lba, unsigned char* buf)
+; Строит struct disk_sector_args { lba, buf, result=0 } на стеке.
+; buf - буфер не менее 512 байт (IDE_SECTOR_SIZE). 1=успех, 0=ошибка.
+_ax_disk_read_sector:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=lba, [esp+16]=buf
+    mov eax, [esp+12]
+    mov ecx, [esp+16]
+    push dword 0            ; struct.result = 0  (offset 8)
+    push ecx                ; struct.buf          (offset 4)
+    push eax                ; struct.lba          (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x19            ; SYS_DISK_READ_SECTOR
+    int 0x80
+    mov eax, [esp+8]        ; result (offset 8)
+    add esp, 12
+    pop ebx
+    pop esi
+    ret
+
+; int ax_disk_write_sector(unsigned int lba, unsigned char* buf)
+; Та же раскладка struct, что и у ax_disk_read_sector.
+_ax_disk_write_sector:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=lba, [esp+16]=buf
+    mov eax, [esp+12]
+    mov ecx, [esp+16]
+    push dword 0            ; struct.result = 0  (offset 8)
+    push ecx                ; struct.buf          (offset 4)
+    push eax                ; struct.lba          (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x1A            ; SYS_DISK_WRITE_SECTOR
+    int 0x80
+    mov eax, [esp+8]        ; result (offset 8)
+    add esp, 12
+    pop ebx
     pop esi
     ret
 

@@ -126,6 +126,21 @@ struct mkdir_args {
 
 #define SYS_FS_LOCK 0x17  // ESI = 0 (разблокировать) или 1 (заблокировать)
 
+#define SYS_DISK_IDENTIFY     0x18  // ESI -> struct disk_identify_args
+#define SYS_DISK_READ_SECTOR  0x19  // ESI -> struct disk_sector_args
+#define SYS_DISK_WRITE_SECTOR 0x1A  // ESI -> struct disk_sector_args
+
+struct disk_identify_args {
+    char* model;
+    int   result;
+};
+
+struct disk_sector_args {
+    unsigned int   lba;
+    unsigned char* buf;
+    int            result;
+};
+
 #define SYS_PS 0x13
 
 struct ps_entry {

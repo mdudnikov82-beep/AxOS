@@ -22,6 +22,12 @@ int ax_mkdir(char* dirname);
 // Разблокировать (locked=0) или заблокировать (locked=1) файловую систему.
 void ax_disk_lock(int locked);
 
+// Низкоуровневый доступ к IDE-диску напрямую, минуя FAT12 (для диагностики -
+// см. disktool.c). model/buf - буферы вызывающего; ядро только пишет в них.
+int ax_disk_identify(char* model);                              // model >= 41 байт; 1=успех, 0=нет диска
+int ax_disk_read_sector(unsigned int lba, unsigned char* buf);   // buf >= 512 байт (IDE_SECTOR_SIZE)
+int ax_disk_write_sector(unsigned int lba, unsigned char* buf);  // buf >= 512 байт
+
 // fd-based file API
 int  ax_open(char* name, int flags);          // возвращает fd или -1
 int  ax_fread(int fd, void* buf, unsigned int n);   // возвращает прочитанные байты

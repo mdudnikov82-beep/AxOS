@@ -165,6 +165,30 @@ struct mkdir_args {
 // --- Блокировка файловой системы (0x17) ---
 #define SYS_FS_LOCK 0x17  // ESI = 0 (разблокировать) или 1 (заблокировать), не указатель
 
+// --- Низкоуровневый доступ к IDE-диску, минуя FAT12 (0x18-0x1A) ---
+// Для диагностических инструментов (disktool.bin) - читает/пишет сырые
+// секторы или опрашивает модель диска напрямую через ide.c, без какой-либо
+// интерпретации содержимого. Координировать с FAT12 (lock/unlock) - дело
+// вызывающего: эти syscall'ы пишут в любой LBA, включая занятые файлами.
+#define SYS_DISK_IDENTIFY     0x18  // ESI -> struct disk_identify_args
+#define SYS_DISK_READ_SECTOR  0x19  // ESI -> struct disk_sector_args
+#define SYS_DISK_WRITE_SECTOR 0x1A  // ESI -> struct disk_sector_args
+
+// SYS_DISK_IDENTIFY: model - буфер не менее 41 байта (заполняется строкой
+// модели). result=1: успех, result=0: диск не отвечает.
+struct disk_identify_args {
+    char* model;
+    int   result;
+};
+
+// SYS_DISK_READ_SECTOR / SYS_DISK_WRITE_SECTOR: buf - буфер ровно
+// IDE_SECTOR_SIZE (512) байт. result=1: успех, result=0: ошибка/нет диска.
+struct disk_sector_args {
+    unsigned int   lba;
+    unsigned char* buf;
+    int            result;
+};
+
 // --- Список задач (0x13) ---
 #define SYS_PS 0x13  // ESI -> struct ps_entry
 

@@ -342,6 +342,22 @@ echo Copying user program into fs/ for FAT12 image...
 copy /b build\write.bin fs\WRITE.BIN
 if %errorlevel% neq 0 goto :error
 
+echo Compiling user program (disktool.c)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\disktool.c -o build\disktool.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\disktool.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\disktool.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\disktool.exe build\disktool.bin
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\disktool.bin fs\DISKTOOL.BIN
+if %errorlevel% neq 0 goto :error
+
 echo Building FAT12 RAM-disk image from fs/...
 python tools\make_fat12.py
 if %errorlevel% neq 0 goto :error
