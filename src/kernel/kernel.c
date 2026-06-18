@@ -70,6 +70,9 @@ void clear_screen();
 void print_string(char* str);
 void backspace();
 void init_idt();
+void init_ttys();
+void tty_switch(int n);
+int tty_active();
 extern void keyboard_interrupt_handler();
 extern void timer_interrupt_handler();
 extern void syscall_handler();
@@ -92,6 +95,7 @@ static int kernel_shell_inhibited = 0;
 // foreground_slot == -1: нет активного foreground-процесса (Ctrl+C игнорируется).
 static int ctrl_held       = 0;
 static int shift_held      = 0;
+static int alt_held        = 0;
 static int e0_prefix       = 0;
 static int foreground_slot = -1;
 
@@ -879,6 +883,7 @@ void execute_command(char* cmd) {
         print_string("  memtest     - test heap allocator (malloc/free)\n");
         print_string("  selftest    - run heap/paging/FAT12 regression tests\n");
         print_string("  ps          - list running tasks\n");
+        print_string("  Ctrl+Alt+F1/F2 - switch virtual console (TTY)\n");
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
     } else if (str_eq(cmd, "about")) {
@@ -1073,6 +1078,23 @@ void keyboard_handler_main() {
         if (scancode == 0x2A || scancode == 0x36) { shift_held = 1; return; }
         if (scancode == 0xAA || scancode == 0xB6) { shift_held = 0; return; }
 
+        // Alt (левый): 0x38 = нажатие, 0xB8 = отпускание.
+        if (scancode == 0x38) { alt_held = 1; return; }
+        if (scancode == 0xB8) { alt_held = 0; return; }
+
+        // Ctrl+Alt+F1 / Ctrl+Alt+F2: переключение виртуальной консоли (TTY).
+        // F1 = 0x3B, F2 = 0x3C. tty_switch (screen.c) сохраняет содержимое
+        // и курсор текущей консоли в RAM и подгружает целевую в 0xB8000.
+        if (ctrl_held && alt_held && (scancode == 0x3B || scancode == 0x3C)) {
+            int target = scancode - 0x3B;
+            if (target != tty_active()) {
+                tty_switch(target);
+                command_len = 0; // не путать ввод между разными консолями
+                print_string("\nAxOS> ");
+            }
+            return;
+        }
+
         // Расширенные клавиши: E0-префикс, затем скан-код.
         // Стрелка вверх = E0 0x48, вниз = E0 0x50.
         // Передаём как спецсимволы 0x11/0x12 в last_key для ax_readkey().
@@ -1177,6 +1199,7 @@ void kernel_main() {
     video_memory[5] = 0x0F;
 
     clear_screen();
+    init_ttys();
     VGA_MARK(70, 'A', 0x4F); /* pre-paging VGA write */
 
     init_idt();

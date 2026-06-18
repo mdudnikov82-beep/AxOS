@@ -18,6 +18,93 @@ static int ansi_params[4];
 static int ansi_param_count = 0;
 static int ansi_param_active = 0;
 
+// Виртуальные консоли (TTY): только активная отражается в реальной VGA-
+// памяти (0xB8000); неактивные хранят свой экран в обычной RAM и не видны,
+// пока на них не переключатся (Ctrl+Alt+F1/F2, см. kernel.c). Курсор, цвет
+// и состояние ANSI-парсера тоже отдельные на каждую консоль - иначе,
+// например, печать команды на одной консоли продолжалась бы с цветом,
+// оставшимся от другой.
+#define TTY_COUNT  2
+#define TTY_BUFSZ  (80 * 25 * 2)
+
+struct tty_state {
+    unsigned char buffer[TTY_BUFSZ];
+    int cursor_x;
+    int cursor_y;
+    unsigned char attr;
+    int ansi_state;
+    int ansi_params[4];
+    int ansi_param_count;
+    int ansi_param_active;
+};
+
+// ВАЖНО: хранится по фиксированному физическому адресу, а НЕ как статический
+// массив в .bss. Раньше (static struct tty_state ttys[TTY_COUNT]) .bss ядра
+// разрастался настолько, что заезжал на 0x7C00-0x7DFF - память загрузочного
+// сектора, где живёт GDT! init_ttys() тогда буквально затирал GDT пробелами,
+// и первое же обращение к сегментному регистру (ltr/смена CS) роняло систему
+// с #GP -> тройной сбой. См. тот же приём в paging.h (PAGE_DIRECTORY/
+// PAGE_TABLE) и tss.c (TSS_BASE) - оба по той же причине лежат в свободном
+// промежутке 0x130000+ (после пула PD/PT изолированных задач, kernel.c/
+// paging.h: PT_POOL_BASE=0x124000 + 4*0x1000 = заканчивается на 0x128000),
+// а не в .bss.
+#define TTYS_BASE 0x130000
+static struct tty_state* const ttys = (struct tty_state*) TTYS_BASE;
+static int active_tty = 0;
+
+// Заполняет неактивные консоли пустым экраном при загрузке - иначе их
+// буфер (нулевые байты) выглядел бы иначе, чем настоящий "пустой" экран
+// (символ 0x00, а не пробел с обычным атрибутом).
+void init_ttys() {
+    for (int n = 1; n < TTY_COUNT; n++) {
+        for (int i = 0; i < TTY_BUFSZ; i += 2) {
+            ttys[n].buffer[i] = ' ';
+            ttys[n].buffer[i + 1] = 0x0F;
+        }
+        ttys[n].cursor_x = 0;
+        ttys[n].cursor_y = 0;
+        ttys[n].attr = 0x0F;
+        ttys[n].ansi_state = ANSI_TEXT;
+        ttys[n].ansi_param_count = 0;
+        ttys[n].ansi_param_active = 0;
+    }
+}
+
+static void tty_save(int n) {
+    unsigned char* vidmem = (unsigned char*) 0xB8000;
+    for (int i = 0; i < TTY_BUFSZ; i++) ttys[n].buffer[i] = vidmem[i];
+    ttys[n].cursor_x = cursor_x;
+    ttys[n].cursor_y = cursor_y;
+    ttys[n].attr = current_attr;
+    ttys[n].ansi_state = ansi_state;
+    ttys[n].ansi_param_count = ansi_param_count;
+    ttys[n].ansi_param_active = ansi_param_active;
+    for (int i = 0; i < 4; i++) ttys[n].ansi_params[i] = ansi_params[i];
+}
+
+static void tty_load(int n) {
+    unsigned char* vidmem = (unsigned char*) 0xB8000;
+    for (int i = 0; i < TTY_BUFSZ; i++) vidmem[i] = ttys[n].buffer[i];
+    cursor_x = ttys[n].cursor_x;
+    cursor_y = ttys[n].cursor_y;
+    current_attr = ttys[n].attr;
+    ansi_state = ttys[n].ansi_state;
+    ansi_param_count = ttys[n].ansi_param_count;
+    ansi_param_active = ttys[n].ansi_param_active;
+    for (int i = 0; i < 4; i++) ansi_params[i] = ttys[n].ansi_params[i];
+}
+
+int tty_active() {
+    return active_tty;
+}
+
+void tty_switch(int n) {
+    if (n < 0 || n >= TTY_COUNT || n == active_tty) return;
+    tty_save(active_tty);
+    active_tty = n;
+    tty_load(n);
+}
+
 void clear_screen() {
     char* vidmem = (char*) 0xB8000;
     for (int i = 0; i < 80 * 25 * 2; i += 2) {
