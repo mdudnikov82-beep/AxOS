@@ -94,6 +94,60 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        // Pipe: "cmd1 | cmd2". Планировщик здесь последовательный (см.
+        // ax_task_alive ниже), настоящего потокового конвейера нет - это
+        // "пакетный" pipe: cmd1 выполняется ПОЛНОСТЬЮ, его stdout целиком
+        // оседает во временном файле PIPE.TMP (через тот же механизм, что
+        // и обычный "> file"), и только после этого cmd2 запускается с
+        // именем PIPE.TMP, дописанным последним аргументом - имитация
+        // stdin без изменения ABI. Один уровень pipe, не цепочка.
+        {
+            int pipe_pos = -1;
+            for (int i = 0; line[i]; i++) { if (line[i] == '|') { pipe_pos = i; break; } }
+            if (pipe_pos >= 0) {
+                char cmd1[64], cmd2[64];
+                int k = 0;
+                while (k < pipe_pos && k < 63) { cmd1[k] = line[k]; k++; }
+                while (k > 0 && cmd1[k-1] == ' ') k--;
+                cmd1[k] = '\0';
+
+                int j = pipe_pos + 1;
+                while (line[j] == ' ') j++;
+                int m = 0;
+                while (line[j] && m < 63) cmd2[m++] = line[j++];
+                while (m > 0 && cmd2[m-1] == ' ') m--;
+                cmd2[m] = '\0';
+
+                int slot1 = ax_exec_redir(cmd1, "PIPE.TMP");
+                if (slot1 < 0) {
+                    ax_print("sh: pipe: left side not found\n");
+                } else {
+                    ax_set_foreground(slot1);
+                    while (ax_task_alive(slot1)) { ax_sleep_ms(10); }
+                    ax_set_foreground(-1);
+
+                    if (m > 0 && m < 54) {
+                        cmd2[m] = ' ';
+                        cmd2[m+1]='P'; cmd2[m+2]='I'; cmd2[m+3]='P'; cmd2[m+4]='E';
+                        cmd2[m+5]='.'; cmd2[m+6]='T'; cmd2[m+7]='M'; cmd2[m+8]='P';
+                        cmd2[m+9]='\0';
+                    }
+                    int slot2 = ax_exec(cmd2);
+                    if (slot2 == -1) {
+                        ax_print("sh: pipe: right side not found\n");
+                    } else if (slot2 == -2) {
+                        ax_print("sh: no free slots\n");
+                    } else {
+                        ax_set_foreground(slot2);
+                        while (ax_task_alive(slot2)) { ax_sleep_ms(10); }
+                        ax_set_foreground(-1);
+                    }
+                }
+                ax_unlink("PIPE.TMP");
+                continue;
+            }
+        }
+
         // Отрезаем trailing '&' (фоновый запуск)
         int has_bg = 0;
         int linelen = 0;
