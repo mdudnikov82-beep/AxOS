@@ -33,6 +33,12 @@
 
 #define IDE_WAIT_LIMIT 100000
 
+// Тики PIT (kernel.c, 100 Гц) - используются для тайм-аута ide_wait_irq()
+// и (через hlt) чтобы реально освобождать CPU другим задачам во время
+// ожидания, а не жечь его в busy-spin.
+extern volatile unsigned long timer_ticks;
+#define IDE_IRQ_TIMEOUT_TICKS 500 // 5 секунд - щедрый запас на одну операцию
+
 // Ставится обработчиком IRQ14 (idt.asm -> ide_irq_handler_main ниже).
 // Сбрасывается в 0 непосредственно перед каждой командой, которая должна
 // вызвать прерывание - так ide_wait_irq() не примет "эхо" от предыдущей
@@ -99,19 +105,25 @@ static int ide_wait_data() {
 // а IDT-gate syscall'а - interrupt gate, CPU сам гасит IF при входе (см.
 // комментарий у IDT[0x80] в kernel.c - на этом ещё и критические секции
 // heap.c держатся). Значит, всё время выполнения syscall'а прерывания
-// глобально выключены - IRQ14 физически не сможет быть доставлен, и этот
-// цикл провисел бы все IDE_WAIT_LIMIT*10 итераций впустую при КАЖДОМ
-// вызове, независимо от того, ответил диск или нет (что и происходило,
-// пока тут не было sti - PIC и IDT были настроены верно, но прерывание
-// просто не могло прийти).
+// глобально выключены - IRQ14 физически не сможет быть доставлен без sti
+// (PIC и IDT были настроены верно с самого начала, но прерывание просто
+// не могло прийти).
+//
+// hlt вместо busy-spin: задача, ждущая диск, не жжёт CPU впустую. hlt
+// останавливает ядро до СЛЕДУЮЩЕГО любого прерывания - а таймерный тик
+// (IRQ0, 100 Гц) и так дёргает schedule() из idt.asm при каждом срабатывании,
+// так что другие задачи в кольце получают процессор естественным образом,
+// без отдельного состояния BLOCKED в планировщике - ровно тот же приём,
+// что уже используется в sleep_ms() (kernel.c) для SYS_SLEEP.
 static int ide_wait_irq() {
+    unsigned long deadline = timer_ticks + IDE_IRQ_TIMEOUT_TICKS;
+
     __asm__ volatile("sti");
-    for (unsigned int i = 0; i < IDE_WAIT_LIMIT * 10; i++) {
-        if (ide_irq_fired) {
-            return !(port_byte_in(IDE_REG_STATUS) & IDE_STATUS_ERR);
-        }
+    while (!ide_irq_fired) {
+        if (timer_ticks >= deadline) return 0; // таймаут - прерывание не пришло
+        __asm__("hlt");
     }
-    return 0; // таймаут - прерывание не пришло
+    return !(port_byte_in(IDE_REG_STATUS) & IDE_STATUS_ERR);
 }
 
 static void ide_select_lba(unsigned int lba) {
