@@ -34,6 +34,8 @@ global _ax_disk_lock
 global _ax_disk_identify
 global _ax_disk_read_sector
 global _ax_disk_write_sector
+global _ax_get_datetime
+global _ax_reboot
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -452,6 +454,25 @@ _ax_disk_write_sector:
     pop ebx
     pop esi
     ret
+
+; void ax_get_datetime(struct datetime_args* a)
+; ESI = указатель на struct datetime_args (передаётся напрямую, как ax_ps).
+_ax_get_datetime:
+    push esi
+    push ebx
+    mov esi, [esp+12]      ; ESI -> struct
+    mov ah, 0x1B            ; SYS_GET_DATETIME
+    int 0x80
+    pop ebx
+    pop esi
+    ret
+
+; void ax_reboot(void) - не возвращается.
+_ax_reboot:
+    mov ah, 0x1C            ; SYS_REBOOT
+    int 0x80
+.hang:
+    jmp .hang
 
 ; int ax_readdir(struct readdir_args* a)
 ; ESI = указатель на struct readdir_args (передаётся напрямую).

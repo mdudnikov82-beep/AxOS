@@ -45,6 +45,12 @@ void ax_set_foreground(int slot);  // slot >= 0: Ctrl+C убьёт эту зад
 unsigned int ax_get_ticks(void);         // тики с момента загрузки (100 Гц)
 void         ax_sleep_ms(unsigned int ms); // sleep ms миллисекунд (другие задачи получают CPU)
 
+// Текущее время RTC (CMOS). year - две последние цифры (без "20" спереди).
+void ax_get_datetime(struct datetime_args* a);
+
+// Перезагружает систему через контроллер клавиатуры (8042). Не возвращается.
+void ax_reboot(void);
+
 // Перечисление файлов (обёртка над SYS_READDIR)
 // Заполняет *a и возвращает a->result (1 = есть запись, 0 = конец)
 int ax_readdir(struct readdir_args* a);

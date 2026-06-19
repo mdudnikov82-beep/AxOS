@@ -189,6 +189,21 @@ struct disk_sector_args {
     int            result;
 };
 
+// --- Дата/время и перезагрузка (0x1B-0x1C) ---
+#define SYS_GET_DATETIME 0x1B  // ESI -> struct datetime_args
+#define SYS_REBOOT       0x1C  // ESI не используется
+
+// SYS_GET_DATETIME: текущее время RTC (CMOS), уже переведённое из BCD.
+// year - две последние цифры (0-99, т.е. без "20" спереди).
+struct datetime_args {
+    int second;
+    int minute;
+    int hour;
+    int day;
+    int month;
+    int year;
+};
+
 // --- Список задач (0x13) ---
 #define SYS_PS 0x13  // ESI -> struct ps_entry
 

@@ -141,6 +141,18 @@ struct disk_sector_args {
     int            result;
 };
 
+#define SYS_GET_DATETIME 0x1B  // ESI -> struct datetime_args
+#define SYS_REBOOT       0x1C
+
+struct datetime_args {
+    int second;
+    int minute;
+    int hour;
+    int day;
+    int month;
+    int year;
+};
+
 #define SYS_PS 0x13
 
 struct ps_entry {

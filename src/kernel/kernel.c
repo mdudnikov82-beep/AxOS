@@ -268,47 +268,29 @@ int bcd_to_bin(unsigned char val) {
     return (val & 0x0F) + ((val >> 4) * 10);
 }
 
-// Печатает текущую дату и время, считанные из RTC, в формате YYYY-MM-DD HH:MM:SS
-void print_datetime() {
+// Читает час/мин/сек/день/месяц/год из RTC, переводя из BCD при
+// необходимости. Используется SYS_GET_DATETIME (userspace date.bin) -
+// дата/время в kernel-shell больше нет, см. "date" в help выше.
+static void read_rtc(int* second, int* minute, int* hour, int* day, int* month, int* year) {
     // Ждём, пока RTC закончит обновление своих регистров
     while (cmos_read(0x0A) & 0x80);
 
-    int second = cmos_read(0x00);
-    int minute = cmos_read(0x02);
-    int hour   = cmos_read(0x04);
-    int day    = cmos_read(0x07);
-    int month  = cmos_read(0x08);
-    int year   = cmos_read(0x09);
+    *second = cmos_read(0x00);
+    *minute = cmos_read(0x02);
+    *hour   = cmos_read(0x04);
+    *day    = cmos_read(0x07);
+    *month  = cmos_read(0x08);
+    *year   = cmos_read(0x09);
     unsigned char status_b = cmos_read(0x0B);
 
     if (!(status_b & 0x04)) { // регистры в формате BCD — переводим в десятичное
-        second = bcd_to_bin(second);
-        minute = bcd_to_bin(minute);
-        hour   = bcd_to_bin(hour & 0x7F);
-        day    = bcd_to_bin(day);
-        month  = bcd_to_bin(month);
-        year   = bcd_to_bin(year);
+        *second = bcd_to_bin(*second);
+        *minute = bcd_to_bin(*minute);
+        *hour   = bcd_to_bin(*hour & 0x7F);
+        *day    = bcd_to_bin(*day);
+        *month  = bcd_to_bin(*month);
+        *year   = bcd_to_bin(*year);
     }
-
-    char buf[20] = "0000-00-00 00:00:00";
-    buf[0]  = '0' + (2000 + year) / 1000 % 10;
-    buf[1]  = '0' + (2000 + year) / 100 % 10;
-    buf[2]  = '0' + (2000 + year) / 10 % 10;
-    buf[3]  = '0' + (2000 + year) % 10;
-    buf[5]  = '0' + month / 10;
-    buf[6]  = '0' + month % 10;
-    buf[8]  = '0' + day / 10;
-    buf[9]  = '0' + day % 10;
-    buf[11] = '0' + hour / 10;
-    buf[12] = '0' + hour % 10;
-    buf[14] = '0' + minute / 10;
-    buf[15] = '0' + minute % 10;
-    buf[17] = '0' + second / 10;
-    buf[18] = '0' + second % 10;
-    buf[19] = '\0';
-
-    print_string(buf);
-    print_string("\n");
 }
 
 // Печатает беззнаковое число в десятичном виде
@@ -872,6 +854,21 @@ void sys_unlink(char* arg) {
     a->result = vfs_delete(a->filename);
 }
 
+// SYS_GET_DATETIME: текущее время RTC - userspace-версия print_datetime()
+// (kernel-shell "date"), см. date.bin.
+void sys_get_datetime(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct datetime_args))) return;
+    struct datetime_args* a = (struct datetime_args*)arg;
+    read_rtc(&a->second, &a->minute, &a->hour, &a->day, &a->month, &a->year);
+}
+
+// SYS_REBOOT: перезагружает систему через контроллер клавиатуры (8042) -
+// см. reboot(). Не возвращается.
+void sys_reboot(char* arg) {
+    (void)arg;
+    reboot();
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01
@@ -900,6 +897,8 @@ syscall_fn syscall_table[] = {
     sys_disk_identify,     // 0x18
     sys_disk_read_sector,  // 0x19
     sys_disk_write_sector, // 0x1A
+    sys_get_datetime,      // 0x1B
+    sys_reboot,            // 0x1C
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))
@@ -1070,9 +1069,7 @@ void execute_command(char* cmd) {
         print_string("  help        - show this help\n");
         print_string("  clear       - clear the screen\n");
         print_string("  about       - show OS info\n");
-        print_string("  date        - show current date and time\n");
         print_string("  sleep <sec> - pause for N seconds (0-9)\n");
-        print_string("  reboot      - restart the OS\n");
         print_string("  lock        - write-protect the FAT12 disk (default)\n");
         print_string("  unlock      - allow writes to the FAT12 disk\n");
         print_string("  run <file>  - load and run a program from FAT12 (ring3)\n");
@@ -1080,16 +1077,14 @@ void execute_command(char* cmd) {
         print_string("  memtest     - test heap allocator (malloc/free)\n");
         print_string("  selftest    - run heap/paging/FAT12 regression tests\n");
         print_string("  Ctrl+Alt+F1/F2 - switch virtual console (TTY)\n");
-        print_string("  (echo/ls/cat/ps/uptime/write/diskinfo/diskread/diskwrite moved to\n");
-        print_string("   userspace - use \"run X.BIN\", e.g. \"run disktool.bin info\")\n");
+        print_string("  (echo/ls/cat/ps/uptime/write/diskinfo/diskread/diskwrite/date/reboot\n");
+        print_string("   moved to userspace - use \"run X.BIN\", e.g. \"run date.bin\")\n");
     } else if (str_eq(cmd, "clear")) {
         clear_screen();
     } else if (str_eq(cmd, "about")) {
         print_string("AxOS v0.6 - hobby OS in C and x86 Assembly\n");
         print_string("FAT12 disk: ");
         print_string(vfs_is_locked() ? "locked (read-only)\n" : "unlocked (read-write)\n");
-    } else if (str_eq(cmd, "date") || str_eq(cmd, "time")) {
-        print_datetime();
     } else if (str_starts_with(cmd, "sleep ")) {
         char digit = cmd[6];
         if (digit >= '0' && digit <= '9') {
@@ -1099,9 +1094,6 @@ void execute_command(char* cmd) {
         } else {
             print_string("Usage: sleep <0-9>\n");
         }
-    } else if (str_eq(cmd, "reboot")) {
-        print_string("Rebooting...\n");
-        reboot();
     } else if (str_eq(cmd, "lock")) {
         vfs_set_locked(1);
         print_string("FAT12 disk locked (read-only).\n");
