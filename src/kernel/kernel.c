@@ -373,7 +373,13 @@ void reboot() {
 // syscalls.asm — эта таблица и обработчики переезжают как есть.
 typedef void (*syscall_fn)(char*);
 
+// Объявлены ниже (рядом с caller_tty) - нужны уже здесь, sys_print_string
+// идёт раньше по файлу.
+static int validate_user_ptr(void* ptr, unsigned int size);
+static int validate_user_str(char* s);
+
 void sys_print_string(char* arg) {
+    if (!validate_user_str(arg)) return;
     int slot = task_current_slot_index();
     if (slot >= 0 && slot < USER_PROGRAM_SLOTS && slot_redir_buf[slot]) {
         char* s = arg;
@@ -399,6 +405,49 @@ static int caller_tty() {
     return tty_active();
 }
 
+// Проверяет, что весь диапазон [ptr, ptr+size) лежит внутри легитимного
+// "пользовательского окна" вызывающей задачи (USER_WINDOW_BASE..+SIZE,
+// см. paging.h) - то есть туда, куда ring3-код мог бы добраться сам,
+// без привилегий ring0.
+//
+// БЕЗ этой проверки: syscall-обработчики читают указатель прямо из
+// аргумента, переданного программой (ESI), и разыменовывают его, работая
+// с CPL=0. CPL=0 игнорирует бит PAGE_USER в page table - значит, ядро
+// готово прочитать/записать ЛЮБУЮ физическую память (другую изолированную
+// задачу, .data/.bss/кучу самого ядра - не .text, та read-only даже для
+// ring0 из-за CR0.WP), если ring3-программа просто передаст "удобный"
+// адрес в качестве buf/data/model. Сама задача такой адрес прочитать не
+// смогла бы (её собственная page table не даёт PAGE_USER за пределами
+// окна - CPU убил бы её #PF), но через syscall эта защита не работает,
+// пока мы явно не проверим адрес здесь.
+//
+// Только для ИЗОЛИРОВАННЫХ задач (run/exec, task_current_is_isolated()) -
+// у task0/heartbeat/ring3demo/usermode_demo нет своего окна и приватной
+// page table, это доверенный код ядра, а не загруженные бинарники.
+static int validate_user_ptr(void* ptr, unsigned int size) {
+    if (!task_current_is_isolated()) return 1; // доверенный (не изолированный) вызывающий
+    unsigned int addr = (unsigned int)ptr;
+    if (addr + size < addr) return 0; // переполнение диапазона
+    return addr >= USER_WINDOW_BASE && addr + size <= USER_WINDOW_BASE + USER_WINDOW_SIZE;
+}
+
+// Та же идея, что у validate_user_ptr, но для NUL-terminated строк
+// неизвестной заранее длины (имена файлов, командные строки): начало
+// строки должно лежать в окне, и '\0' должен встретиться до его конца -
+// иначе sys_open/sys_exec и т.п. либо прочитали бы байт за пределами
+// окна как часть имени файла, либо ушли построчно искать '\0' в чужой
+// памяти, если строка там не закончится вовсе.
+static int validate_user_str(char* s) {
+    if (!task_current_is_isolated()) return 1;
+    unsigned int addr = (unsigned int)s;
+    if (addr < USER_WINDOW_BASE || addr >= USER_WINDOW_BASE + USER_WINDOW_SIZE) return 0;
+    unsigned int max = USER_WINDOW_BASE + USER_WINDOW_SIZE - addr;
+    for (unsigned int i = 0; i < max; i++) {
+        if (s[i] == '\0') return 1;
+    }
+    return 0; // нет '\0' до конца окна
+}
+
 // SYS_READ_KEY: неблокирующее чтение клавиатуры. ESI -> char, куда
 // записывается последний нажатый символ (0, если ничего не нажато
 // с прошлого опроса). Прочитанный символ "потребляется" - last_key
@@ -415,6 +464,7 @@ void sys_read_key(char* arg) {
 // SYS_WRITE_FILE: ESI -> struct write_file_args
 void sys_write_file(char* arg) {
     struct write_file_args* a = (struct write_file_args*)arg;
+    if (!validate_user_str(a->filename) || !validate_user_ptr(a->data, a->size)) return;
     vfs_write(a->filename, a->data, a->size);
 }
 
@@ -422,6 +472,10 @@ void sys_write_file(char* arg) {
 // записывается обратно в a->out_size.
 void sys_read_file(char* arg) {
     struct read_file_args* a = (struct read_file_args*)arg;
+    if (!validate_user_str(a->filename) || !validate_user_ptr(a->buffer, a->max_size)) {
+        a->out_size = 0;
+        return;
+    }
     a->out_size = vfs_read(a->filename, a->buffer, a->max_size);
 }
 
@@ -462,6 +516,7 @@ static void fd_table_ensure_init(void) {
 void sys_open(char* arg) {
     struct open_args* a = (struct open_args*)arg;
     a->result = -1;
+    if (!validate_user_str(a->filename)) return;
     fd_table_ensure_init();
 
     int slot = -1;
@@ -501,6 +556,7 @@ void sys_fread(char* arg) {
     int fd = a->fd;
     if (fd < 0 || fd >= MAX_FDS || !fd_table[fd].valid) return;
     if (fd_table[fd].flags != O_RDONLY) return;
+    if (!validate_user_ptr(a->buf, a->count)) return;
 
     unsigned int remaining = fd_table[fd].size - fd_table[fd].pos;
     unsigned int to_copy   = a->count < remaining ? a->count : remaining;
@@ -520,6 +576,7 @@ void sys_fwrite(char* arg) {
     int fd = a->fd;
     if (fd < 0 || fd >= MAX_FDS || !fd_table[fd].valid) return;
     if (fd_table[fd].flags == O_RDONLY) return;
+    if (!validate_user_ptr(a->buf, a->count)) return;
 
     unsigned int space    = MAX_FILE_BUF - fd_table[fd].pos;
     unsigned int to_copy  = a->count < space ? a->count : space;
@@ -611,6 +668,7 @@ static int do_exec(char* cmdline) {
 
 void sys_exec(char* arg) {
     struct exec_args* a = (struct exec_args*)arg;
+    if (!validate_user_str(a->cmdline)) { a->result = -1; return; }
     a->result = do_exec(a->cmdline);
 }
 
@@ -618,6 +676,15 @@ void sys_exec(char* arg) {
 // Атомарно: буфер создаётся до первого тика планировщика новой задачи.
 void sys_exec_redir(char* arg) {
     struct exec_redir_args* a = (struct exec_redir_args*)arg;
+    // Порядок важен: validate_user_str ничего не разыменовывает, пока не
+    // убедится, что адрес в окне - проверяем ЕЁ раньше, чем a->redir_out[0]
+    // (redir_out=NULL - валидный "без перенаправления", поэтому не сам
+    // факт указателя, а его обращение нужно защищать).
+    if (!validate_user_str(a->cmdline) ||
+        (a->redir_out && !validate_user_str(a->redir_out))) {
+        a->result = -1;
+        return;
+    }
     a->result = do_exec(a->cmdline);
     if (a->result >= 0 && a->redir_out && a->redir_out[0]) {
         int slot = a->result;
@@ -686,6 +753,7 @@ void sys_readdir(char* arg) {
 
 void sys_mkdir(char* arg) {
     struct mkdir_args* a = (struct mkdir_args*)arg;
+    if (!validate_user_str(a->dirname)) { a->result = 0; return; }
     a->result = vfs_mkdir(a->dirname);
 }
 
@@ -698,16 +766,19 @@ void sys_fs_lock(char* arg) {
 // userspace-программой; ядро только читает/пишет в них через указатель.
 void sys_disk_identify(char* arg) {
     struct disk_identify_args* a = (struct disk_identify_args*)arg;
+    if (!validate_user_ptr(a->model, 41)) { a->result = 0; return; }
     a->result = ide_identify(a->model);
 }
 
 void sys_disk_read_sector(char* arg) {
     struct disk_sector_args* a = (struct disk_sector_args*)arg;
+    if (!validate_user_ptr(a->buf, IDE_SECTOR_SIZE)) { a->result = 0; return; }
     a->result = ide_read_sector(a->lba, a->buf);
 }
 
 void sys_disk_write_sector(char* arg) {
     struct disk_sector_args* a = (struct disk_sector_args*)arg;
+    if (!validate_user_ptr(a->buf, IDE_SECTOR_SIZE)) { a->result = 0; return; }
     a->result = ide_write_sector(a->lba, a->buf);
 }
 
@@ -739,6 +810,7 @@ void sys_sbrk(char* arg) {
 
 void sys_unlink(char* arg) {
     struct unlink_args* a = (struct unlink_args*)arg;
+    if (!validate_user_str(a->filename)) { a->result = 0; return; }
     a->result = vfs_delete(a->filename);
 }
 
