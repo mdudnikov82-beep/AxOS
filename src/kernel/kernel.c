@@ -455,7 +455,7 @@ static int validate_user_str(char* s) {
 // поэтому AxSH на неактивной консоли не видит чужих нажатий.
 void sys_read_key(char* arg) {
     int t = caller_tty();
-    if (arg) {
+    if (arg && validate_user_ptr(arg, 1)) {
         *arg = tty_last_key[t];
         tty_last_key[t] = 0;
     }
@@ -463,6 +463,7 @@ void sys_read_key(char* arg) {
 
 // SYS_WRITE_FILE: ESI -> struct write_file_args
 void sys_write_file(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct write_file_args))) return;
     struct write_file_args* a = (struct write_file_args*)arg;
     if (!validate_user_str(a->filename) || !validate_user_ptr(a->data, a->size)) return;
     vfs_write(a->filename, a->data, a->size);
@@ -471,6 +472,7 @@ void sys_write_file(char* arg) {
 // SYS_READ_FILE: ESI -> struct read_file_args. Фактический размер
 // записывается обратно в a->out_size.
 void sys_read_file(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct read_file_args))) return;
     struct read_file_args* a = (struct read_file_args*)arg;
     if (!validate_user_str(a->filename) || !validate_user_ptr(a->buffer, a->max_size)) {
         a->out_size = 0;
@@ -514,6 +516,7 @@ static void fd_table_ensure_init(void) {
 // O_WRONLY|O_CREAT — создаёт пустой буфер для записи.
 // Возвращает fd (>= 0) через open_args.result, или -1 при ошибке.
 void sys_open(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct open_args))) return;
     struct open_args* a = (struct open_args*)arg;
     a->result = -1;
     if (!validate_user_str(a->filename)) return;
@@ -551,6 +554,7 @@ void sys_open(char* arg) {
 // SYS_FREAD: прочитать до count байт из fd в пользовательский buf.
 // fread_args.result = фактически прочитанные байты; 0 = EOF; -1 = ошибка.
 void sys_fread(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct fread_args))) return;
     struct fread_args* a = (struct fread_args*)arg;
     a->result = -1;
     int fd = a->fd;
@@ -571,6 +575,7 @@ void sys_fread(char* arg) {
 // SYS_FWRITE: записать count байт из buf в fd (накапливается в буфере
 // ядра; на диск сбрасывается только при SYS_CLOSE).
 void sys_fwrite(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct fwrite_args))) return;
     struct fwrite_args* a = (struct fwrite_args*)arg;
     a->result = -1;
     int fd = a->fd;
@@ -591,6 +596,7 @@ void sys_fwrite(char* arg) {
 
 // SYS_CLOSE: закрыть fd. Если был открыт на запись — сбросить на диск.
 void sys_close(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct close_args))) return;
     struct close_args* a = (struct close_args*)arg;
     int fd = a->fd;
     if (fd < 0 || fd >= MAX_FDS || !fd_table[fd].valid) return;
@@ -667,6 +673,7 @@ static int do_exec(char* cmdline) {
 }
 
 void sys_exec(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct exec_args))) return;
     struct exec_args* a = (struct exec_args*)arg;
     if (!validate_user_str(a->cmdline)) { a->result = -1; return; }
     a->result = do_exec(a->cmdline);
@@ -675,6 +682,7 @@ void sys_exec(char* arg) {
 // SYS_EXEC_REDIR: запустить программу, перенаправив её stdout в файл.
 // Атомарно: буфер создаётся до первого тика планировщика новой задачи.
 void sys_exec_redir(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct exec_redir_args))) return;
     struct exec_redir_args* a = (struct exec_redir_args*)arg;
     // Порядок важен: validate_user_str ничего не разыменовывает, пока не
     // убедится, что адрес в окне - проверяем ЕЁ раньше, чем a->redir_out[0]
@@ -703,6 +711,7 @@ void sys_exec_redir(char* arg) {
 // SYS_TASK_ALIVE: неблокирующая проверка — завершена ли задача в слоте.
 // sh.bin вызывает в цикле busy-wait, пока дочерняя задача работает.
 void sys_task_alive(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct task_alive_args))) return;
     struct task_alive_args* a = (struct task_alive_args*)arg;
     int slot = a->slot;
     a->result = (slot >= 0 && slot < USER_PROGRAM_SLOTS && !slot_free[slot]) ? 1 : 0;
@@ -726,6 +735,7 @@ void sys_shell_claim(char* arg) {
 // и после него (slot = -1). keyboard_handler_main использует
 // tty_foreground_slot[tty_active()] для Ctrl+C.
 void sys_set_foreground(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct set_fg_args))) return;
     struct set_fg_args* a = (struct set_fg_args*)arg;
     tty_foreground_slot[caller_tty()] = a->slot;
 }
@@ -733,6 +743,7 @@ void sys_set_foreground(char* arg) {
 // SYS_GET_TICKS: возвращает текущее значение timer_ticks (100 Гц).
 // Секунды от загрузки = result / 100.
 void sys_get_ticks(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct get_ticks_args))) return;
     struct get_ticks_args* a = (struct get_ticks_args*)arg;
     a->result = (unsigned int)timer_ticks;
 }
@@ -740,11 +751,13 @@ void sys_get_ticks(char* arg) {
 // SYS_SLEEP: блокирует вызывающую задачу на ms миллисекунд.
 // sleep_ms включает прерывания через sti — другие задачи получают CPU во время ожидания.
 void sys_sleep(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct sleep_args))) return;
     struct sleep_args* a = (struct sleep_args*)arg;
     sleep_ms((unsigned long)a->ms);
 }
 
 void sys_readdir(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct readdir_args))) return;
     struct readdir_args* a = (struct readdir_args*)arg;
     int is_dir = 0;
     a->result = vfs_readdir(a->index, a->name, &a->size, &is_dir);
@@ -752,6 +765,7 @@ void sys_readdir(char* arg) {
 }
 
 void sys_mkdir(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct mkdir_args))) return;
     struct mkdir_args* a = (struct mkdir_args*)arg;
     if (!validate_user_str(a->dirname)) { a->result = 0; return; }
     a->result = vfs_mkdir(a->dirname);
@@ -765,24 +779,28 @@ void sys_fs_lock(char* arg) {
 // (диагностика, см. ide.c). a->model/a->buf - буферы, выделенные вызывающей
 // userspace-программой; ядро только читает/пишет в них через указатель.
 void sys_disk_identify(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct disk_identify_args))) return;
     struct disk_identify_args* a = (struct disk_identify_args*)arg;
     if (!validate_user_ptr(a->model, 41)) { a->result = 0; return; }
     a->result = ide_identify(a->model);
 }
 
 void sys_disk_read_sector(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct disk_sector_args))) return;
     struct disk_sector_args* a = (struct disk_sector_args*)arg;
     if (!validate_user_ptr(a->buf, IDE_SECTOR_SIZE)) { a->result = 0; return; }
     a->result = ide_read_sector(a->lba, a->buf);
 }
 
 void sys_disk_write_sector(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct disk_sector_args))) return;
     struct disk_sector_args* a = (struct disk_sector_args*)arg;
     if (!validate_user_ptr(a->buf, IDE_SECTOR_SIZE)) { a->result = 0; return; }
     a->result = ide_write_sector(a->lba, a->buf);
 }
 
 void sys_ps(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct ps_entry))) return;
     struct ps_entry* e = (struct ps_entry*)arg;
     e->result = task_get_info(e->index, &e->pid, e->name, &e->ticks, &e->slot);
     if (e->result && e->slot >= 0 && e->slot < USER_PROGRAM_SLOTS)
@@ -794,6 +812,7 @@ void sys_ps(char* arg) {
 // SYS_SBRK: сдвигает heap break задачи на increment байт вперёд.
 // Возвращает старый break (начало выделенного региона) или -1 при переполнении.
 void sys_sbrk(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct sbrk_args))) return;
     struct sbrk_args* a = (struct sbrk_args*)arg;
     int slot = task_current_slot_index();
     if (slot < 0) { a->result = (unsigned int)-1; return; }
@@ -809,6 +828,7 @@ void sys_sbrk(char* arg) {
 }
 
 void sys_unlink(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct unlink_args))) return;
     struct unlink_args* a = (struct unlink_args*)arg;
     if (!validate_user_str(a->filename)) { a->result = 0; return; }
     a->result = vfs_delete(a->filename);
