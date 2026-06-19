@@ -51,10 +51,19 @@ static unsigned char* slot_redir_buf[USER_PROGRAM_SLOTS];
 static unsigned int   slot_redir_len[USER_PROGRAM_SLOTS];
 static char           slot_redir_file[USER_PROGRAM_SLOTS][13];
 
+// Определена ниже, у fd_table (которая объявляется позже по файлу) -
+// закрывает все fd, оставшиеся открытыми у завершившейся задачи. Без
+// этого её слот освобождается и переиспользуется НОВОЙ задачей, а её
+// fd в общей (на всю систему) таблице остаются valid с owner == номер
+// слота - который теперь принадлежит этой новой, ни в чём не виноватой
+// задаче, и она "наследует" доступ к чужим недозакрытым файлам.
+static void fd_release_owner(int owner_slot);
+
 // Вызывается из tasking.c::schedule() при реапе изолированной run-задачи.
 void on_task_exit(int user_slot_index) {
     slot_free[user_slot_index] = 1;
     slot_heap_brk[user_slot_index] = 0;
+    fd_release_owner(user_slot_index);
     if (slot_redir_buf[user_slot_index]) {
         vfs_write(slot_redir_file[user_slot_index],
                   slot_redir_buf[user_slot_index],
@@ -500,8 +509,15 @@ struct fd_entry {
     unsigned char* buf;
     unsigned int   size;
     unsigned int   pos;
+    int            owner; // task_current_slot_index() задачи, открывшей fd (см. fd_owned_by_caller)
 };
 
+// ОДНА на всю систему таблица из MAX_FDS дескрипторов, общая для ВСЕХ
+// изолированных задач (а не своя у каждой) - поэтому валидность fd одна
+// проверка недостаточна: без owner ничто не мешало задаче B читать/писать
+// файл, открытый задачей A, просто угадав/повторив тот же номер fd (0-3,
+// диапазон тесный). owner делает SYS_FREAD/FWRITE/CLOSE отказывать всем,
+// кроме задачи, которая сама вызвала SYS_OPEN для этого fd.
 static struct fd_entry fd_table[MAX_FDS];
 static int fd_table_inited = 0;
 
@@ -509,6 +525,27 @@ static void fd_table_ensure_init(void) {
     if (!fd_table_inited) {
         for (int i = 0; i < MAX_FDS; i++) fd_table[i].valid = 0;
         fd_table_inited = 1;
+    }
+}
+
+// true, если fd валиден И принадлежит ВЫЗЫВАЮЩЕЙ задаче.
+static int fd_owned_by_caller(int fd) {
+    if (fd < 0 || fd >= MAX_FDS || !fd_table[fd].valid) return 0;
+    return fd_table[fd].owner == task_current_slot_index();
+}
+
+// Закрывает (с тем же сбросом на диск, что у SYS_CLOSE) все fd, которые
+// принадлежали слоту owner_slot - вызывается из on_task_exit(), пока
+// слот ещё не отдан следующей задаче.
+static void fd_release_owner(int owner_slot) {
+    for (int fd = 0; fd < MAX_FDS; fd++) {
+        if (!fd_table[fd].valid || fd_table[fd].owner != owner_slot) continue;
+        if (fd_table[fd].flags != O_RDONLY && fd_table[fd].size > 0) {
+            vfs_write(fd_table[fd].name, fd_table[fd].buf, fd_table[fd].size);
+        }
+        free(fd_table[fd].buf);
+        fd_table[fd].buf   = 0;
+        fd_table[fd].valid = 0;
     }
 }
 
@@ -536,6 +573,7 @@ void sys_open(char* arg) {
     fd_table[slot].flags = a->flags;
     fd_table[slot].pos   = 0;
     fd_table[slot].size  = 0;
+    fd_table[slot].owner = task_current_slot_index();
     fd_table[slot].buf   = (unsigned char*)malloc(MAX_FILE_BUF);
     if (!fd_table[slot].buf) return;
 
@@ -558,7 +596,7 @@ void sys_fread(char* arg) {
     struct fread_args* a = (struct fread_args*)arg;
     a->result = -1;
     int fd = a->fd;
-    if (fd < 0 || fd >= MAX_FDS || !fd_table[fd].valid) return;
+    if (!fd_owned_by_caller(fd)) return;
     if (fd_table[fd].flags != O_RDONLY) return;
     if (!validate_user_ptr(a->buf, a->count)) return;
 
@@ -579,7 +617,7 @@ void sys_fwrite(char* arg) {
     struct fwrite_args* a = (struct fwrite_args*)arg;
     a->result = -1;
     int fd = a->fd;
-    if (fd < 0 || fd >= MAX_FDS || !fd_table[fd].valid) return;
+    if (!fd_owned_by_caller(fd)) return;
     if (fd_table[fd].flags == O_RDONLY) return;
     if (!validate_user_ptr(a->buf, a->count)) return;
 
@@ -599,7 +637,7 @@ void sys_close(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct close_args))) return;
     struct close_args* a = (struct close_args*)arg;
     int fd = a->fd;
-    if (fd < 0 || fd >= MAX_FDS || !fd_table[fd].valid) return;
+    if (!fd_owned_by_caller(fd)) return;
 
     if (fd_table[fd].flags != O_RDONLY && fd_table[fd].size > 0)
         vfs_write(fd_table[fd].name, fd_table[fd].buf, fd_table[fd].size);
