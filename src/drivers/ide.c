@@ -12,6 +12,14 @@
 // ide_wait_ready() (ждём, что контроллер вообще отвечает, до выдачи
 // команды) остался поллингом - это проверка "жив ли диск", не связанная
 // с конкретной командой, IRQ тут ни при чём.
+//
+// ide_lock (spinlock.h): ide_wait_irq() уступает CPU через hlt+sti, пока
+// ждёт IRQ14 - а это значит, что ДРУГАЯ задача может быть запланирована
+// и тоже полезть в порты 0x1F0-0x1F7 ПОКА текущая операция ещё не
+// закончена (контроллер физически один, делить его нечем). Без лока две
+// одновременных disktool.bin перепутали бы команды/данные друг друга.
+#include "../kernel/spinlock.h"
+static spinlock_t ide_lock = 0;
 
 #define IDE_REG_DATA       0x1F0
 #define IDE_REG_SECCOUNT   0x1F2
@@ -135,14 +143,16 @@ static void ide_select_lba(unsigned int lba) {
 }
 
 int ide_read_sector(unsigned int lba, unsigned char* buffer) {
-    if (!ide_wait_ready()) return 0;
+    spin_lock(&ide_lock);
+
+    if (!ide_wait_ready()) { spin_unlock(&ide_lock); return 0; }
 
     ide_select_lba(lba);
     ide_irq_fired = 0; // сбрасываем до команды - иначе примем "эхо" от предыдущей операции
     port_byte_out(IDE_REG_COMMAND, IDE_CMD_READ_SECTORS);
 
     // READ SECTORS гарантированно генерирует IRQ при готовности данных.
-    if (!ide_wait_irq()) return 0;
+    if (!ide_wait_irq()) { spin_unlock(&ide_lock); return 0; }
 
     for (int i = 0; i < 256; i++) {
         unsigned short word = port_word_in(IDE_REG_DATA);
@@ -150,11 +160,14 @@ int ide_read_sector(unsigned int lba, unsigned char* buffer) {
         buffer[i * 2 + 1] = (word >> 8) & 0xFF;
     }
 
+    spin_unlock(&ide_lock);
     return 1;
 }
 
 int ide_write_sector(unsigned int lba, unsigned char* buffer) {
-    if (!ide_wait_ready()) return 0;
+    spin_lock(&ide_lock);
+
+    if (!ide_wait_ready()) { spin_unlock(&ide_lock); return 0; }
 
     ide_select_lba(lba);
     port_byte_out(IDE_REG_COMMAND, IDE_CMD_WRITE_SECTORS);
@@ -164,7 +177,7 @@ int ide_write_sector(unsigned int lba, unsigned char* buffer) {
     // WRITE SECTORS - хост должен сам опросить DRQ. IRQ гарантирован только
     // ПОСЛЕ того, как этот блок принят - вот его и ждём ниже через
     // ide_wait_irq(), а не статус-регистр.
-    if (!ide_wait_data()) return 0;
+    if (!ide_wait_data()) { spin_unlock(&ide_lock); return 0; }
 
     for (int i = 0; i < 256; i++) {
         unsigned short word = buffer[i * 2] | (buffer[i * 2 + 1] << 8);
@@ -172,15 +185,19 @@ int ide_write_sector(unsigned int lba, unsigned char* buffer) {
     }
 
     ide_irq_fired = 0; // сбрасываем перед ожиданием завершения записи блока
-    if (!ide_wait_irq()) return 0;
+    if (!ide_wait_irq()) { spin_unlock(&ide_lock); return 0; }
 
     ide_irq_fired = 0; // и перед ожиданием завершения CACHE FLUSH
     port_byte_out(IDE_REG_COMMAND, IDE_CMD_CACHE_FLUSH);
-    return ide_wait_irq();
+    int ok = ide_wait_irq();
+    spin_unlock(&ide_lock);
+    return ok;
 }
 
 int ide_identify(char* model) {
-    if (!ide_wait_ready()) return 0;
+    spin_lock(&ide_lock);
+
+    if (!ide_wait_ready()) { spin_unlock(&ide_lock); return 0; }
 
     port_byte_out(IDE_REG_DRIVE_HEAD, 0xE0);
     port_byte_out(IDE_REG_SECCOUNT, 0);
@@ -190,15 +207,17 @@ int ide_identify(char* model) {
     ide_irq_fired = 0;
     port_byte_out(IDE_REG_COMMAND, IDE_CMD_IDENTIFY);
 
-    if (port_byte_in(IDE_REG_STATUS) == 0) return 0; // нет устройства
+    if (port_byte_in(IDE_REG_STATUS) == 0) { spin_unlock(&ide_lock); return 0; } // нет устройства
     // IDENTIFY DEVICE гарантированно генерирует IRQ при готовности данных,
     // как и READ SECTORS.
-    if (!ide_wait_irq()) return 0;
+    if (!ide_wait_irq()) { spin_unlock(&ide_lock); return 0; }
 
     unsigned short data[256];
     for (int i = 0; i < 256; i++) {
         data[i] = port_word_in(IDE_REG_DATA);
     }
+
+    spin_unlock(&ide_lock);
 
     // Слова 27-46 ответа IDENTIFY - модель устройства (40 символов ASCII,
     // байты в каждом слове в обратном порядке).
