@@ -116,6 +116,23 @@ static const unsigned char palette[9] = {
     0x00, // 9: чёрный (ластик)
 };
 
+static int int_abs(int v) { return v < 0 ? -v : v; }
+
+// Рисует мазки вдоль отрезка от (x0,y0) до (x1,y1) с шагом ~2 пикселя,
+// а не только в конечной точке - иначе при резком/крупном движении
+// мыши между соседними кадрами (мышь может пройти больше своей "клетки"
+// за один пакет) кисть оставляла бы отдельные несвязанные квадраты
+// вместо сплошной линии.
+static void draw_stroke(int x0, int y0, int x1, int y1, unsigned char color) {
+    int dx = x1 - x0, dy = y1 - y0;
+    int dist = int_abs(dx) > int_abs(dy) ? int_abs(dx) : int_abs(dy);
+    int steps = dist / 2;
+    if (steps < 1) steps = 1;
+    for (int s = 1; s <= steps; s++) {
+        draw_brush(x0 + dx * s / steps, y0 + dy * s / steps, color);
+    }
+}
+
 void gfx_main() {
     init_idt_gfx();
     init_mouse();
@@ -124,6 +141,7 @@ void gfx_main() {
 
     unsigned char cursor_backup[BRUSH_SIZE * BRUSH_SIZE];
     int last_x = -1, last_y = -1;
+    int paint_x = -1, paint_y = -1; // последняя точка ТЕКУЩЕГО мазка (-1 = кнопка не была зажата)
     unsigned char current_color = palette[0]; // старт - белый
 
     while (1) {
@@ -146,7 +164,15 @@ void gfx_main() {
         // холста, не курсора - сохранённый "под курсором" фрагмент
         // ниже захватит и этот мазок, так что курсор его не сотрёт.
         if (mouse_get_buttons() & 0x01) {
-            draw_brush(x, y, current_color);
+            if (paint_x < 0) {
+                draw_brush(x, y, current_color); // начало нового мазка - одна точка
+            } else {
+                draw_stroke(paint_x, paint_y, x, y, current_color); // продолжение - тянем линию
+            }
+            paint_x = x;
+            paint_y = y;
+        } else {
+            paint_x = -1; // кнопка отпущена - следующее нажатие начнёт новый, несвязанный мазок
         }
 
         // Сохраняем то, что сейчас на новом месте (включая только что
@@ -174,7 +200,8 @@ void gfx_main() {
                 current_color = palette[scancode - 0x02];
             } else if (scancode == 0x2E) { // C - очистить холст
                 fill_screen(CANVAS_BG);
-                last_x = -1; // иначе следующий кадр "восстановит" старые пиксели поверх очистки
+                last_x = -1;  // иначе следующий кадр "восстановит" старые пиксели поверх очистки
+                paint_x = -1; // и не потянем линию из точки, которой уже нет на чистом холсте
             }
         }
     }
