@@ -438,6 +438,44 @@ powershell -Command "$file = 'build\os-image.bin'; $size = (Get-Item $file).Leng
 echo Writing FAT12 filesystem into build/disk.img (first 128KB, LBA 0-255)...
 powershell -Command "$disk = 'build\disk.img'; $fat = [System.IO.File]::ReadAllBytes('build\fat12.bin'); $stream = [System.IO.File]::Open($disk, 'OpenOrCreate', 'Write'); $stream.Write($fat, 0, $fat.Length); if ($stream.Length -lt 10485760) { $stream.SetLength(10485760) }; $stream.Close()"
 
+:: =================================================================
+::  Отдельный графический demo-образ (mode 13h) - не часть основной
+::  ОС, отдельный boot.bin + отдельное мини-ядро. См. gfx_demo.c.
+:: =================================================================
+echo Assembling graphics bootloader (boot_gfx.asm)...
+.\tools\nasm.exe -f bin src\boot\boot_gfx.asm -o build\boot_gfx.bin
+if %errorlevel% neq 0 goto :error
+
+echo Assembling graphics kernel entry...
+.\tools\nasm.exe -f elf32 src\kernel\kernel_gfx_entry.asm -o build\kernel_gfx_entry.o
+if %errorlevel% neq 0 goto :error
+
+echo Assembling graphics IDT (mouse IRQ12 only)...
+.\tools\nasm.exe -f elf32 src\kernel\idt_gfx.asm -o build\idt_gfx.o
+if %errorlevel% neq 0 goto :error
+
+echo Compiling graphics demo (C)...
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src\kernel\gfx_demo.c -o build\gfx_demo.o
+if %errorlevel% neq 0 goto :error
+
+echo Compiling mouse driver for graphics demo (C)...
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src\drivers\mouse.c -o build\mouse_gfx.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking graphics kernel...
+ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_gfx_entry.o build\idt_gfx.o build\gfx_demo.o build\mouse_gfx.o -o build\kernel_gfx.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping graphics kernel to flat binary...
+objcopy -O binary build\kernel_gfx.exe build\kernel_gfx.bin
+if %errorlevel% neq 0 goto :error
+
+echo Creating graphics demo image...
+copy /b build\boot_gfx.bin + build\kernel_gfx.bin build\os-image-gfx.bin
+if %errorlevel% neq 0 goto :error
+echo Padding graphics image to 1.44MB...
+powershell -Command "$file = 'build\os-image-gfx.bin'; $size = (Get-Item $file).Length; $padding = 1474560 - $size; if ($padding -gt 0) { $stream = [System.IO.File]::OpenWrite($file); $stream.Seek($size, 'Begin'); $stream.Write((New-Object byte[] $padding), 0, $padding); $stream.Close() }"
+
 echo Success!
 pause
 exit /b 0
