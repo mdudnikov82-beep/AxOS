@@ -161,6 +161,13 @@ struct mouse_args {
     int buttons;
 };
 
+#define SYS_BEEP 0x1E  // ESI -> struct beep_args
+
+struct beep_args {
+    unsigned int freq;
+    unsigned int duration_ms;
+};
+
 #define SYS_PS 0x13
 
 struct ps_entry {

@@ -215,6 +215,18 @@ struct mouse_args {
     int buttons;
 };
 
+// --- Системный динамик (0x1E) ---
+#define SYS_BEEP 0x1E  // ESI -> struct beep_args
+
+// SYS_BEEP: играет тон freq Гц в течение duration_ms миллисекунд, затем
+// выключает динамик и возвращает управление (блокирующий вызов - внутри
+// использует тот же sleep_ms(), что и SYS_SLEEP, другие задачи получают
+// CPU). freq=0 - тишина на это время (пауза между нотами).
+struct beep_args {
+    unsigned int freq;
+    unsigned int duration_ms;
+};
+
 // --- Список задач (0x13) ---
 #define SYS_PS 0x13  // ESI -> struct ps_entry
 

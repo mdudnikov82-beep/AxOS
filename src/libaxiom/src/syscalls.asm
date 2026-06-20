@@ -37,6 +37,7 @@ global _ax_disk_write_sector
 global _ax_get_datetime
 global _ax_reboot
 global _ax_get_mouse
+global _ax_beep
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -483,6 +484,24 @@ _ax_get_mouse:
     mov esi, [esp+12]
     mov ah, 0x1D            ; SYS_GET_MOUSE
     int 0x80
+    pop ebx
+    pop esi
+    ret
+
+; void ax_beep(unsigned int freq, unsigned int duration_ms)
+; Строит struct beep_args { freq, duration_ms } на стеке.
+_ax_beep:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=freq, [esp+16]=duration_ms
+    mov eax, [esp+12]
+    mov ecx, [esp+16]
+    push ecx                ; struct.duration_ms (offset 4)
+    push eax                ; struct.freq         (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x1E            ; SYS_BEEP
+    int 0x80
+    add esp, 8
     pop ebx
     pop esi
     ret

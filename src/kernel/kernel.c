@@ -3,6 +3,7 @@
 #include "../user/syscall.h" // ABI системных вызовов, общий с ring3-программами
 #include "ide.h" // PIO-драйвер ATA/IDE (build/disk.img - настоящий диск)
 #include "mouse.h" // PS/2-мышь, IRQ12
+#include "speaker.h" // системный динамик (PC speaker)
 #include "paging.h" // Защита памяти: paging + read-only код ядра
 #include "tss.h" // TSS: переключение стека ring3 -> ring0
 #include "heap.h" // kmalloc/kfree - простой кучевой аллокатор
@@ -883,6 +884,18 @@ void sys_get_mouse(char* arg) {
     a->buttons = mouse_get_buttons();
 }
 
+// SYS_BEEP: играет тон через системный динамик (speaker.c) duration_ms
+// миллисекунд, потом выключает его. Блокирующий - использует тот же
+// sleep_ms(), что и SYS_SLEEP, остальные задачи получают CPU всё это
+// время (sleep_ms сама делает sti(), см. комментарий там).
+void sys_beep(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct beep_args))) return;
+    struct beep_args* a = (struct beep_args*)arg;
+    speaker_on(a->freq);
+    sleep_ms(a->duration_ms);
+    speaker_off();
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01
@@ -914,6 +927,7 @@ syscall_fn syscall_table[] = {
     sys_get_datetime,      // 0x1B
     sys_reboot,            // 0x1C
     sys_get_mouse,         // 0x1D
+    sys_beep,              // 0x1E
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))

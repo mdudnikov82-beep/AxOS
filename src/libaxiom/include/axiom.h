@@ -54,6 +54,11 @@ void ax_reboot(void);
 // Текущая позиция курсора мыши (сетка 80x25) и нажатые кнопки.
 void ax_get_mouse(struct mouse_args* a);
 
+// Играет тон freq Гц в течение duration_ms мс через системный динамик,
+// затем выключает его (блокирующий вызов - другие задачи получают CPU).
+// freq=0 - тишина (пауза между нотами).
+void ax_beep(unsigned int freq, unsigned int duration_ms);
+
 // Перечисление файлов (обёртка над SYS_READDIR)
 // Заполняет *a и возвращает a->result (1 = есть запись, 0 = конец)
 int ax_readdir(struct readdir_args* a);

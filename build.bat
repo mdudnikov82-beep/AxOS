@@ -59,6 +59,10 @@ echo Compiling mouse driver (C)...
 gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/drivers/mouse.c -o build/mouse.o
 if %errorlevel% neq 0 goto :error
 
+echo Compiling speaker driver (C)...
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/drivers/speaker.c -o build/speaker.o
+if %errorlevel% neq 0 goto :error
+
 echo Compiling Syscalls...
 .\tools\nasm.exe -f elf32 src\kernel\syscalls.asm -o build\syscalls.o
 if %errorlevel% neq 0 goto :error
@@ -69,7 +73,7 @@ if %errorlevel% neq 0 goto :error
 
 echo Linking to PE...
 :: Линкуем в формат, который он понимает (i386pe)
-ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\vfs.o build\ide.o build\mouse.o build\syscalls.o build\usermode.o -o build\kernel.exe
+ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\syscalls.o build\usermode.o -o build\kernel.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping to Binary...
@@ -424,6 +428,22 @@ if %errorlevel% neq 0 goto :error
 
 echo Copying user program into fs/ for FAT12 image...
 copy /b build\mouse_tool.bin fs\MOUSE.BIN
+if %errorlevel% neq 0 goto :error
+
+echo Compiling user program (beep.c)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\beep.c -o build\beep.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\beep.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\beep.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\beep.exe build\beep.bin
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\beep.bin fs\BEEP.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Building FAT12 RAM-disk image from fs/...
