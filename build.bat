@@ -55,6 +55,10 @@ echo Compiling IDE driver (C)...
 gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/drivers/ide.c -o build/ide.o
 if %errorlevel% neq 0 goto :error
 
+echo Compiling mouse driver (C)...
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/drivers/mouse.c -o build/mouse.o
+if %errorlevel% neq 0 goto :error
+
 echo Compiling Syscalls...
 .\tools\nasm.exe -f elf32 src\kernel\syscalls.asm -o build\syscalls.o
 if %errorlevel% neq 0 goto :error
@@ -65,7 +69,7 @@ if %errorlevel% neq 0 goto :error
 
 echo Linking to PE...
 :: Линкуем в формат, который он понимает (i386pe)
-ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\vfs.o build\ide.o build\syscalls.o build\usermode.o -o build\kernel.exe
+ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\vfs.o build\ide.o build\mouse.o build\syscalls.o build\usermode.o -o build\kernel.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping to Binary...
@@ -404,6 +408,22 @@ if %errorlevel% neq 0 goto :error
 
 echo Copying user program into fs/ for FAT12 image...
 copy /b build\reboot.bin fs\REBOOT.BIN
+if %errorlevel% neq 0 goto :error
+
+echo Compiling user program (mouse.c)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\mouse.c -o build\mouse_tool.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\mouse_tool.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\mouse_tool.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\mouse_tool.exe build\mouse_tool.bin
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\mouse_tool.bin fs\MOUSE.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Building FAT12 RAM-disk image from fs/...

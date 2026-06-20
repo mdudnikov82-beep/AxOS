@@ -2,6 +2,7 @@
 #include "vfs.h" // VFS: тонкий слой перенаправления к драйверу ФС (сейчас - FAT12)
 #include "../user/syscall.h" // ABI системных вызовов, общий с ring3-программами
 #include "ide.h" // PIO-драйвер ATA/IDE (build/disk.img - настоящий диск)
+#include "mouse.h" // PS/2-мышь, IRQ12
 #include "paging.h" // Защита памяти: paging + read-only код ядра
 #include "tss.h" // TSS: переключение стека ring3 -> ring0
 #include "heap.h" // kmalloc/kfree - простой кучевой аллокатор
@@ -86,6 +87,7 @@ int tty_active();
 extern void keyboard_interrupt_handler();
 extern void timer_interrupt_handler();
 extern void ide_interrupt_handler(); // idt.asm - IRQ14, см. init_idt и ide.c
+extern void mouse_interrupt_handler(); // idt.asm - IRQ12, см. init_idt и mouse.c
 extern void syscall_handler();
 extern void enter_usermode(void (*entry)(void)); // usermode.asm — переход в ring3
 
@@ -169,6 +171,7 @@ void init_idt() {
     set_idt_gate(32, (unsigned long)timer_interrupt_handler);
     set_idt_gate(33, (unsigned long)keyboard_interrupt_handler);
     set_idt_gate(0x2E, (unsigned long)ide_interrupt_handler); // IRQ14 (slave PIC) — см. ide.c
+    set_idt_gate(0x2C, (unsigned long)mouse_interrupt_handler); // IRQ12 (slave PIC) — см. mouse.c
     set_idt_gate(0x80, (unsigned long)syscall_handler); // int 0x80 — системные вызовы AxOS
     IDT[0x80].type_attr = 0xEE; // DPL=3 — int 0x80 разрешён из ring3
     // type_attr у 0x80 (как и у 32/33 выше) оканчивается на E - interrupt
@@ -189,18 +192,19 @@ void init_idt() {
     __asm__("outb %0, %1" : : "a"((unsigned char)0x01), "Nd"(0x21));
     __asm__("outb %0, %1" : : "a"((unsigned char)0x01), "Nd"(0xA1));
 
-    // Маскируем все IRQ, кроме таймера (IRQ0), клавиатуры (IRQ1) и IDE
-    // (IRQ14, slave PIC) — для остальных у нас нет обработчиков, их
-    // срабатывание без IDT-записи приводит к тройному сбою.
+    // Маскируем все IRQ, кроме таймера (IRQ0), клавиатуры (IRQ1), IDE
+    // (IRQ14, slave PIC) и мыши (IRQ12, slave PIC) — для остальных у нас
+    // нет обработчиков, их срабатывание без IDT-записи приводит к
+    // тройному сбою.
     //
-    // IRQ14 идёт через slave PIC, а slave каскадирован в master через
-    // IRQ2 - значит, IRQ2 тоже должен быть размаскирован на master,
-    // иначе сигнал со slave физически не дойдёт до CPU. Маска мастера:
-    // 0xF8 = 11111000 - открыты биты 0,1,2 (IRQ0,1,2). Маска слейва:
-    // 0xBF = 10111111 - открыт бит 6 (IRQ8+6 = IRQ14), всё остальное
-    // на слейве для нас пока не нужно.
+    // IRQ14/IRQ12 идут через slave PIC, а slave каскадирован в master
+    // через IRQ2 - значит, IRQ2 тоже должен быть размаскирован на
+    // master, иначе сигнал со slave физически не дойдёт до CPU. Маска
+    // мастера: 0xF8 = 11111000 - открыты биты 0,1,2 (IRQ0,1,2). Маска
+    // слейва: 0xAF = 10101111 - открыты биты 4 (IRQ8+4 = IRQ12) и 6
+    // (IRQ8+6 = IRQ14), всё остальное на слейве для нас пока не нужно.
     __asm__("outb %0, %1" : : "a"((unsigned char)0xF8), "Nd"(0x21));
-    __asm__("outb %0, %1" : : "a"((unsigned char)0xBF), "Nd"(0xA1));
+    __asm__("outb %0, %1" : : "a"((unsigned char)0xAF), "Nd"(0xA1));
 
     __asm__("sti");
 }
@@ -869,6 +873,16 @@ void sys_reboot(char* arg) {
     reboot();
 }
 
+// SYS_GET_MOUSE: текущая позиция курсора (сетка 80x25) и кнопки -
+// см. mouse.c (накопление пакетов в IRQ12) и mouse.bin.
+void sys_get_mouse(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct mouse_args))) return;
+    struct mouse_args* a = (struct mouse_args*)arg;
+    a->x = mouse_get_x();
+    a->y = mouse_get_y();
+    a->buttons = mouse_get_buttons();
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01
@@ -899,6 +913,7 @@ syscall_fn syscall_table[] = {
     sys_disk_write_sector, // 0x1A
     sys_get_datetime,      // 0x1B
     sys_reboot,            // 0x1C
+    sys_get_mouse,         // 0x1D
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))
@@ -1322,6 +1337,7 @@ void kernel_main() {
     VGA_MARK(70, 'A', 0x4F); /* pre-paging VGA write */
 
     init_idt();
+    init_mouse(); // нужен размаскированный IRQ12 (см. init_idt) перед включением потоковой отправки пакетов
     init_paging();
     VGA_MARK(71, 'B', 0x4F); /* post-paging VGA write */
 

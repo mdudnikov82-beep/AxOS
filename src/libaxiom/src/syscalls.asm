@@ -36,6 +36,7 @@ global _ax_disk_read_sector
 global _ax_disk_write_sector
 global _ax_get_datetime
 global _ax_reboot
+global _ax_get_mouse
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -473,6 +474,18 @@ _ax_reboot:
     int 0x80
 .hang:
     jmp .hang
+
+; void ax_get_mouse(struct mouse_args* a)
+; ESI = указатель на struct mouse_args (передаётся напрямую, как ax_ps).
+_ax_get_mouse:
+    push esi
+    push ebx
+    mov esi, [esp+12]
+    mov ah, 0x1D            ; SYS_GET_MOUSE
+    int 0x80
+    pop ebx
+    pop esi
+    ret
 
 ; int ax_readdir(struct readdir_args* a)
 ; ESI = указатель на struct readdir_args (передаётся напрямую).

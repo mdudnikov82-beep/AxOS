@@ -153,6 +153,14 @@ struct datetime_args {
     int year;
 };
 
+#define SYS_GET_MOUSE 0x1D  // ESI -> struct mouse_args
+
+struct mouse_args {
+    int x;
+    int y;
+    int buttons;
+};
+
 #define SYS_PS 0x13
 
 struct ps_entry {

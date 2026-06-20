@@ -204,6 +204,17 @@ struct datetime_args {
     int year;
 };
 
+// --- PS/2-мышь (0x1D) ---
+#define SYS_GET_MOUSE 0x1D  // ESI -> struct mouse_args
+
+// x/y - координаты курсора, ограниченные сеткой 80x25 (текстовый режим).
+// buttons - бит0=левая кнопка, бит1=правая, бит2=средняя.
+struct mouse_args {
+    int x;
+    int y;
+    int buttons;
+};
+
 // --- Список задач (0x13) ---
 #define SYS_PS 0x13  // ESI -> struct ps_entry
 

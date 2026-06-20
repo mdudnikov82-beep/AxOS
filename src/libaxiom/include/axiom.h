@@ -51,6 +51,9 @@ void ax_get_datetime(struct datetime_args* a);
 // Перезагружает систему через контроллер клавиатуры (8042). Не возвращается.
 void ax_reboot(void);
 
+// Текущая позиция курсора мыши (сетка 80x25) и нажатые кнопки.
+void ax_get_mouse(struct mouse_args* a);
+
 // Перечисление файлов (обёртка над SYS_READDIR)
 // Заполняет *a и возвращает a->result (1 = есть запись, 0 = конец)
 int ax_readdir(struct readdir_args* a);

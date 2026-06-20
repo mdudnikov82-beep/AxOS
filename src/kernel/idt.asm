@@ -3,6 +3,7 @@ extern _keyboard_handler_main ; GCC на Windows добавляет подчёр
 extern _timer_handler_main
 extern _page_fault_handler_main
 extern _ide_irq_handler_main ; ide.c - просто ставит флаг, см. комментарий там
+extern _mouse_irq_handler_main ; mouse.c - копит байты пакета, см. комментарий там
 extern _schedule ; tasking.c - переключение задач (round-robin)
 
 global _keyboard_interrupt_handler
@@ -13,6 +14,8 @@ global _page_fault_handler
 global page_fault_handler
 global _ide_interrupt_handler
 global ide_interrupt_handler
+global _mouse_interrupt_handler
+global mouse_interrupt_handler
 
 _keyboard_interrupt_handler:
 keyboard_interrupt_handler:
@@ -99,6 +102,22 @@ ide_interrupt_handler:
     out 0x20, al    ; EOI мастеру (каскадная линия IRQ2)
 
     call _ide_irq_handler_main
+
+    popa
+    iret
+
+; --- Обработчик IRQ12 (PS/2-мышь) ---
+; Тоже на slave PIC (IRQ8+4) - тот же приём двойного EOI, что у IRQ14.
+_mouse_interrupt_handler:
+mouse_interrupt_handler:
+    cld
+    pusha
+
+    mov al, 0x20
+    out 0xA0, al    ; EOI слейву (сам IRQ12)
+    out 0x20, al    ; EOI мастеру (каскадная линия IRQ2)
+
+    call _mouse_irq_handler_main
 
     popa
     iret
