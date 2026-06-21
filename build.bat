@@ -446,6 +446,22 @@ echo Copying user program into fs/ for FAT12 image...
 copy /b build\beep.bin fs\BEEP.BIN
 if %errorlevel% neq 0 goto :error
 
+echo Compiling user program (clip.c)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\clip.c -o build\clip.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\clip.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o -o build\clip.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\clip.exe build\clip.bin
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\clip.bin fs\CLIP.BIN
+if %errorlevel% neq 0 goto :error
+
 echo Building FAT12 RAM-disk image from fs/...
 python tools\make_fat12.py
 if %errorlevel% neq 0 goto :error
