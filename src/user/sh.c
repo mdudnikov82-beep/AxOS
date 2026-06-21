@@ -50,6 +50,19 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        // "paste" - алиас "clip get" прямо в шелле: диск FAT12 (128 КБ)
+        // уже заполнен инструментами, а свежий .bin стоит ~4.6 КБ только
+        // на crt0/libaxiom (см. clip.c) - не на чём сэкономить, кроме
+        // как не плодить отдельную программу под однострочный алиас.
+        if (sh_streq(line, "paste")) {
+            static unsigned char clip_buf[CLIPBOARD_MAX_SIZE];
+            unsigned int got = ax_clipboard_get(clip_buf, sizeof(clip_buf) - 1);
+            clip_buf[got] = '\0';
+            ax_print((char*)clip_buf);
+            ax_putchar('\n');
+            continue;
+        }
+
         // Логика команды cd
         if (sh_strncmp(line, "cd", 2) == 0 && (line[2] == ' ' || line[2] == '\0')) {
             if (sh_streq(line, "cd ..") || sh_streq(line, "cd /") || sh_streq(line, "cd")) {
