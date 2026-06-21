@@ -95,18 +95,18 @@ def main():
     print("------------------")
 
     ok = True
-    if "AxOS v0.6" not in screen:
-        print("FAIL: boot banner 'AxOS v0.6' not found")
+    if "Welcome to AxOS!" not in screen:
+        print("FAIL: boot banner 'Welcome to AxOS!' not found")
         ok = False
-    if "AxOS>" not in screen:
-        print("FAIL: shell prompt 'AxOS>' not found")
+    if "AxSH v0.1" not in screen:
+        print("FAIL: 'AxSH v0.1' (userspace shell banner) not found")
         ok = False
     if "PAGE FAULT" in screen:
         print("FAIL: '*** PAGE FAULT ***' detected")
         ok = False
 
     if ok:
-        print("OK: AxOS booted to the shell prompt")
+        print("OK: AxOS booted to the AxSH prompt")
     return 0 if ok else 1
 
 
