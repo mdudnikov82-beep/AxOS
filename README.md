@@ -523,7 +523,8 @@ LBA28-адресация. Без DMA и прерываний: чтение и з
 - `src/lib/io.asm`, `src/lib/math.asm`, `src/lib/mem.asm`, `src/lib/print.asm`
   — низкоуровневые утилиты из ранних версий загрузчика.
 - `linker.ld`, `build.bat.bak`, `build_cp866.bat`, `build_en.bat`,
-  `build_simple.bat` — старые варианты линкер-скрипта и сборочных скриптов.
+  `build_simple.bat`, `run_with_devkit.bat` — старые варианты линкер-скрипта
+  и сборочных скриптов (`run_with_devkit.bat` зовёт `build_simple.bat`).
 
 ## Формат итогового образа
 
