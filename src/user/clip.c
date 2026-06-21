@@ -6,8 +6,8 @@ static int streq(const char* a, const char* b) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2 || (!streq(argv[1], "set") && !streq(argv[1], "get"))) {
-        ax_print("Usage: clip set <text>  |  clip get\n");
+    if (argc < 2 || (!streq(argv[1], "set") && !streq(argv[1], "get") && !streq(argv[1], "clear"))) {
+        ax_print("Usage: clip set <text>  |  clip get  |  clip clear\n");
         return 1;
     }
 
@@ -21,6 +21,15 @@ int main(int argc, char** argv) {
         }
         ax_clipboard_set((unsigned char*)text, (unsigned int)len);
         ax_printf("clip: set %d bytes\n", len);
+        return 0;
+    }
+
+    if (streq(argv[1], "clear")) {
+        // size=0, но указатель всё равно должен лежать в окне задачи -
+        // validate_user_ptr (kernel.c) не пропустит NULL/0, даже с size=0.
+        static unsigned char dummy;
+        ax_clipboard_set(&dummy, 0);
+        ax_print("clip: cleared\n");
         return 0;
     }
 
