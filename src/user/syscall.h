@@ -227,6 +227,30 @@ struct beep_args {
     unsigned int duration_ms;
 };
 
+// --- Буфер обмена (0x1F-0x20) ---
+#define SYS_CLIPBOARD_SET 0x1F  // ESI -> struct clipboard_set_args
+#define SYS_CLIPBOARD_GET 0x20  // ESI -> struct clipboard_get_args
+
+// SYS_CLIPBOARD_SET: копирует data (size байт, максимум CLIPBOARD_MAX_SIZE)
+// в общий буфер обмена ядра, заменяя его прежнее содержимое.
+struct clipboard_set_args {
+    unsigned char* data;
+    unsigned int   size;
+};
+
+// SYS_CLIPBOARD_GET: копирует содержимое буфера обмена в buffer (максимум
+// max_size байт). Ядро записывает фактический размер в out_size.
+struct clipboard_get_args {
+    unsigned char* buffer;
+    unsigned int   max_size;
+    unsigned int   out_size;
+};
+
+// 1 КБ - не от щедрости: .bss ядра физически близко к загрузочному сектору
+// (0x7c00), где живёт GDT (см. kernel_entry.asm) - сильно больший буфер
+// рискует затереть её при обнулении .bss и уронить систему в #GP.
+#define CLIPBOARD_MAX_SIZE 1024
+
 // --- Список задач (0x13) ---
 #define SYS_PS 0x13  // ESI -> struct ps_entry
 

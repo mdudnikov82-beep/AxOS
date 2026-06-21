@@ -168,6 +168,23 @@ struct beep_args {
     unsigned int duration_ms;
 };
 
+// --- Буфер обмена (0x1F-0x20) ---
+#define SYS_CLIPBOARD_SET 0x1F  // ESI -> struct clipboard_set_args
+#define SYS_CLIPBOARD_GET 0x20  // ESI -> struct clipboard_get_args
+
+#define CLIPBOARD_MAX_SIZE 1024 // см. предупреждение в kernel_entry.asm про 0x7c00/GDT
+
+struct clipboard_set_args {
+    unsigned char* data;
+    unsigned int   size;
+};
+
+struct clipboard_get_args {
+    unsigned char* buffer;
+    unsigned int   max_size;
+    unsigned int   out_size;
+};
+
 #define SYS_PS 0x13
 
 struct ps_entry {

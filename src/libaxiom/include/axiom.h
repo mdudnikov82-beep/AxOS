@@ -59,6 +59,12 @@ void ax_get_mouse(struct mouse_args* a);
 // freq=0 - тишина (пауза между нотами).
 void ax_beep(unsigned int freq, unsigned int duration_ms);
 
+// Буфер обмена: общий слот в ядре, переживает завершение задач.
+// ax_clipboard_set копирует size байт (максимум CLIPBOARD_MAX_SIZE) из data.
+// ax_clipboard_get копирует в buf не больше max байт, возвращает фактический размер.
+void         ax_clipboard_set(unsigned char* data, unsigned int size);
+unsigned int ax_clipboard_get(unsigned char* buf, unsigned int max);
+
 // Перечисление файлов (обёртка над SYS_READDIR)
 // Заполняет *a и возвращает a->result (1 = есть запись, 0 = конец)
 int ax_readdir(struct readdir_args* a);

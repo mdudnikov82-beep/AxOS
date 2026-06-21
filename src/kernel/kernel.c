@@ -53,6 +53,11 @@ static unsigned char* slot_redir_buf[USER_PROGRAM_SLOTS];
 static unsigned int   slot_redir_len[USER_PROGRAM_SLOTS];
 static char           slot_redir_file[USER_PROGRAM_SLOTS][13];
 
+// Системный буфер обмена - один общий слот для всех задач (как и реальный
+// clipboard в однопользовательской системе). Переживает завершение задач.
+static unsigned char clipboard_buf[CLIPBOARD_MAX_SIZE];
+static unsigned int  clipboard_len = 0;
+
 // Определена ниже, у fd_table (которая объявляется позже по файлу) -
 // закрывает все fd, оставшиеся открытыми у завершившейся задачи. Без
 // этого её слот освобождается и переиспользуется НОВОЙ задачей, а её
@@ -896,6 +901,30 @@ void sys_beep(char* arg) {
     speaker_off();
 }
 
+// SYS_CLIPBOARD_SET: копирует a->data (a->size байт, обрезая до
+// CLIPBOARD_MAX_SIZE) в общий буфер обмена, заменяя прежнее содержимое.
+void sys_clipboard_set(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct clipboard_set_args))) return;
+    struct clipboard_set_args* a = (struct clipboard_set_args*)arg;
+    unsigned int size = a->size;
+    if (size > CLIPBOARD_MAX_SIZE) size = CLIPBOARD_MAX_SIZE;
+    if (!validate_user_ptr(a->data, size)) return;
+    for (unsigned int i = 0; i < size; i++) clipboard_buf[i] = a->data[i];
+    clipboard_len = size;
+}
+
+// SYS_CLIPBOARD_GET: копирует содержимое буфера обмена в a->buffer (не
+// больше a->max_size байт). Фактический размер пишется в a->out_size.
+void sys_clipboard_get(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct clipboard_get_args))) return;
+    struct clipboard_get_args* a = (struct clipboard_get_args*)arg;
+    unsigned int size = clipboard_len;
+    if (size > a->max_size) size = a->max_size;
+    if (!validate_user_ptr(a->buffer, size)) { a->out_size = 0; return; }
+    for (unsigned int i = 0; i < size; i++) a->buffer[i] = clipboard_buf[i];
+    a->out_size = size;
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01
@@ -928,6 +957,8 @@ syscall_fn syscall_table[] = {
     sys_reboot,            // 0x1C
     sys_get_mouse,         // 0x1D
     sys_beep,              // 0x1E
+    sys_clipboard_set,     // 0x1F
+    sys_clipboard_get,     // 0x20
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))

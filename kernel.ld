@@ -9,5 +9,9 @@ SECTIONS
     __text_end = .; /* GCC добавляет подчёркивание: extern char _text_end[] в Си */
 
     .data : { *(.data) }
-    .bss : { *(.bss) }
+    .bss : {
+        __bss_start = .;
+        *(.bss)
+        __bss_end = .;
+    }
 }

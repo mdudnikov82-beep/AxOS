@@ -38,6 +38,8 @@ global _ax_get_datetime
 global _ax_reboot
 global _ax_get_mouse
 global _ax_beep
+global _ax_clipboard_set
+global _ax_clipboard_get
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -502,6 +504,46 @@ _ax_beep:
     mov ah, 0x1E            ; SYS_BEEP
     int 0x80
     add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; void ax_clipboard_set(unsigned char* data, unsigned int size)
+; Строит struct clipboard_set_args { data, size } на стеке - та же
+; раскладка, что у ax_writefile без поля filename.
+_ax_clipboard_set:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=data, [esp+16]=size
+    mov eax, [esp+12]
+    mov ecx, [esp+16]
+    push ecx                ; struct.size  (offset 4)
+    push eax                ; struct.data  (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x1F             ; SYS_CLIPBOARD_SET
+    int 0x80
+    add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; unsigned int ax_clipboard_get(unsigned char* buf, unsigned int max)
+; Строит struct clipboard_get_args { buf, max, out_size=0 } на стеке;
+; возвращает out_size в EAX - та же схема, что у ax_readfile.
+_ax_clipboard_get:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=buf, [esp+16]=max
+    mov eax, [esp+12]
+    mov ecx, [esp+16]
+    push dword 0            ; struct.out_size = 0  (offset 8)
+    push ecx                ; struct.max_size       (offset 4)
+    push eax                ; struct.buffer         (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x20             ; SYS_CLIPBOARD_GET
+    int 0x80
+    mov eax, [esp+8]        ; out_size (offset 8)
+    add esp, 12
     pop ebx
     pop esi
     ret
