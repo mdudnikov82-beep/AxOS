@@ -43,6 +43,30 @@ typedef struct task {
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
 extern void on_task_exit(int user_slot_index); // kernel.c - освобождает слот run-задачи
+extern volatile unsigned long timer_ticks; // kernel.c, IRQ0 (100 Гц)
+
+// --- "ASLR-подобный" разброс начального стека изолированных run-задач ---
+// Настоящий ASLR (рандомизация базы кода/данных) здесь не сделать без
+// position-independent кода: программы линкуются (user.ld) на фиксированный
+// 0x100000, абсолютные ссылки в их коде это предполагают (см. README,
+// "Изоляция памяти"). Зато можно рандомизировать, ГДЕ внутри окна стартует
+// стек - exploit, рассчитанный на точный фиксированный USER_STACK_TOP,
+// промахивается. xorshift32, не криптографический ГПСЧ - тут не нужно
+// сопротивление атакующему, который уже читает память ядра, только разброс
+// "угадываемого по умолчанию" адреса между запусками.
+static unsigned int aslr_prng_state = 0;
+
+static unsigned int aslr_next_random() {
+    if (aslr_prng_state == 0) {
+        aslr_prng_state = (unsigned int)timer_ticks ^ 0x9E3779B9u;
+        if (aslr_prng_state == 0) aslr_prng_state = 0x9E3779B9u; // xorshift не переживает state==0
+    }
+    aslr_prng_state ^= (unsigned int)timer_ticks; // свежая энтропия на каждый запуск
+    aslr_prng_state ^= aslr_prng_state << 13;
+    aslr_prng_state ^= aslr_prng_state >> 17;
+    aslr_prng_state ^= aslr_prng_state << 5;
+    return aslr_prng_state;
+}
 
 // task0 - текущий поток выполнения (kernel_main/shell). Его esp
 // записывается лениво, при первом переключении из schedule().
@@ -175,6 +199,12 @@ void task_create_user(char* name, void (*entry)(void)) {
 // дорастёт (растёт вниз).
 #define USER_STACK_TOP (USER_WINDOW_TOP - 16)
 
+// Случайный сдвиг ESP вниз от USER_STACK_TOP, кратный 16 байт (сохраняет
+// выравнивание стека). До 64 байт - заведомо безопасно: между
+// USER_STACK_TOP и блоком argv (USER_ARGS_VADDR, kernel.c) около 1000
+// байт зазора, такой сдвиг его не выест.
+#define STACK_ASLR_MAX_SHIFT 64
+
 void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index,
                                int argc, unsigned int argv_vaddr) {
     unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
@@ -183,12 +213,15 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     task_t* new_task = (task_t*)malloc(sizeof(task_t));
     if (!new_task) return;
 
+    unsigned int stack_shift = (aslr_next_random() % (STACK_ASLR_MAX_SHIFT / 16 + 1)) * 16;
+    unsigned int stack_top = USER_STACK_TOP - stack_shift;
+
     // Кадр ring3->ring0, как в task_create_user, но EIP/ESP - виртуальные
     // адреса окна 0x100000-0x108000 (одинаковые для любой задачи: окно
     // переотображается на физический слот этой задачи в её приватном PD).
     unsigned int* sp = (unsigned int*)(kstack + KSTACK_SIZE);
     *(--sp) = USER_DATA_SEG | 3;     // SS
-    *(--sp) = USER_STACK_TOP;        // ESP: ниже верха окна (см. USER_STACK_TOP)
+    *(--sp) = stack_top;             // ESP: ниже верха окна, со случайным сдвигом (STACK_ASLR_MAX_SHIFT)
     *(--sp) = 0x202;                 // EFLAGS: IF=1
     *(--sp) = USER_CODE_SEG | 3;     // CS
     *(--sp) = USER_WINDOW_BASE;        // EIP: начало окна (_start crt0)
