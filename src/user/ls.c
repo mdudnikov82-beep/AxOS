@@ -21,10 +21,14 @@ int main(int argc, char** argv) {
         ax_readdir(&a);
         if (!a.result) break;
 
-        print_padded(a.name, 13);
         if (a.is_dir) {
-            ax_print("  <DIR>\n");
+            // Каталоги - циан, как и остальные заголовки/категории в UI
+            // (см. "Цвет в AxSH" в README).
+            ax_print("\033[36m");
+            print_padded(a.name, 13);
+            ax_print("  <DIR>\033[0m\n");
         } else {
+            print_padded(a.name, 13);
             ax_printf("  %7u B\n", a.size);
             total += a.size;
         }
@@ -32,13 +36,13 @@ int main(int argc, char** argv) {
     }
 
     if (count == 0) {
-        ax_print("(no files)\n");
+        ax_print("\033[33m(no files)\033[0m\n");
     } else {
-        ax_print("---\n");
+        ax_print("\033[32m---\n");
         ax_print_uint(count);
         ax_print(" file(s), ");
         ax_print_uint(total);
-        ax_print(" B total\n");
+        ax_print(" B total\033[0m\n");
     }
     return 0;
 }

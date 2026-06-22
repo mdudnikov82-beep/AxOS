@@ -15,6 +15,6 @@ int main(int argc, char** argv) {
     }
 
     ax_writefile(argv[1], (unsigned char*)text, (unsigned int)len);
-    ax_print("Written.\n");
+    ax_print("\033[32mWritten.\033[0m\n");
     return 0;
 }

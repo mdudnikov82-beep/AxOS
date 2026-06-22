@@ -25,11 +25,11 @@ int main(int argc, char** argv) {
     if (argv[1][0] == 'i') { // info
         char model[41];
         if (ax_disk_identify(model)) {
-            ax_print("IDE primary master: ");
+            ax_print("\033[32mIDE primary master:\033[0m ");
             ax_print(model);
             ax_putchar('\n');
         } else {
-            ax_print("No IDE drive found.\n");
+            ax_print("\033[31mNo IDE drive found.\033[0m\n");
         }
         return 0;
     }
@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
         if (ax_disk_read_sector(lba, buf)) {
             hex_dump(buf, 128);
         } else {
-            ax_print("Disk read failed (no IDE drive?).\n");
+            ax_print("\033[31mDisk read failed (no IDE drive?).\033[0m\n");
         }
         return 0;
     }
@@ -61,9 +61,9 @@ int main(int argc, char** argv) {
         }
 
         if (ax_disk_write_sector(lba, buf)) {
-            ax_print("Written.\n");
+            ax_print("\033[32mWritten.\033[0m\n");
         } else {
-            ax_print("Disk write failed (no IDE drive?).\n");
+            ax_print("\033[31mDisk write failed (no IDE drive?).\033[0m\n");
         }
         return 0;
     }
