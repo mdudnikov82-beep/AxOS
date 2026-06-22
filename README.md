@@ -728,9 +728,14 @@ avc:  denied  { read }  for comm="ps.bin"  scontext=axos:user_t:s0  tcontext=axo
   не хранится в git (`*.bin` в `.gitignore`).
 - `tools/make_fat12.py`, `tools/nasm.exe` — генератор FAT12-образа и
   ассемблер.
-- `tools/smoke_test.py`, `tools/regression_test.py` — headless-тесты в QEMU
-  через monitor (`smoke_test.py` — загрузка до шелла, `regression_test.py` —
-  команда `selftest`); используются в CI.
+- `tools/smoke_test.py`, `tools/regression_test.py`,
+  `tools/exec_regression_test.py` — headless-тесты в QEMU через monitor
+  (`smoke_test.py` — загрузка до шелла, `regression_test.py` — команда
+  `selftest`, `exec_regression_test.py` — ELF-загрузчик: `echo` с
+  аргументами и через AxSH/`ax_exec`, и через kernel-shell `run` — у
+  `selftest` нет своего покрытия `do_exec`/`run`, без этого теста
+  загрузчик проверялся бы только косвенно, через автозапуск AxSH);
+  используются в CI.
 - `build.bat` — основной скрипт сборки, `run.bat` — запуск в QEMU.
 
 ### Легаси / не используется текущей сборкой
