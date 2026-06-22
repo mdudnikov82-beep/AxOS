@@ -42,8 +42,9 @@ static int test_paging() {
         return 0;
     }
 
-    // Страница 0x30000 (начало кучи) должна быть PRESENT и доступна на запись.
-    unsigned int heap_pte = page_table[0x30];
+    // Страница 0x60000 (начало кучи, см. HEAP_START в heap.c) должна быть
+    // PRESENT и доступна на запись.
+    unsigned int heap_pte = page_table[0x60];
     if (!(heap_pte & PAGE_PRESENT) || !(heap_pte & PAGE_RW)) {
         print_string("\033[31mPaging: FAIL (heap page not writable)\033[0m\n");
         return 0;

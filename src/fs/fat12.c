@@ -2,7 +2,7 @@
 //  Драйвер FAT12 для AxOS (том на build/disk.img, доступ через IDE)
 // =================================================================
 //
-// fat12_init() читает FAT12-том (128 секторов = 64 КБ, LBA 0-127 на
+// fat12_init() читает FAT12-том (512 секторов = 256 КБ, LBA 0-511 на
 // build/disk.img) через ide_read_sector в RAM по адресу 0x20000. Дальше
 // весь модуль работает с этой RAM-копией как с обычным FAT12-томом: BPB ->
 // таблица FAT -> корневая директория -> цепочки кластеров с данными
@@ -14,7 +14,7 @@
 #include "ide.h"
 
 #define FAT12_BASE 0x20000
-#define FAT12_TOTAL_SECTORS 256 // 128 КБ / 512 = TOTAL_SECTORS в make_fat12.py
+#define FAT12_TOTAL_SECTORS 512 // 256 КБ / 512 = TOTAL_SECTORS в make_fat12.py
 
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
@@ -69,8 +69,8 @@ int fat12_is_ready() {
     return fat12_ready;
 }
 
-// Загружает FAT12-том (LBA 0-127 на build/disk.img) через IDE в RAM по
-// FAT12_BASE. Возвращает 1, если все 128 секторов прочитаны и BPB похож на
+// Загружает FAT12-том (LBA 0-511 на build/disk.img) через IDE в RAM по
+// FAT12_BASE. Возвращает 1, если все 512 секторов прочитаны и BPB похож на
 // валидный FAT12-том (bytes_per_sector == размеру сектора IDE), иначе 0.
 int fat12_init() {
     for (unsigned int lba = 0; lba < FAT12_TOTAL_SECTORS; lba++) {
@@ -90,7 +90,7 @@ int fat12_init() {
     return 1;
 }
 
-// Записывает RAM-копию FAT12-тома обратно на build/disk.img (LBA 0-127),
+// Записывает RAM-копию FAT12-тома обратно на build/disk.img (LBA 0-511),
 // делая изменения от fat12_write() персистентными между запусками QEMU.
 static void fat12_flush() {
     for (unsigned int lba = 0; lba < FAT12_TOTAL_SECTORS; lba++) {

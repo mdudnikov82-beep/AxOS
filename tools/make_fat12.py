@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
-# Генерирует образ FAT12-раздела (64 КБ = 128 секторов) из файлов в fs/.
-# Этот раздел грузится загрузчиком (boot.asm) в RAM по адресу 0x20000,
-# а kernel читает его через src/fs/fat12.c.
+# Генерирует образ FAT12-раздела (256 КБ = 512 секторов) из файлов в fs/.
+# Раздел читает kernel через src/fs/fat12.c (IDE, build/disk.img) - см.
+# FAT12_BASE/FAT12_TOTAL_SECTORS там, оба должны совпадать со значениями
+# здесь. Объём поднят с 256 до 512 секторов (commit "Properly grow FAT12
+# capacity") - на 256 уже не оставалось свободных кластеров под runtime-
+# файл selftest.c (test_fat12), сборка fs/ заполняла том почти полностью.
 
 import os
 import struct
 import sys
 
 SECTOR_SIZE = 512
-TOTAL_SECTORS = 256
+TOTAL_SECTORS = 512
 RESERVED_SECTORS = 1
 NUM_FATS = 1
 ROOT_ENTRIES = 32
-SECTORS_PER_FAT = 1
+# 1 сектор FAT12 (512 байт, 12 бит/запись) вмещает ~340 кластеров - мало
+# для DATA_SECTORS на этом объёме (без увеличения вылетели бы за границу
+# bytearray в set_fat_entry). 2 сектора (~680 записей) - с запасом.
+SECTORS_PER_FAT = 2
 SECTORS_PER_CLUSTER = 1
 CLUSTER_SIZE = SECTOR_SIZE * SECTORS_PER_CLUSTER
 
