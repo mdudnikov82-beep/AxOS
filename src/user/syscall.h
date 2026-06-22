@@ -156,7 +156,12 @@ struct unlink_args {
 #define SYS_MKDIR 0x16  // ESI -> struct mkdir_args
 
 // Создаёт директорию в корне. Диск должен быть разблокирован.
-// result=1: создана, 0: уже существует, нет места, или диск заблокирован.
+// result: 1 - создана, 0 - диск не готов/заблокирован, AX_MKDIR_EXISTS -
+// имя уже занято, AX_MKDIR_NOSPACE - нет места в корне/на томе (см.
+// fat12_mkdir в src/fs/fat12.h - тот же набор кодов).
+#define AX_MKDIR_EXISTS  -1
+#define AX_MKDIR_NOSPACE -2
+
 struct mkdir_args {
     char* dirname;
     int   result;

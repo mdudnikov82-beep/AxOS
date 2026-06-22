@@ -15,11 +15,15 @@ int main(int argc, char** argv) {
     }
     upper[i] = '\0';
 
-    int ok = ax_mkdir(upper);
-    if (ok) {
-        ax_printf("mkdir: created '%s'\n", upper);
+    int result = ax_mkdir(upper);
+    if (result == 1) {
+        ax_printf("\033[32mmkdir: created '%s'\033[0m\n", upper);
+    } else if (result == AX_MKDIR_EXISTS) {
+        ax_printf("\033[31mmkdir: cannot create '%s': already exists\033[0m\n", upper);
+    } else if (result == AX_MKDIR_NOSPACE) {
+        ax_printf("\033[31mmkdir: cannot create '%s': no space left\033[0m\n", upper);
     } else {
-        ax_printf("mkdir: cannot create '%s': exists or disk locked\n", upper);
+        ax_printf("\033[31mmkdir: cannot create '%s': disk locked or not ready\033[0m\n", upper);
     }
-    return ok ? 0 : 1;
+    return result == 1 ? 0 : 1;
 }

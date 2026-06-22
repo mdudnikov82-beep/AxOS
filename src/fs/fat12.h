@@ -46,7 +46,11 @@ int fat12_is_ready();
 int fat12_readdir(unsigned int index, char* name_out, unsigned int* size_out, int* is_dir_out);
 
 // Создаёт директорию dirname в корневой директории FAT12-раздела.
-// Возвращает 1 при успехе, 0 если имя уже занято, нет места, или диск заблокирован.
+// Возвращает 1 при успехе, 0 если диск не готов/заблокирован,
+// FAT12_MKDIR_EXISTS если имя уже занято, FAT12_MKDIR_NOSPACE если нет
+// свободной записи в корне или свободного кластера.
+#define FAT12_MKDIR_EXISTS  -1
+#define FAT12_MKDIR_NOSPACE -2
 int fat12_mkdir(char* dirname);
 
 #endif

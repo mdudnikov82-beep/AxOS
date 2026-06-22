@@ -119,6 +119,12 @@ struct unlink_args {
 
 #define SYS_MKDIR 0x16
 
+// result: 1 - создана, 0 - диск не готов/заблокирован,
+// AX_MKDIR_EXISTS - имя уже занято, AX_MKDIR_NOSPACE - нет места в
+// корневой директории/на томе.
+#define AX_MKDIR_EXISTS  -1
+#define AX_MKDIR_NOSPACE -2
+
 struct mkdir_args {
     char* dirname;
     int   result;

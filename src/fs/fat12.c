@@ -16,6 +16,10 @@
 #define FAT12_BASE 0x20000
 #define FAT12_TOTAL_SECTORS 512 // 256 КБ / 512 = TOTAL_SECTORS в make_fat12.py
 
+// Коды fat12_mkdir() помимо 0/1 - см. fat12.h.
+#define FAT12_MKDIR_EXISTS  -1
+#define FAT12_MKDIR_NOSPACE -2
+
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
 
@@ -355,6 +359,11 @@ int fat12_readdir(unsigned int index, char* name_out, unsigned int* size_out, in
     return 0;
 }
 
+// Возвращает: 1 - создана, 0 - диск не готов/заблокирован,
+// FAT12_MKDIR_EXISTS - уже существует, FAT12_MKDIR_NOSPACE - нет места
+// (корневая директория или том заполнены). Разные коды нужны, чтобы
+// mkdir.bin мог сказать пользователю точную причину отказа, а не общее
+// "exists or disk locked" на все три случая сразу.
 int fat12_mkdir(char* dirname) {
     if (!fat12_ready) return 0;
     if (fat12_locked) return 0;
@@ -362,13 +371,13 @@ int fat12_mkdir(char* dirname) {
     char name[8], ext[3];
     parse_83(dirname, name, ext);
 
-    if (fat12_find(name, ext)) return 0;  // already exists
+    if (fat12_find(name, ext)) return FAT12_MKDIR_EXISTS;
 
     struct fat12_dir_entry* entry = fat12_find_free_entry();
-    if (!entry) return 0;
+    if (!entry) return FAT12_MKDIR_NOSPACE;
 
     unsigned int cluster = fat12_alloc_chain(1);
-    if (!cluster) return 0;
+    if (!cluster) return FAT12_MKDIR_NOSPACE;
 
     for (int i = 0; i < 8; i++) entry->name[i] = name[i];
     for (int i = 0; i < 3; i++) entry->ext[i] = ext[i];
