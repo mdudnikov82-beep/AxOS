@@ -1168,7 +1168,7 @@ void usermode_demo() {
 int memtest_demo() {
     int ok = 1;
 
-    print_string("Heap test:\n");
+    print_string("\033[36mHeap test:\033[0m\n");
 
     char* a = (char*)malloc(64);
     char* b = (char*)malloc(128);
@@ -1183,7 +1183,7 @@ int memtest_demo() {
     print_string("\n");
 
     if (!a || !b || !c) {
-        print_string("  FAIL: malloc returned NULL\n");
+        print_string("\033[31m  FAIL: malloc returned NULL\033[0m\n");
         return 0;
     }
 
@@ -1196,10 +1196,10 @@ int memtest_demo() {
     for (int i = 0; i < 32; i++)  if (c[i] != (char)(255 - i)) ok = 0;
 
     if (!ok) {
-        print_string("  FAIL: data verification failed\n");
+        print_string("\033[31m  FAIL: data verification failed\033[0m\n");
         return 0;
     }
-    print_string("  Data write/read-back OK\n");
+    print_string("\033[32m  Data write/read-back OK\033[0m\n");
 
     free(b);
     print_string("  Freed block b (128 bytes)\n");
@@ -1210,14 +1210,14 @@ int memtest_demo() {
     print_string("\n");
 
     if (!d) {
-        print_string("  FAIL: malloc(100) after free returned NULL\n");
+        print_string("\033[31m  FAIL: malloc(100) after free returned NULL\033[0m\n");
         return 0;
     }
 
     if ((unsigned int)d != (unsigned int)b) {
-        print_string("  WARNING: malloc(100) did not reuse freed block b's address\n");
+        print_string("\033[33m  WARNING: malloc(100) did not reuse freed block b's address\033[0m\n");
     } else {
-        print_string("  Reused freed block's address - OK\n");
+        print_string("\033[32m  Reused freed block's address - OK\033[0m\n");
     }
 
     free(a);
@@ -1230,7 +1230,7 @@ int memtest_demo() {
     print_string("\n");
 
     if (!big) {
-        print_string("  FAIL: malloc(300) after freeing all returned NULL (coalescing broken?)\n");
+        print_string("\033[31m  FAIL: malloc(300) after freeing all returned NULL (coalescing broken?)\033[0m\n");
         return 0;
     }
 
@@ -1238,13 +1238,13 @@ int memtest_demo() {
     for (int i = 0; i < 300; i++) if (big[i] != (char)(i & 0xFF)) ok = 0;
 
     if (!ok) {
-        print_string("  FAIL: data verification failed on coalesced block\n");
+        print_string("\033[31m  FAIL: data verification failed on coalesced block\033[0m\n");
         return 0;
     }
 
     free(big);
 
-    print_string("PASS: heap allocator OK\n");
+    print_string("\033[32mPASS: heap allocator OK\033[0m\n");
     return 1;
 }
 
