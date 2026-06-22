@@ -17,11 +17,13 @@
 #define SYS_GET_TICKS    0x0F // ESI -> struct get_ticks_args
 
 // Аргумент SYS_WRITE_FILE: создаёт/перезаписывает файл filename
-// содержимым data (size байт).
+// содержимым data (size байт). result: 1 - записан, 0 - диск не
+// готов/заблокирован или нет места (ядро пишет результат сюда же).
 struct write_file_args {
     char* filename;
     unsigned char* data;
     unsigned int size;
+    int result;
 };
 
 // Аргумент SYS_READ_FILE: загружает файл filename в buffer (макс.
@@ -146,7 +148,10 @@ struct exec_redir_args {
 #define SYS_UNLINK 0x15  // ESI -> struct unlink_args
 
 // Удаляет файл с диска. Диск должен быть разблокирован.
-// result=1: удалён, 0: не найден или диск заблокирован.
+// result: 1 - удалён, 0 - диск не готов/заблокирован,
+// AX_UNLINK_NOTFOUND - файла с таким именем нет.
+#define AX_UNLINK_NOTFOUND -1
+
 struct unlink_args {
     char* filename;  // имя файла (uppercase FAT12, e.g. "OUT.TXT")
     int   result;

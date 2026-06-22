@@ -603,9 +603,9 @@ void sys_read_key(char* arg) {
 void sys_write_file(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct write_file_args))) return;
     struct write_file_args* a = (struct write_file_args*)arg;
-    if (!validate_user_str(a->filename) || !validate_user_ptr(a->data, a->size)) return;
-    if (!ax_mac_check(AX_CLASS_FILE_WRITE)) return;
-    vfs_write(a->filename, a->data, a->size);
+    if (!validate_user_str(a->filename) || !validate_user_ptr(a->data, a->size)) { a->result = 0; return; }
+    if (!ax_mac_check(AX_CLASS_FILE_WRITE)) { a->result = 0; return; }
+    a->result = vfs_write(a->filename, a->data, a->size);
 }
 
 // SYS_READ_FILE: ESI -> struct read_file_args. Фактический размер

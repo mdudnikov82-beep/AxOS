@@ -7,12 +7,14 @@
 void         ax_print(char* msg);
 void         ax_clear(void);
 char         ax_readkey(void);
-void         ax_writefile(char* name, unsigned char* data, unsigned int size);
+// Возвращает 1 при успехе, 0 если диск не готов/заблокирован или нет места.
+int          ax_writefile(char* name, unsigned char* data, unsigned int size);
 unsigned int ax_readfile(char* name, unsigned char* buf, unsigned int max);
 void         ax_exit(void);
 
 // Удалить файл с диска. Диск должен быть разблокирован.
-// Возвращает 1 при успехе, 0 если файл не найден или диск заблокирован.
+// Возвращает 1 при успехе, 0 если диск не готов/заблокирован,
+// AX_UNLINK_NOTFOUND если файла с таким именем нет.
 int ax_unlink(char* filename);
 
 // Создать директорию. Диск должен быть разблокирован.

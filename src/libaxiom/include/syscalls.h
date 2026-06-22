@@ -18,10 +18,12 @@
 #define O_WRONLY 1
 #define O_CREAT  4
 
+// result: 1 - записан, 0 - диск не готов/заблокирован или нет места.
 struct write_file_args {
     char*          filename;
     unsigned char* data;
     unsigned int   size;
+    int            result;
 };
 
 struct read_file_args {
@@ -111,6 +113,10 @@ struct exec_redir_args {
 };
 
 #define SYS_UNLINK 0x15
+
+// result: 1 - удалён, 0 - диск не готов/заблокирован,
+// AX_UNLINK_NOTFOUND - файла с таким именем нет.
+#define AX_UNLINK_NOTFOUND -1
 
 struct unlink_args {
     char* filename;

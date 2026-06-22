@@ -15,11 +15,13 @@ int main(int argc, char** argv) {
     }
     upper[i] = '\0';
 
-    int ok = ax_unlink(upper);
-    if (ok) {
-        ax_printf("removed '%s'\n", upper);
+    int result = ax_unlink(upper);
+    if (result == 1) {
+        ax_printf("\033[32mremoved '%s'\033[0m\n", upper);
+    } else if (result == AX_UNLINK_NOTFOUND) {
+        ax_printf("\033[31mrm: cannot remove '%s': no such file\033[0m\n", upper);
     } else {
-        ax_printf("rm: cannot remove '%s': No such file or disk locked\n", upper);
+        ax_printf("\033[31mrm: cannot remove '%s': disk locked or not ready\033[0m\n", upper);
     }
-    return ok ? 0 : 1;
+    return result == 1 ? 0 : 1;
 }

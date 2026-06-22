@@ -16,9 +16,10 @@
 #define FAT12_BASE 0x20000
 #define FAT12_TOTAL_SECTORS 512 // 256 КБ / 512 = TOTAL_SECTORS в make_fat12.py
 
-// Коды fat12_mkdir() помимо 0/1 - см. fat12.h.
-#define FAT12_MKDIR_EXISTS  -1
-#define FAT12_MKDIR_NOSPACE -2
+// Коды fat12_mkdir()/fat12_delete() помимо 0/1 - см. fat12.h.
+#define FAT12_MKDIR_EXISTS   -1
+#define FAT12_MKDIR_NOSPACE  -2
+#define FAT12_DELETE_NOTFOUND -1
 
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
@@ -451,6 +452,8 @@ unsigned int fat12_load(char* filename, unsigned char* buffer, unsigned int max_
     return fat12_read_file(entry, buffer, max_size);
 }
 
+// Возвращает: 1 - удалён, 0 - диск не готов/заблокирован,
+// FAT12_DELETE_NOTFOUND - файла с таким именем нет.
 int fat12_delete(char* filename) {
     if (!fat12_ready) return 0;
     if (fat12_locked)  return 0;
@@ -459,7 +462,7 @@ int fat12_delete(char* filename) {
     parse_83(filename, name, ext);
 
     struct fat12_dir_entry* entry = fat12_find(name, ext);
-    if (!entry) return 0;
+    if (!entry) return FAT12_DELETE_NOTFOUND;
 
     if (entry->start_cluster != 0)
         fat12_free_chain(entry->start_cluster);

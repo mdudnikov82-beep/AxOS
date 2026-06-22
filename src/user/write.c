@@ -14,7 +14,11 @@ int main(int argc, char** argv) {
         if (i < argc - 1 && len < (int)sizeof(text) - 1) text[len++] = ' ';
     }
 
-    ax_writefile(argv[1], (unsigned char*)text, (unsigned int)len);
-    ax_print("\033[32mWritten.\033[0m\n");
-    return 0;
+    int ok = ax_writefile(argv[1], (unsigned char*)text, (unsigned int)len);
+    if (ok) {
+        ax_print("\033[32mWritten.\033[0m\n");
+    } else {
+        ax_print("\033[31mwrite: failed (disk locked or no space)\033[0m\n");
+    }
+    return ok ? 0 : 1;
 }

@@ -20,7 +20,9 @@ int fat12_cat(char* filename);
 unsigned int fat12_load(char* filename, unsigned char* buffer, unsigned int max_size);
 
 // Удаляет файл filename (помечает запись 0xE5, освобождает кластеры).
-// Возвращает 1 при успехе, 0 если файл не найден или диск заблокирован.
+// Возвращает 1 при успехе, 0 если диск не готов/заблокирован,
+// FAT12_DELETE_NOTFOUND если файла с таким именем нет.
+#define FAT12_DELETE_NOTFOUND -1
 int fat12_delete(char* filename);
 
 // Создаёт или перезаписывает файл filename (имя в формате "name.ext")

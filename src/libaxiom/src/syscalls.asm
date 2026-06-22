@@ -70,8 +70,9 @@ _ax_readkey:
     pop esi
     ret
 
-; void ax_writefile(char* name, unsigned char* data, unsigned int size)
-; Строит struct write_file_args на стеке и передаёт указатель в ESI.
+; int ax_writefile(char* name, unsigned char* data, unsigned int size)
+; Строит struct write_file_args { name, data, size, result=-1 } на стеке.
+; Возвращает 1 (записан) или 0 (диск не готов/заблокирован/нет места).
 _ax_writefile:
     push esi
     push ebx
@@ -79,13 +80,15 @@ _ax_writefile:
     mov eax, [esp+12]
     mov ecx, [esp+16]
     mov edx, [esp+20]
+    push dword -1       ; struct.result (offset 12)
     push edx            ; struct.size
     push ecx            ; struct.data
     push eax            ; struct.filename
     mov esi, esp        ; ESI -> struct
     mov ah, 0x04        ; SYS_WRITE_FILE
     int 0x80
-    add esp, 12         ; убираем struct
+    mov eax, [esp+12]   ; result
+    add esp, 16         ; убираем struct
     pop ebx
     pop esi
     ret
