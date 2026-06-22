@@ -134,7 +134,7 @@ ring3 и обратный вызов в ring0 через `int 0x80`.
 | `0x01`     | `sys_print_string`  | указатель на C-строку (`\0`) |
 | `0x02`     | `sys_clear_screen`  | не используется               |
 | `0x03`     | `sys_read_key`      | указатель на `char` — последний нажатый символ (0, если нет); значение "потребляется" (сбрасывается в 0) |
-| `0x04`     | `sys_write_file`    | указатель на `struct write_file_args { filename, data, size }` — создаёт/перезаписывает файл |
+| `0x04`     | `sys_write_file`    | указатель на `struct write_file_args { filename, data, size, result }` — создаёт/перезаписывает файл, `result`: 1 — записан, 0 — диск не готов/заблокирован или нет места |
 | `0x05`     | `sys_read_file`     | указатель на `struct read_file_args { filename, buffer, max_size, out_size }` — `out_size` заполняется ядром |
 | `0x06`     | `sys_exit`          | не используется — текущая задача завершается (см. "Жизненный цикл задач") |
 
