@@ -4,7 +4,7 @@ ENTRY(_start)
 
 SECTIONS
 {
-    /* Адрес загрузки пользовательских программ - см. USER_PROGRAM_ADDR
+    /* Адрес загрузки пользовательских программ - см. USER_PROGRAM_BASE
        в kernel.c. Эта область уже identity-mapped и помечена PRESENT|
        USER|RW в paging.c (init_paging покрывает первые 4 МБ), так что
        никаких изменений в paging для запуска ring3-кода здесь не нужно. */
