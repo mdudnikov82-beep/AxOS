@@ -109,11 +109,11 @@ void page_fault_handler_main(unsigned int faulting_address, unsigned int* frame)
     // тике) и перенаправляем EIP на безопасный "jmp $" в её собственном
     // окне (USER_SPIN_ADDR, записан при создании задачи в tasking.c).
     if ((cs & 3) == 3 && task_current_is_isolated()) {
-        print_string("\n*** PAGE FAULT in '");
+        print_string("\n\033[33m*** PAGE FAULT in '"); // жёлтый - предупреждение, не фатально
         print_string(task_current_name());
         print_string("' at 0x");
         print_hex(faulting_address);
-        print_string(" - task killed ***\n");
+        print_string(" - task killed ***\033[0m\n");
 
         task_mark_current_exiting();
         frame[PF_FRAME_EIP] = USER_SPIN_ADDR;
@@ -122,9 +122,9 @@ void page_fault_handler_main(unsigned int faulting_address, unsigned int* frame)
 
     // Fault в ring0 (баг ядра) или у встроенной демо-задачи без изоляции
     // (ring3demo/usermode) - как раньше, останавливаем всю систему.
-    print_string("\n*** PAGE FAULT at 0x");
+    print_string("\n\033[31m*** PAGE FAULT at 0x"); // красный - фатально, система встала
     print_hex(faulting_address);
-    print_string(" ***\nSystem halted.\n");
+    print_string(" ***\nSystem halted.\033[0m\n");
 
     while (1) {
         __asm__("hlt");

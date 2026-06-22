@@ -23,7 +23,7 @@ static void do_set(int argc, char** argv, int from) {
         if (i < argc - 1 && len < (int)sizeof(text) - 1) text[len++] = ' ';
     }
     ax_clipboard_set((unsigned char*)text, (unsigned int)len);
-    ax_printf("clip: set %d bytes\n", len);
+    ax_printf("\033[32mclip: set %d bytes\033[0m\n", len);
 }
 
 // Читает буфер обмена на текущем MLS-уровне вызывающего; ax_clipboard_get
@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
         // validate_user_ptr (kernel.c) не пропустит NULL/0, даже с size=0.
         static unsigned char dummy;
         ax_clipboard_set(&dummy, 0);
-        ax_print("clip: cleared\n");
+        ax_print("\033[32mclip: cleared\033[0m\n");
         return 0;
     }
 

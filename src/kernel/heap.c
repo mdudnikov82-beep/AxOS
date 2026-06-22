@@ -151,9 +151,9 @@ static unsigned int tagged_canary(unsigned int tag) {
 }
 
 static void heap_corrupted(char* why) {
-    print_string("\n*** HEAP CORRUPTION: ");
+    print_string("\n\033[31m*** HEAP CORRUPTION: "); // красный - фатально
     print_string(why);
-    print_string(" ***\nSystem halted.\n");
+    print_string(" ***\nSystem halted.\033[0m\n");
     while (1) {
         __asm__("hlt");
     }

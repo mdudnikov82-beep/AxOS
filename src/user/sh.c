@@ -18,7 +18,7 @@ int main(int argc, char** argv) {
 
     ax_shell_claim(1);  // захватываем клавиатуру у kernel shell
 
-    ax_print("\nAxSH v0.1 - AxOS user shell\n");
+    ax_print("\n\033[36mAxSH v0.1 - AxOS user shell\033[0m\n");
     ax_print("Run: <program> [args]  |  exit\n\n");
 
     char line[64];
@@ -26,27 +26,27 @@ int main(int argc, char** argv) {
         while (1) {
         // Внутри цикла while(1), перед ax_readline:
         if (current_dir[0] == '\0') {
-            ax_print("$ ");
+            ax_print("\033[32m$\033[0m ");
         } else {
-            ax_printf("[%s]$ ", current_dir);
+            ax_printf("\033[32m[%s]$\033[0m ", current_dir);
         }
         int len = ax_readline(line, sizeof(line));
         if (len == 0) continue;
 
         if (sh_streq(line, "exit")) {
-            ax_print("Goodbye.\n");
+            ax_print("\033[36mGoodbye.\033[0m\n");
             break;
         }
 
         if (sh_streq(line, "unlock")) {
             ax_disk_lock(0);
-            ax_print("disk: unlocked\n");
+            ax_print("\033[32mdisk: unlocked\033[0m\n");
             continue;
         }
 
         if (sh_streq(line, "lock")) {
             ax_disk_lock(1);
-            ax_print("disk: locked\n");
+            ax_print("\033[32mdisk: locked\033[0m\n");
             continue;
         }
 
@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
                     }
                 }
                 if (!found) {
-                    ax_print("cd: not found\n");
+                    ax_print("\033[31mcd: not found\033[0m\n");
                 } else {
                     for (k = 0; upper[k]; k++) current_dir[k] = upper[k];
                     current_dir[k] = '\0';
@@ -133,7 +133,7 @@ int main(int argc, char** argv) {
 
                 int slot1 = ax_exec_redir(cmd1, "PIPE.TMP");
                 if (slot1 < 0) {
-                    ax_print("sh: pipe: left side not found\n");
+                    ax_print("\033[31msh: pipe: left side not found\033[0m\n");
                 } else {
                     ax_set_foreground(slot1);
                     while (ax_task_alive(slot1)) { ax_sleep_ms(10); }
@@ -147,9 +147,9 @@ int main(int argc, char** argv) {
                     }
                     int slot2 = ax_exec(cmd2);
                     if (slot2 == -1) {
-                        ax_print("sh: pipe: right side not found\n");
+                        ax_print("\033[31msh: pipe: right side not found\033[0m\n");
                     } else if (slot2 == -2) {
-                        ax_print("sh: no free slots\n");
+                        ax_print("\033[31msh: no free slots\033[0m\n");
                     } else {
                         ax_set_foreground(slot2);
                         while (ax_task_alive(slot2)) { ax_sleep_ms(10); }
@@ -199,17 +199,17 @@ int main(int argc, char** argv) {
 
         int slot = has_redir ? ax_exec_redir(cmd, redir) : ax_exec(cmd);
         if (slot == -1) {
-            ax_print("sh: not found\n");
+            ax_print("\033[31msh: not found\033[0m\n");
         } else if (slot == -2) {
-            ax_print("sh: no free slots\n");
+            ax_print("\033[31msh: no free slots\033[0m\n");
         } else if (has_bg) {
-            ax_printf("[%d] bg\n", slot);
+            ax_printf("\033[33m[%d] bg\033[0m\n", slot);
         } else {
             ax_set_foreground(slot);
             while (ax_task_alive(slot)) { ax_sleep_ms(10); }
             ax_set_foreground(-1);
             if (has_redir && redir[0])
-                ax_printf("-> %s\n", redir);
+                ax_printf("\033[32m-> %s\033[0m\n", redir);
         }
     }
 

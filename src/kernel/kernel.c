@@ -551,7 +551,7 @@ static int ax_mac_check(ax_class_t cls) {
     ax_domain_t d = ax_current_domain();
     if (ax_policy[d][cls]) return 1;
 
-    print_string("avc:  denied  { ");
+    print_string("\033[31mavc:  denied  { "); // красный - отказ в доступе
     print_string(ax_class_name(cls));
     print_string(" }  for comm=\"");
     print_string(task_current_name());
@@ -559,7 +559,7 @@ static int ax_mac_check(ax_class_t cls) {
     print_string(ax_domain_name(d));
     print_string("  tclass=");
     print_string(ax_class_name(cls));
-    print_string("\n");
+    print_string("\033[0m\n");
     return 0;
 }
 
@@ -573,13 +573,13 @@ static int ax_mls_dominates(unsigned int object_level) {
     unsigned int subj = task_current_mls_level();
     if (subj >= object_level) return 1;
 
-    print_string("avc:  denied  { read }  for comm=\"");
+    print_string("\033[31mavc:  denied  { read }  for comm=\""); // красный
     print_string(task_current_name());
     print_string("\"  scontext=axos:user_t:s");
     print_uint(subj);
     print_string("  tcontext=axos:object_r:clipboard:s");
     print_uint(object_level);
-    print_string("  (MLS: no read up)\n");
+    print_string("  (MLS: no read up)\033[0m\n");
     return 0;
 }
 
