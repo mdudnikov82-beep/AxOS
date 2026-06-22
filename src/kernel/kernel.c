@@ -473,15 +473,35 @@ typedef enum { AX_DOMAIN_KERNEL = 0, AX_DOMAIN_USER = 1, AX_DOMAIN_COUNT } ax_do
 // syscall, который решили confine. Добавление новой записи в политику
 // ниже не требует трогать остальные - ровно как добавление allow-правила
 // в .te-файл.
-typedef enum { AX_CLASS_DISK_RAW = 0, AX_CLASS_REBOOT = 1, AX_CLASS_COUNT } ax_class_t;
+//
+// disk_raw/system_reboot запрещены user_t - это и было первой демонстрацией
+// механизма. Остальные пять классов ниже РАЗРЕШЕНЫ user_t: это не
+// "красивые, но бесполезные" хуки - открытие файла на запись, unlink, exec,
+// fs_lock и буфер обмена - повседневные операции AxSH и демо-программ
+// (write.bin/rm.bin/lock/unlock), запрещать их по умолчанию означало бы
+// ломать рекламируемую функциональность без необходимости. Ценность здесь
+// та же, что у большинства allow-правил в настоящей политике SELinux:
+// явная, проверяемая граница для каждой операции, которую можно сузить
+// позже (новый домен, более узкая политика) без единой правки в самих
+// sys_*-обработчиках.
+typedef enum {
+    AX_CLASS_DISK_RAW = 0,
+    AX_CLASS_REBOOT,
+    AX_CLASS_FILE_WRITE,
+    AX_CLASS_FILE_UNLINK,
+    AX_CLASS_FS_LOCK,
+    AX_CLASS_EXEC,
+    AX_CLASS_CLIPBOARD,
+    AX_CLASS_COUNT
+} ax_class_t;
 
 // policy[domain][class]: 1 - allow, 0 - deny. Default-deny: новый класс,
 // для которого забыли дописать строку, у confined-домена откажет сам
 // (массив инициализирован нулями), а не "тихо разрешит" по умолчанию -
 // та же осторожность, что и у настоящей политики SELinux.
 static const unsigned char ax_policy[AX_DOMAIN_COUNT][AX_CLASS_COUNT] = {
-    /* AX_DOMAIN_KERNEL */ {1, 1}, // unconfined - разрешено всё
-    /* AX_DOMAIN_USER   */ {0, 0}, // confined - сырой диск (минуя FAT12) и reboot запрещены
+    /* AX_DOMAIN_KERNEL */ {1, 1, 1, 1, 1, 1, 1}, // unconfined - разрешено всё
+    /* AX_DOMAIN_USER   */ {0, 0, 1, 1, 1, 1, 1}, // confined - см. комментарий выше
 };
 
 static char* ax_domain_name(ax_domain_t d) {
@@ -490,9 +510,14 @@ static char* ax_domain_name(ax_domain_t d) {
 
 static char* ax_class_name(ax_class_t c) {
     switch (c) {
-        case AX_CLASS_DISK_RAW: return "disk_raw";
-        case AX_CLASS_REBOOT:   return "system_reboot";
-        default:                return "?";
+        case AX_CLASS_DISK_RAW:    return "disk_raw";
+        case AX_CLASS_REBOOT:      return "system_reboot";
+        case AX_CLASS_FILE_WRITE:  return "file_write";
+        case AX_CLASS_FILE_UNLINK: return "file_unlink";
+        case AX_CLASS_FS_LOCK:     return "fs_lock";
+        case AX_CLASS_EXEC:        return "exec";
+        case AX_CLASS_CLIPBOARD:   return "clipboard";
+        default:                   return "?";
     }
 }
 
@@ -540,6 +565,7 @@ void sys_write_file(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct write_file_args))) return;
     struct write_file_args* a = (struct write_file_args*)arg;
     if (!validate_user_str(a->filename) || !validate_user_ptr(a->data, a->size)) return;
+    if (!ax_mac_check(AX_CLASS_FILE_WRITE)) return;
     vfs_write(a->filename, a->data, a->size);
 }
 
@@ -622,6 +648,11 @@ void sys_open(char* arg) {
     struct open_args* a = (struct open_args*)arg;
     a->result = -1;
     if (!validate_user_str(a->filename)) return;
+    // Проверяем на ОТКРЫТИИ, не на каждом sys_fwrite - запись определяется
+    // флагом O_WRONLY здесь, дальнейшие sys_fwrite на этом fd уже доверяют
+    // праву, выданному при open() (та же модель, что у permission check
+    // на open() в Linux/SELinux - не на каждый write()).
+    if (a->flags != O_RDONLY && !ax_mac_check(AX_CLASS_FILE_WRITE)) return;
     fd_table_ensure_init();
 
     int slot = -1;
@@ -779,6 +810,7 @@ void sys_exec(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct exec_args))) return;
     struct exec_args* a = (struct exec_args*)arg;
     if (!validate_user_str(a->cmdline)) { a->result = -1; return; }
+    if (!ax_mac_check(AX_CLASS_EXEC)) { a->result = -1; return; }
     a->result = do_exec(a->cmdline);
 }
 
@@ -796,6 +828,7 @@ void sys_exec_redir(char* arg) {
         a->result = -1;
         return;
     }
+    if (!ax_mac_check(AX_CLASS_EXEC)) { a->result = -1; return; }
     a->result = do_exec(a->cmdline);
     if (a->result >= 0 && a->redir_out && a->redir_out[0]) {
         int slot = a->result;
@@ -875,6 +908,7 @@ void sys_mkdir(char* arg) {
 }
 
 void sys_fs_lock(char* arg) {
+    if (!ax_mac_check(AX_CLASS_FS_LOCK)) return;
     vfs_set_locked(arg != (char*)0);
 }
 
@@ -936,6 +970,7 @@ void sys_unlink(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct unlink_args))) return;
     struct unlink_args* a = (struct unlink_args*)arg;
     if (!validate_user_str(a->filename)) { a->result = 0; return; }
+    if (!ax_mac_check(AX_CLASS_FILE_UNLINK)) { a->result = 0; return; }
     a->result = vfs_delete(a->filename);
 }
 
@@ -985,6 +1020,7 @@ void sys_clipboard_set(char* arg) {
     unsigned int size = a->size;
     if (size > CLIPBOARD_MAX_SIZE) size = CLIPBOARD_MAX_SIZE;
     if (!validate_user_ptr(a->data, size)) return;
+    if (!ax_mac_check(AX_CLASS_CLIPBOARD)) return;
     for (unsigned int i = 0; i < size; i++) clipboard_buf[i] = a->data[i];
     clipboard_len = size;
 }
