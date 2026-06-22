@@ -37,8 +37,12 @@ typedef struct task {
     unsigned long ticks;
     int user_slot_index; // -1 для task0/heartbeat/ring3demo; 0..3 для run-задач (kernel.c)
     int exiting;         // 1 - schedule() уберёт задачу из кольца на следующем тике
+    unsigned int mls_level; // MLS-уровень чувствительности (s0..s15) - см. tasking.h
     struct task* next;
 } task_t;
+
+// Диапазон MLS-уровня - как s0..s15 в настоящей политике SELinux MLS.
+#define MLS_LEVEL_MAX 15
 
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
@@ -91,6 +95,7 @@ void init_tasking() {
     task0.page_directory = (unsigned int)PAGE_DIRECTORY;
     task0.user_slot_index = -1;
     task0.exiting = 0;
+    task0.mls_level = 0;
     task0.next = &task0;
 
     // Отдельный стек ядра для task0: НЕ совпадает с её "живым" стеком
@@ -132,6 +137,7 @@ void task_create(char* name, void (*entry)(void)) {
     new_task->page_directory = (unsigned int)PAGE_DIRECTORY;
     new_task->user_slot_index = -1;
     new_task->exiting = 0;
+    new_task->mls_level = 0;
 
     // Свой стек ядра (ESP0) для единообразия - schedule() обновляет
     // TSS.ESP0 для каждой задачи, даже если она остаётся в ring0.
@@ -180,6 +186,7 @@ void task_create_user(char* name, void (*entry)(void)) {
     new_task->page_directory = (unsigned int)PAGE_DIRECTORY;
     new_task->user_slot_index = -1;
     new_task->exiting = 0;
+    new_task->mls_level = 0;
 
     new_task->next = current_task->next;
     current_task->next = new_task;
@@ -242,6 +249,7 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     new_task->page_directory = paging_create_user_directory(user_slot_index, phys_slot_base);
     new_task->user_slot_index = user_slot_index;
     new_task->exiting = 0;
+    new_task->mls_level = 0; // s0 по умолчанию - поднимается самой задачей через SYS_SET_LEVEL
 
     // "jmp $" (EB FE) в последние 2 байта окна задачи - см. USER_SPIN_ADDR
     // (paging.h). Сюда page_fault_handler_main перенаправляет EIP этой
@@ -342,6 +350,20 @@ void print_task_list() {
 int task_current_slot_index() {
     if (!current_task) return -1;
     return current_task->user_slot_index;
+}
+
+// MLS-уровень текущей задачи (см. tasking.h, SYS_SET_LEVEL в kernel.c).
+unsigned int task_current_mls_level() {
+    return current_task ? current_task->mls_level : 0;
+}
+
+// Устанавливает MLS-уровень ТЕКУЩЕЙ задачи (она поднимает себе уровень
+// сама - см. SYS_SET_LEVEL, kernel.c). Зажимаем в [0, MLS_LEVEL_MAX] -
+// не self-DoS через переполнение при дальнейших сравнениях уровней.
+void task_set_current_mls_level(unsigned int level) {
+    if (!current_task) return;
+    if (level > MLS_LEVEL_MAX) level = MLS_LEVEL_MAX;
+    current_task->mls_level = level;
 }
 
 // Заполняет информацию о задаче с порядковым номером index (см. tasking.h).

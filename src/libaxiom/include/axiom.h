@@ -65,6 +65,11 @@ void ax_beep(unsigned int freq, unsigned int duration_ms);
 void         ax_clipboard_set(unsigned char* data, unsigned int size);
 unsigned int ax_clipboard_get(unsigned char* buf, unsigned int max);
 
+// MLS-уровень (s0..s15) вызывающей задачи - самодекларация, см.
+// SYS_SET_LEVEL (src/user/syscall.h). Буфер обмена не отдаст содержимое
+// задаче с уровнем ниже уровня, на котором его последний раз заполнили.
+void ax_set_level(unsigned int level);
+
 // Перечисление файлов (обёртка над SYS_READDIR)
 // Заполняет *a и возвращает a->result (1 = есть запись, 0 = конец)
 int ax_readdir(struct readdir_args* a);

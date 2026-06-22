@@ -40,6 +40,7 @@ global _ax_get_mouse
 global _ax_beep
 global _ax_clipboard_set
 global _ax_clipboard_get
+global _ax_set_level
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -544,6 +545,23 @@ _ax_clipboard_get:
     int 0x80
     mov eax, [esp+8]        ; out_size (offset 8)
     add esp, 12
+    pop ebx
+    pop esi
+    ret
+
+; void ax_set_level(unsigned int level)
+; Строит struct set_level_args { level } на стеке - та же раскладка, что
+; у ax_set_foreground (один dword-аргумент).
+_ax_set_level:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=level
+    mov eax, [esp+12]
+    push eax                ; struct.level  <- esp = &struct
+    mov esi, esp
+    mov ah, 0x21             ; SYS_SET_LEVEL
+    int 0x80
+    add esp, 4
     pop ebx
     pop esi
     ret

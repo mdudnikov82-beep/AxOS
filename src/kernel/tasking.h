@@ -70,4 +70,12 @@ void task_kill_by_slot(int slot);
 int task_get_info(unsigned int index, int* pid_out, char* name_out,
                   unsigned int* ticks_out, int* slot_out);
 
+// MLS (Multi-Level Security) уровень чувствительности текущей задачи -
+// s0..s15, как в "level" компоненте контекста SELinux (user:role:type:level).
+// Новые задачи стартуют на s0 (task_current_mls_level() == 0); задача
+// поднимает СЕБЕ уровень через SYS_SET_LEVEL (kernel.c) - самодекларация,
+// не аутентификация (см. предупреждение в kernel.c про "не криптография").
+unsigned int task_current_mls_level();
+void task_set_current_mls_level(unsigned int level);
+
 #endif

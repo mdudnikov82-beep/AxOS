@@ -185,6 +185,13 @@ struct clipboard_get_args {
     unsigned int   out_size;
 };
 
+// --- MLS уровень задачи (0x21) ---
+#define SYS_SET_LEVEL 0x21
+
+struct set_level_args {
+    unsigned int level; // зажимается в [0, 15] на стороне ядра
+};
+
 #define SYS_PS 0x13
 
 struct ps_entry {

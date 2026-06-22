@@ -251,6 +251,20 @@ struct clipboard_get_args {
 // рискует затереть её при обнулении .bss и уронить систему в #GP.
 #define CLIPBOARD_MAX_SIZE 1024
 
+// --- MLS (Multi-Level Security) уровень задачи (0x21) ---
+#define SYS_SET_LEVEL 0x21  // ESI -> struct set_level_args
+
+// SYS_SET_LEVEL: задача поднимает СЕБЕ MLS-уровень (s0..s15, см. "MAC" в
+// README) - самодекларация без проверки полномочий (в AxOS нет ни
+// аутентификации, ни ролей, которые могли бы её ограничить), не путать с
+// настоящим SELinux MLS, где переход уровня сам подчинён политике.
+// Используется для демонстрации dominance-проверки буфера обмена
+// (sys_clipboard_get откажет, если уровень читателя ниже уровня, на
+// котором был сделан последний sys_clipboard_set - "no read up").
+struct set_level_args {
+    unsigned int level; // зажимается в [0, 15] на стороне ядра
+};
+
 // --- Список задач (0x13) ---
 #define SYS_PS 0x13  // ESI -> struct ps_entry
 

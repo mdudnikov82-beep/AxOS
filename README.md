@@ -490,6 +490,8 @@ LBA28-адресация. Без DMA и прерываний: чтение и з
 | `clip set <text>`      | записать текст в буфер обмена (`fs/CLIP.BIN`)          |
 | `clip get`             | вывести содержимое буфера обмена (`fs/CLIP.BIN`)       |
 | `clip clear`           | очистить буфер обмена (`fs/CLIP.BIN`)                  |
+| `clip level <N> set <text>` | поднять себе MLS-уровень до `sN` (0-15) и сразу записать на нём — см. "MLS" ниже |
+| `clip level <N> get`   | поднять себе MLS-уровень до `sN` и сразу попытаться прочитать |
 | `paste`                | алиас `clip get`, встроен прямо в `sh.c` — отдельный `.bin` для однострочного алиаса не оправдывает свои ~4.6 КБ накладных расходов на crt0/libaxiom при и так заполненном FAT12-разделе (128 КБ) |
 
 ## MAC: Type Enforcement в духе SELinux (`kernel.c`)
@@ -506,10 +508,26 @@ AOSP. Реализован тот же ПРИНЦИП (Type Enforcement: суб�
   `run`-задачи (`task_current_is_isolated()`, т.е. вообще все программы,
   загруженные через `run`/AxSH) — confined `user_t`; ядро и неизолированные
   демо-задачи (`heartbeat`/`ring3demo`) — unconfined `kernel_t`.
-- **Классы** (`ax_class_t`) — по одному на syscall, который решили confine:
-  `disk_raw` (`SYS_DISK_READ_SECTOR`/`SYS_DISK_WRITE_SECTOR`, минуя FAT12) и
-  `system_reboot` (`SYS_REBOOT`). Оба запрещены для `user_t` статической
-  таблицей `ax_policy[domain][class]` (`kernel.c`).
+- **Классы** (`ax_class_t`) — по одному на syscall, который решили confine, в
+  `kernel.c`:
+
+  | Класс           | Syscall(ы)                                              | Политика для `user_t` |
+  |-----------------|----------------------------------------------------------|------------------------|
+  | `disk_raw`      | `SYS_DISK_READ_SECTOR`/`WRITE_SECTOR`/`SYS_DISK_IDENTIFY` (минуя FAT12) | deny |
+  | `system_reboot` | `SYS_REBOOT`                                              | deny |
+  | `file_write`    | `SYS_WRITE_FILE`, `SYS_OPEN` (флаг ≠ `O_RDONLY`), `SYS_MKDIR` | allow |
+  | `file_unlink`   | `SYS_UNLINK`                                              | allow |
+  | `fs_lock`       | `SYS_FS_LOCK` (`lock`/`unlock`)                           | allow |
+  | `exec`          | `SYS_EXEC`/`SYS_EXEC_REDIR`                               | allow |
+  | `clipboard`     | `SYS_CLIPBOARD_SET`                                       | allow (но см. MLS ниже) |
+  | `task_info`     | `SYS_PS` (имена/`heap_brk` ДРУГИХ задач — info-disclosure поверхность) | allow |
+
+  Только первые два реально запрещены — остальные пять allow-правил
+  (как и большинство правил в настоящей политике SELinux): запрещать
+  повседневные операции AxSH и демо-программ (`write.bin`/`rm.bin`/`mkdir.bin`/
+  `lock`/`unlock`) без причины означало бы ломать рекламируемую
+  функциональность. Ценность — единообразная, проверяемая граница для
+  каждой операции, которую можно сузить позже без правок в самих `sys_*`.
 - При отказе `ax_mac_check()` печатает audit-подобную строку (формат — привет
   от настоящего `avc: denied` в `dmesg`/`auditd`) и возвращает 0; syscall
   отказывает вызывающему как при любой другой ошибке (`result=0`) — с точки
@@ -522,6 +540,35 @@ avc:  denied  { disk_raw }  for comm="disktool.bin"  scontext=axos:user_t  tclas
 
 Добавление новой confined-операции — это новый класс в `ax_class_t` + строка
 в `ax_policy` + вызов `ax_mac_check(...)` в начале нужного `sys_*`.
+
+### MLS: уровни чувствительности (`SYS_SET_LEVEL`, буфер обмена)
+
+Полный security context в SELinux — `user:role:type:level`, где `level`
+(MLS/MCS) — отдельная "шкала" чувствительности (`s0`..`s15`, опционально с
+категориями `c0`..`c1023`), проверяемая ПОВЕРХ Type Enforcement через
+доминирование (Bell-LaPadula: субъект должен доминировать над объектом,
+чтобы его прочитать — "no read up"). Добавлена аналогичная шкала для одного
+конкретного ресурса — буфера обмена:
+
+- `SYS_SET_LEVEL` (`0x21`) — задача поднимает СЕБЕ MLS-уровень (`s0`..`s15`,
+  `task_set_current_mls_level()`, `tasking.c`). Самодекларация без проверки
+  полномочий: в AxOS нет ни аутентификации, ни ролей, которые могли бы её
+  ограничить (в отличие от настоящего SELinux MLS, где переход уровня сам
+  подчинён политике) — честно задокументированное упрощение, как и 4-битный
+  tag кучи (см. "Куча" выше).
+- Каждый успешный `SYS_CLIPBOARD_SET` "окрашивает" буфер уровнем ПИСАТЕЛЯ
+  (`clipboard_level`, `kernel.c`). `SYS_CLIPBOARD_GET` отказывает
+  (`out_size=0` + `avc: denied { read } ... (MLS: no read up)`), если уровень
+  читателя ниже уровня, на котором буфер был заполнен последний раз.
+- Поднятый уровень живёт только до конца ЭТОГО процесса (как и контекст
+  процесса в SELinux — не переживает следующий `exec`). Поэтому `clip.bin`
+  совмещает подъём уровня и операцию в одном запуске:
+
+  ```
+  $ run CLIP.BIN level 5 set top secret    # пишет на s5
+  $ run CLIP.BIN get                       # читатель на s0 (по умолчанию) - denied
+  $ run CLIP.BIN level 5 get                # читатель s5 >= s5 - "top secret"
+  ```
 
 ## Структура репозитория
 
@@ -635,8 +682,8 @@ QEMU запускает образ как floppy (`-drive format=raw,file=build\
   overflow, карантин из 8 последних `free()` (см. "Куча" выше).
 - ✅ "ASLR-подобный" разброс начального стека изолированных `run`-задач
   (см. "Запуск пользовательских программ").
-- ✅ MAC (Type Enforcement в духе SELinux) для raw-диска и reboot (см. раздел
-  "MAC" выше).
+- ✅ MAC (Type Enforcement в духе SELinux), 8 классов, + MLS-уровни
+  чувствительности для буфера обмена (см. разделы "MAC"/"MLS" выше).
 - ✅ Preemptive round-robin планировщик (ring0 и ring3 задачи, per-task `TSS.ESP0`) + команда `ps`.
 - ✅ FAT12-том на `build/disk.img` через IDE (чтение и запись, персистентно)
   + команды `ls`/`cat`/`write`.
@@ -721,9 +768,12 @@ QEMU запускает образ как floppy (`-drive format=raw,file=build\
     (0-64 байта, xorshift32 от `timer_ticks`, `tasking.c`) — см. "Запуск
     пользовательских программ".
   - ✅ MAC (Type Enforcement в духе SELinux): домены (`kernel_t`/`user_t`) ×
-    классы (`disk_raw`, `system_reboot`) × статическая политика,
+    8 классов (`disk_raw`, `system_reboot`, `file_write`, `file_unlink`,
+    `fs_lock`, `exec`, `clipboard`, `task_info`) × статическая политика,
     default-deny, audit-подобный лог при отказе (`kernel.c`) — см. раздел
     "MAC" выше.
+  - ✅ MLS-уровни (`SYS_SET_LEVEL`, `s0`-`s15`) с dominance-проверкой
+    ("no read up") для буфера обмена — см. "MLS" выше.
 
 - **Долгосрочно:**
   - простой ELF-загрузчик для запуска пользовательских программ из FAT12

@@ -57,6 +57,11 @@ static char           slot_redir_file[USER_PROGRAM_SLOTS][13];
 // clipboard в однопользовательской системе). Переживает завершение задач.
 static unsigned char clipboard_buf[CLIPBOARD_MAX_SIZE];
 static unsigned int  clipboard_len = 0;
+// MLS-уровень содержимого буфера обмена - выставляется в уровень ПИСАТЕЛЯ
+// при каждом успешном SYS_CLIPBOARD_SET. SYS_CLIPBOARD_GET откажет читателю
+// с более низким уровнем ("no read up", классический Bell-LaPadula) - см.
+// ax_mac_check_mls() ниже.
+static unsigned int clipboard_level = 0;
 
 // Определена ниже, у fd_table (которая объявляется позже по файлу) -
 // закрывает все fd, оставшиеся открытыми у завершившейся задачи. Без
@@ -558,6 +563,26 @@ static int ax_mac_check(ax_class_t cls) {
     return 0;
 }
 
+// MLS dominance: 1, если текущая задача может ПРОЧЕСТЬ объект с уровнем
+// object_level ("no read up" - Bell-LaPadula: читатель должен доминировать
+// над объектом, т.е. его уровень >= уровня объекта). Неизолированные
+// (kernel_t) задачи доминируют над любым уровнем - так же, как они
+// unconfined для ax_mac_check() выше.
+static int ax_mls_dominates(unsigned int object_level) {
+    if (!task_current_is_isolated()) return 1;
+    unsigned int subj = task_current_mls_level();
+    if (subj >= object_level) return 1;
+
+    print_string("avc:  denied  { read }  for comm=\"");
+    print_string(task_current_name());
+    print_string("\"  scontext=axos:user_t:s");
+    print_uint(subj);
+    print_string("  tcontext=axos:object_r:clipboard:s");
+    print_uint(object_level);
+    print_string("  (MLS: no read up)\n");
+    return 0;
+}
+
 // SYS_READ_KEY: неблокирующее чтение клавиатуры. ESI -> char, куда
 // записывается последний нажатый символ (0, если ничего не нажато
 // с прошлого опроса). Прочитанный символ "потребляется" - last_key
@@ -1037,18 +1062,35 @@ void sys_clipboard_set(char* arg) {
     if (!ax_mac_check(AX_CLASS_CLIPBOARD)) return;
     for (unsigned int i = 0; i < size; i++) clipboard_buf[i] = a->data[i];
     clipboard_len = size;
+    // Буфер "окрашивается" уровнем писателя - см. ax_mls_dominates() и
+    // комментарий у clipboard_level. Неизолированные (kernel_t) задачи не
+    // имеют MLS-уровня в обычном смысле - считаем их запись s0, чтобы не
+    // навсегда "запереть" буфер на максимальном уровне, если, например,
+    // kernel-shell сам когда-нибудь вызовет SYS_CLIPBOARD_SET.
+    clipboard_level = task_current_is_isolated() ? task_current_mls_level() : 0;
 }
 
 // SYS_CLIPBOARD_GET: копирует содержимое буфера обмена в a->buffer (не
 // больше a->max_size байт). Фактический размер пишется в a->out_size.
+// Откажет (out_size=0), если MLS-уровень читателя ниже уровня, на котором
+// буфер был заполнен последний раз - см. ax_mls_dominates().
 void sys_clipboard_get(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct clipboard_get_args))) return;
     struct clipboard_get_args* a = (struct clipboard_get_args*)arg;
+    if (!ax_mls_dominates(clipboard_level)) { a->out_size = 0; return; }
     unsigned int size = clipboard_len;
     if (size > a->max_size) size = a->max_size;
     if (!validate_user_ptr(a->buffer, size)) { a->out_size = 0; return; }
     for (unsigned int i = 0; i < size; i++) a->buffer[i] = clipboard_buf[i];
     a->out_size = size;
+}
+
+// SYS_SET_LEVEL: задача поднимает СЕБЕ MLS-уровень (s0..s15) - см.
+// struct set_level_args и task_set_current_mls_level().
+void sys_set_level(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct set_level_args))) return;
+    struct set_level_args* a = (struct set_level_args*)arg;
+    task_set_current_mls_level(a->level);
 }
 
 syscall_fn syscall_table[] = {
@@ -1085,6 +1127,7 @@ syscall_fn syscall_table[] = {
     sys_beep,              // 0x1E
     sys_clipboard_set,     // 0x1F
     sys_clipboard_get,     // 0x20
+    sys_set_level,         // 0x21
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))

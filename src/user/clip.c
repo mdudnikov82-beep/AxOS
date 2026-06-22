@@ -5,22 +5,69 @@ static int streq(const char* a, const char* b) {
     return *a == *b;
 }
 
+static unsigned int parse_uint(const char* s) {
+    unsigned int v = 0;
+    while (*s >= '0' && *s <= '9') v = v * 10 + (unsigned int)(*s++ - '0');
+    return v;
+}
+
+// Записывает в буфер обмена текст из argv[from..argc), пробелы между
+// аргументами восстанавливаются. Уровень содержимого - текущий MLS-уровень
+// ВЫЗЫВАЮЩЕГО (ax_set_level выше, если был) - см. sys_clipboard_set.
+static void do_set(int argc, char** argv, int from) {
+    static char text[CLIPBOARD_MAX_SIZE];
+    int len = 0;
+    for (int i = from; i < argc; i++) {
+        char* a = argv[i];
+        while (*a && len < (int)sizeof(text) - 1) text[len++] = *a++;
+        if (i < argc - 1 && len < (int)sizeof(text) - 1) text[len++] = ' ';
+    }
+    ax_clipboard_set((unsigned char*)text, (unsigned int)len);
+    ax_printf("clip: set %d bytes\n", len);
+}
+
+// Читает буфер обмена на текущем MLS-уровне вызывающего; ax_clipboard_get
+// вернёт 0 байт (и ядро напечатает "avc: denied ... no read up"), если
+// уровень читателя ниже уровня, на котором буфер был заполнен.
+static void do_get(void) {
+    static unsigned char buf[CLIPBOARD_MAX_SIZE];
+    unsigned int got = ax_clipboard_get(buf, sizeof(buf) - 1);
+    buf[got] = '\0';
+    ax_print((char*)buf);
+    ax_putchar('\n');
+}
+
 int main(int argc, char** argv) {
-    if (argc < 2 || (!streq(argv[1], "set") && !streq(argv[1], "get") && !streq(argv[1], "clear"))) {
-        ax_print("Usage: clip set <text>  |  clip get  |  clip clear\n");
+    if (argc < 2 || (!streq(argv[1], "set") && !streq(argv[1], "get") &&
+                     !streq(argv[1], "clear") && !streq(argv[1], "level"))) {
+        ax_print("Usage: clip set <text>  |  clip get  |  clip clear\n"
+                 "       clip level <0-15> set <text>  |  clip level <0-15> get\n");
         return 1;
     }
 
-    if (streq(argv[1], "set")) {
-        static char text[CLIPBOARD_MAX_SIZE];
-        int len = 0;
-        for (int i = 2; i < argc; i++) {
-            char* a = argv[i];
-            while (*a && len < (int)sizeof(text) - 1) text[len++] = *a++;
-            if (i < argc - 1 && len < (int)sizeof(text) - 1) text[len++] = ' ';
+    // "level N set ..."/"level N get" - один процесс, поднимающий себе
+    // MLS-уровень и СРАЗУ ЖЕ пишущий/читающий буфер обмена на этом уровне.
+    // Раздельные "clip level N" + отдельный "clip get" не сработали бы:
+    // каждый run/exec - новый процесс, который снова стартует на s0 (см.
+    // task_set_current_mls_level, tasking.c) - уровень не переживает выход
+    // из задачи, ровно как и сам контекст процесса в SELinux.
+    if (streq(argv[1], "level")) {
+        if (argc < 4 || (!streq(argv[3], "set") && !streq(argv[3], "get"))) {
+            ax_print("Usage: clip level <0-15> set <text>  |  clip level <0-15> get\n");
+            return 1;
         }
-        ax_clipboard_set((unsigned char*)text, (unsigned int)len);
-        ax_printf("clip: set %d bytes\n", len);
+        unsigned int level = parse_uint(argv[2]);
+        ax_set_level(level);
+        if (streq(argv[3], "set")) {
+            do_set(argc, argv, 4);
+        } else {
+            do_get();
+        }
+        return 0;
+    }
+
+    if (streq(argv[1], "set")) {
+        do_set(argc, argv, 2);
         return 0;
     }
 
@@ -33,10 +80,6 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    static unsigned char buf[CLIPBOARD_MAX_SIZE];
-    unsigned int got = ax_clipboard_get(buf, sizeof(buf) - 1);
-    buf[got] = '\0';
-    ax_print((char*)buf);
-    ax_putchar('\n');
+    do_get();
     return 0;
 }
