@@ -735,6 +735,10 @@ avc:  denied  { read }  for comm="ps.bin"  scontext=axos:user_t:s0  tcontext=axo
   аргументами и через AxSH/`ax_exec`, и через kernel-shell `run` — у
   `selftest` нет своего покрытия `do_exec`/`run`, без этого теста
   загрузчик проверялся бы только косвенно, через автозапуск AxSH);
+  общий код (`find_qemu`/`decode_vga`/`send_text`/`launch_qemu`/
+  `dump_screen`) вынесен в `tools/qemu_test_helpers.py` — раньше каждый
+  тест нёс свою копию, и именно расхождение копий (забытый `.lower()`
+  для `sendkey`) стало причиной первого же бага в `exec_regression_test.py`.
   используются в CI.
 - `build.bat` — основной скрипт сборки, `run.bat` — запуск в QEMU.
 

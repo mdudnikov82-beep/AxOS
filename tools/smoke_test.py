@@ -4,10 +4,11 @@
 # came up cleanly (and that there was no page fault / crash).
 
 import os
-import socket
 import subprocess
 import sys
 import time
+
+from qemu_test_helpers import connect_monitor, dump_screen, launch_qemu
 
 IMAGE = os.path.join("build", "os-image.bin")
 DISK_IMAGE = os.path.join("build", "disk.img")
@@ -15,62 +16,19 @@ MONITOR_PORT = 55590
 DUMP_FILE = "vga_dump.bin"
 BOOT_WAIT_SEC = 10
 
-QEMU_CANDIDATES = [
-    r"C:\Program Files\qemu\qemu-system-i386.exe",
-    "qemu-system-i386",
-]
-
-
-def find_qemu():
-    for candidate in QEMU_CANDIDATES:
-        if os.path.isfile(candidate):
-            return candidate
-    return QEMU_CANDIDATES[-1]  # rely on PATH
-
-
-def decode_vga(data):
-    rows = []
-    for row in range(25):
-        line = ""
-        for col in range(80):
-            ch = data[(row * 80 + col) * 2]
-            if ch == 0:
-                line += " "
-            elif 32 <= ch < 127:
-                line += chr(ch)
-            else:
-                line += "."
-        rows.append(line.rstrip())
-    return rows
-
 
 def main():
     if not os.path.isfile(IMAGE):
         print(f"FAIL: {IMAGE} not found - did the build step run?")
         return 1
 
-    qemu = find_qemu()
-    args = [
-        qemu,
-        "-drive", f"format=raw,file={IMAGE},if=floppy",
-    ]
-    if os.path.isfile(DISK_IMAGE):
-        args += ["-drive", f"format=raw,file={DISK_IMAGE},if=ide,index=0,media=disk"]
-    args += [
-        "-boot", "a",
-        "-display", "none",
-        "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server,nowait",
-        "-no-reboot",
-    ]
-    proc = subprocess.Popen(args)
+    proc = launch_qemu(IMAGE, DISK_IMAGE, MONITOR_PORT)
 
     try:
         time.sleep(BOOT_WAIT_SEC)
 
-        sock = socket.create_connection(("127.0.0.1", MONITOR_PORT), timeout=10)
-        sock.recv(4096)  # monitor banner
-        sock.sendall(f"pmemsave 0xb8000 4000 {DUMP_FILE}\n".encode())
-        time.sleep(1)
+        sock = connect_monitor(MONITOR_PORT)
+        screen = dump_screen(sock, DUMP_FILE, settle_sec=1)
         sock.sendall(b"quit\n")
         time.sleep(1)
         sock.close()
@@ -80,16 +38,10 @@ def main():
         except subprocess.TimeoutExpired:
             proc.kill()
 
-    if not os.path.isfile(DUMP_FILE):
+    if not screen:
         print("FAIL: VGA dump was not created (QEMU may have failed to boot)")
         return 1
 
-    with open(DUMP_FILE, "rb") as f:
-        data = f.read()
-    os.remove(DUMP_FILE)
-
-    rows = decode_vga(data)
-    screen = "\n".join(rows)
     print("--- VGA screen ---")
     print(screen)
     print("------------------")

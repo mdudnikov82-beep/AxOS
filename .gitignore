@@ -12,6 +12,10 @@
 # Backups and scratch folders
 *.bak
 
+# Python bytecode cache (tools/*.py now import each other)
+__pycache__/
+*.pyc
+
 # Prerequisites
 *.d
 
