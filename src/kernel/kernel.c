@@ -449,6 +449,79 @@ static int validate_user_str(char* s) {
     return 0; // нет '\0' до конца окна
 }
 
+// =================================================================
+//  MAC (Mandatory Access Control) - в духе SELinux Type Enforcement
+// =================================================================
+//
+// Настоящий SELinux - Linux Security Module: хуки на inode/dentry/socket/
+// capability внутри Linux-ядра, security-контексты, политика, которую
+// грузит userspace (load_policy). Ничего из этого в AxOS нет и не может
+// быть буквально - это не Linux. Ниже - тот же ПРИНЦИП (Type Enforcement:
+// субъект в домене, объект - в классе, политика "домен x класс ->
+// разрешено/запрещено", default-deny для всего, чего нет в таблице),
+// реализованный нативно для собственных ресурсов ядра (syscall'ы),
+// без претензии на совместимость с настоящим SELinux.
+//
+// Домены - как security context процесса: изолированные run-задачи
+// (task_current_is_isolated()) - confined "user_t" (вообще ВСЕ загруженные
+// программы, AxSH в том числе - см. "Изоляция памяти" в README); ядро и
+// неизолированные демо-задачи (heartbeat/ring3demo) - unconfined
+// "kernel_t", доверенный код, не загруженный с диска.
+typedef enum { AX_DOMAIN_KERNEL = 0, AX_DOMAIN_USER = 1, AX_DOMAIN_COUNT } ax_domain_t;
+
+// Классы объектов - как target_type в SELinux, по одному на каждый
+// syscall, который решили confine. Добавление новой записи в политику
+// ниже не требует трогать остальные - ровно как добавление allow-правила
+// в .te-файл.
+typedef enum { AX_CLASS_DISK_RAW = 0, AX_CLASS_REBOOT = 1, AX_CLASS_COUNT } ax_class_t;
+
+// policy[domain][class]: 1 - allow, 0 - deny. Default-deny: новый класс,
+// для которого забыли дописать строку, у confined-домена откажет сам
+// (массив инициализирован нулями), а не "тихо разрешит" по умолчанию -
+// та же осторожность, что и у настоящей политики SELinux.
+static const unsigned char ax_policy[AX_DOMAIN_COUNT][AX_CLASS_COUNT] = {
+    /* AX_DOMAIN_KERNEL */ {1, 1}, // unconfined - разрешено всё
+    /* AX_DOMAIN_USER   */ {0, 0}, // confined - сырой диск (минуя FAT12) и reboot запрещены
+};
+
+static char* ax_domain_name(ax_domain_t d) {
+    return d == AX_DOMAIN_KERNEL ? "kernel_t" : "user_t";
+}
+
+static char* ax_class_name(ax_class_t c) {
+    switch (c) {
+        case AX_CLASS_DISK_RAW: return "disk_raw";
+        case AX_CLASS_REBOOT:   return "system_reboot";
+        default:                return "?";
+    }
+}
+
+static ax_domain_t ax_current_domain() {
+    return task_current_is_isolated() ? AX_DOMAIN_USER : AX_DOMAIN_KERNEL;
+}
+
+// Проверяет политику для текущей задачи и запрошенного класса. При
+// отказе печатает audit-подобную строку (формат - привет от настоящего
+// "avc: denied" в dmesg/auditd) и возвращает 0; syscall-обработчик решает
+// сам, как отказать вызывающему (обычно result=0/-1, как при любой другой
+// ошибке - без явного индикатора "это MAC", как и в реальном SELinux: с
+// точки зрения вызывающего denied неотличим от обычного отказа).
+static int ax_mac_check(ax_class_t cls) {
+    ax_domain_t d = ax_current_domain();
+    if (ax_policy[d][cls]) return 1;
+
+    print_string("avc:  denied  { ");
+    print_string(ax_class_name(cls));
+    print_string(" }  for comm=\"");
+    print_string(task_current_name());
+    print_string("\"  scontext=axos:");
+    print_string(ax_domain_name(d));
+    print_string("  tclass=");
+    print_string(ax_class_name(cls));
+    print_string("\n");
+    return 0;
+}
+
 // SYS_READ_KEY: неблокирующее чтение клавиатуры. ESI -> char, куда
 // записывается последний нажатый символ (0, если ничего не нажато
 // с прошлого опроса). Прочитанный символ "потребляется" - last_key
@@ -819,6 +892,7 @@ void sys_disk_read_sector(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct disk_sector_args))) return;
     struct disk_sector_args* a = (struct disk_sector_args*)arg;
     if (!validate_user_ptr(a->buf, IDE_SECTOR_SIZE)) { a->result = 0; return; }
+    if (!ax_mac_check(AX_CLASS_DISK_RAW)) { a->result = 0; return; }
     a->result = ide_read_sector(a->lba, a->buf);
 }
 
@@ -826,6 +900,7 @@ void sys_disk_write_sector(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct disk_sector_args))) return;
     struct disk_sector_args* a = (struct disk_sector_args*)arg;
     if (!validate_user_ptr(a->buf, IDE_SECTOR_SIZE)) { a->result = 0; return; }
+    if (!ax_mac_check(AX_CLASS_DISK_RAW)) { a->result = 0; return; }
     a->result = ide_write_sector(a->lba, a->buf);
 }
 
@@ -876,6 +951,7 @@ void sys_get_datetime(char* arg) {
 // см. reboot(). Не возвращается.
 void sys_reboot(char* arg) {
     (void)arg;
+    if (!ax_mac_check(AX_CLASS_REBOOT)) return;
     reboot();
 }
 
