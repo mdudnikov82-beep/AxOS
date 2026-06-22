@@ -155,4 +155,7 @@ qemu-system-i386 -drive format=raw,file=build/os-image.bin,if=floppy -boot a -d 
 Планируется:
 
 - VFS-слой над несколькими файловыми системами.
-- ELF-загрузчик для пользовательских программ из FAT12-раздела.
+
+ELF-загрузчик для пользовательских программ из FAT12-раздела уже сделан
+(`src/kernel/elf.c`/`elf.h`, `tools/make_elf.py`) — см. раздел
+"ELF32-загрузчик" в README.md.
