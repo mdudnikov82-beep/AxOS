@@ -492,6 +492,7 @@ typedef enum {
     AX_CLASS_FS_LOCK,
     AX_CLASS_EXEC,
     AX_CLASS_CLIPBOARD,
+    AX_CLASS_TASK_INFO,
     AX_CLASS_COUNT
 } ax_class_t;
 
@@ -499,9 +500,18 @@ typedef enum {
 // для которого забыли дописать строку, у confined-домена откажет сам
 // (массив инициализирован нулями), а не "тихо разрешит" по умолчанию -
 // та же осторожность, что и у настоящей политики SELinux.
+//
+// mkdir переиспользует FILE_WRITE (та же категория риска, что и write/
+// unlink - изменение содержимого FAT12), disk_identify переиспользует
+// DISK_RAW (то же обращение к IDE в обход FAT12, что и read/write sector
+// - раньше "disktool info" непоследовательно проходил без проверки, пока
+// "disktool read/write" уже были под политикой). task_info - отдельный
+// класс для SYS_PS (раскрывает имена/heap_brk ДРУГИХ задач - честная
+// info-disclosure поверхность, но ps.bin - рекламируемая демо-команда,
+// поэтому allow, как и остальные неновые denial'ы выше).
 static const unsigned char ax_policy[AX_DOMAIN_COUNT][AX_CLASS_COUNT] = {
-    /* AX_DOMAIN_KERNEL */ {1, 1, 1, 1, 1, 1, 1}, // unconfined - разрешено всё
-    /* AX_DOMAIN_USER   */ {0, 0, 1, 1, 1, 1, 1}, // confined - см. комментарий выше
+    /* AX_DOMAIN_KERNEL */ {1, 1, 1, 1, 1, 1, 1, 1}, // unconfined - разрешено всё
+    /* AX_DOMAIN_USER   */ {0, 0, 1, 1, 1, 1, 1, 1}, // confined - см. комментарий выше
 };
 
 static char* ax_domain_name(ax_domain_t d) {
@@ -517,6 +527,7 @@ static char* ax_class_name(ax_class_t c) {
         case AX_CLASS_FS_LOCK:     return "fs_lock";
         case AX_CLASS_EXEC:        return "exec";
         case AX_CLASS_CLIPBOARD:   return "clipboard";
+        case AX_CLASS_TASK_INFO:   return "task_info";
         default:                   return "?";
     }
 }
@@ -904,6 +915,7 @@ void sys_mkdir(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct mkdir_args))) return;
     struct mkdir_args* a = (struct mkdir_args*)arg;
     if (!validate_user_str(a->dirname)) { a->result = 0; return; }
+    if (!ax_mac_check(AX_CLASS_FILE_WRITE)) { a->result = 0; return; }
     a->result = vfs_mkdir(a->dirname);
 }
 
@@ -919,6 +931,7 @@ void sys_disk_identify(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct disk_identify_args))) return;
     struct disk_identify_args* a = (struct disk_identify_args*)arg;
     if (!validate_user_ptr(a->model, 41)) { a->result = 0; return; }
+    if (!ax_mac_check(AX_CLASS_DISK_RAW)) { a->result = 0; return; }
     a->result = ide_identify(a->model);
 }
 
@@ -941,6 +954,7 @@ void sys_disk_write_sector(char* arg) {
 void sys_ps(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct ps_entry))) return;
     struct ps_entry* e = (struct ps_entry*)arg;
+    if (!ax_mac_check(AX_CLASS_TASK_INFO)) { e->result = 0; return; }
     e->result = task_get_info(e->index, &e->pid, e->name, &e->ticks, &e->slot);
     if (e->result && e->slot >= 0 && e->slot < USER_PROGRAM_SLOTS)
         e->heap_brk = slot_heap_brk[e->slot];
