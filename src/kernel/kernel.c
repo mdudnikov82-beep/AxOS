@@ -563,12 +563,13 @@ static int ax_mac_check(ax_class_t cls) {
     return 0;
 }
 
-// MLS dominance: 1, если текущая задача может ПРОЧЕСТЬ объект с уровнем
-// object_level ("no read up" - Bell-LaPadula: читатель должен доминировать
-// над объектом, т.е. его уровень >= уровня объекта). Неизолированные
+// MLS dominance: 1, если текущая задача может ПРОЧЕСТЬ объект класса
+// object_class (например, "clipboard" или "task") с уровнем object_level
+// ("no read up" - Bell-LaPadula: читатель должен доминировать над
+// объектом, т.е. его уровень >= уровня объекта). Неизолированные
 // (kernel_t) задачи доминируют над любым уровнем - так же, как они
 // unconfined для ax_mac_check() выше.
-static int ax_mls_dominates(unsigned int object_level) {
+static int ax_mls_dominates(unsigned int object_level, char* object_class) {
     if (!task_current_is_isolated()) return 1;
     unsigned int subj = task_current_mls_level();
     if (subj >= object_level) return 1;
@@ -577,7 +578,9 @@ static int ax_mls_dominates(unsigned int object_level) {
     print_string(task_current_name());
     print_string("\"  scontext=axos:user_t:s");
     print_uint(subj);
-    print_string("  tcontext=axos:object_r:clipboard:s");
+    print_string("  tcontext=axos:object_r:");
+    print_string(object_class);
+    print_string(":s");
     print_uint(object_level);
     print_string("  (MLS: no read up)\033[0m\n");
     return 0;
@@ -980,11 +983,27 @@ void sys_ps(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct ps_entry))) return;
     struct ps_entry* e = (struct ps_entry*)arg;
     if (!ax_mac_check(AX_CLASS_TASK_INFO)) { e->result = 0; return; }
-    e->result = task_get_info(e->index, &e->pid, e->name, &e->ticks, &e->slot);
+
+    unsigned int level;
+    e->result = task_get_info(e->index, &e->pid, e->name, &e->ticks, &e->slot, &level);
     if (e->result && e->slot >= 0 && e->slot < USER_PROGRAM_SLOTS)
         e->heap_brk = slot_heap_brk[e->slot];
     else
         e->heap_brk = 0;
+
+    // MLS "no read up" для process-listing: задачу с уровнем выше уровня
+    // наблюдателя видно (result=1, индекс не "съедается" - иначе цикл
+    // ps.bin прервался бы раньше времени), но её имя/тики/heap_brk
+    // редактируются - наблюдатель не узнаёт о ней ничего, кроме самого
+    // факта существования. ax_mls_dominates() уже печатает audit-строку.
+    if (e->result && !ax_mls_dominates(level, "task")) {
+        char* hidden = "<hidden>";
+        int j = 0;
+        while (hidden[j]) { e->name[j] = hidden[j]; j++; }
+        e->name[j] = '\0';
+        e->ticks = 0;
+        e->heap_brk = 0;
+    }
 }
 
 // SYS_SBRK: сдвигает heap break задачи на increment байт вперёд.
@@ -1077,7 +1096,7 @@ void sys_clipboard_set(char* arg) {
 void sys_clipboard_get(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct clipboard_get_args))) return;
     struct clipboard_get_args* a = (struct clipboard_get_args*)arg;
-    if (!ax_mls_dominates(clipboard_level)) { a->out_size = 0; return; }
+    if (!ax_mls_dominates(clipboard_level, "clipboard")) { a->out_size = 0; return; }
     unsigned int size = clipboard_len;
     if (size > a->max_size) size = a->max_size;
     if (!validate_user_ptr(a->buffer, size)) { a->out_size = 0; return; }

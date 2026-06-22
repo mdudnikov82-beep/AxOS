@@ -65,10 +65,11 @@ int task_current_slot_index();
 // exiting. Используется для Ctrl+C из shell (kernel.c::keyboard_handler_main).
 void task_kill_by_slot(int slot);
 
-// Заполняет поля pid, name, ticks, slot для задачи с порядковым номером index.
-// Возвращает 1 если найдена, 0 если index >= числа задач в кольце.
+// Заполняет поля pid, name, ticks, slot, level для задачи с порядковым
+// номером index. Возвращает 1 если найдена, 0 если index >= числа задач
+// в кольце.
 int task_get_info(unsigned int index, int* pid_out, char* name_out,
-                  unsigned int* ticks_out, int* slot_out);
+                  unsigned int* ticks_out, int* slot_out, unsigned int* level_out);
 
 // MLS (Multi-Level Security) уровень чувствительности текущей задачи -
 // s0..s15, как в "level" компоненте контекста SELinux (user:role:type:level).

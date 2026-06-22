@@ -41,7 +41,8 @@ int main(int argc, char** argv) {
     if (argc < 2 || (!streq(argv[1], "set") && !streq(argv[1], "get") &&
                      !streq(argv[1], "clear") && !streq(argv[1], "level"))) {
         ax_print("Usage: clip set <text>  |  clip get  |  clip clear\n"
-                 "       clip level <0-15> set <text>  |  clip level <0-15> get\n");
+                 "       clip level <0-15> set <text>  |  clip level <0-15> get\n"
+                 "       clip level <0-15> idle <ms>\n");
         return 1;
     }
 
@@ -52,14 +53,24 @@ int main(int argc, char** argv) {
     // task_set_current_mls_level, tasking.c) - уровень не переживает выход
     // из задачи, ровно как и сам контекст процесса в SELinux.
     if (streq(argv[1], "level")) {
-        if (argc < 4 || (!streq(argv[3], "set") && !streq(argv[3], "get"))) {
-            ax_print("Usage: clip level <0-15> set <text>  |  clip level <0-15> get\n");
+        if (argc < 4 || (!streq(argv[3], "set") && !streq(argv[3], "get") && !streq(argv[3], "idle"))) {
+            ax_print("Usage: clip level <0-15> set <text>  |  clip level <0-15> get\n"
+                     "       clip level <0-15> idle <ms>\n");
             return 1;
         }
         unsigned int level = parse_uint(argv[2]);
         ax_set_level(level);
         if (streq(argv[3], "set")) {
             do_set(argc, argv, 4);
+        } else if (streq(argv[3], "idle")) {
+            // Держит процесс живым на повышенном уровне N миллисекунд - чтобы
+            // успеть посмотреть его в `ps` ИЗ ДРУГОГО процесса (свежий "ps"
+            // всегда стартует на s0 - см. ax_mls_dominates в kernel.c). Без
+            // этого продемонстрировать MLS-редакцию ps было бы нечем: только
+            // один уровень переживает между exec, и тот - текущего процесса.
+            unsigned int ms = argc >= 5 ? parse_uint(argv[4]) : 5000;
+            ax_printf("clip: idling at level s%u for %u ms (run 'ps' now)\n", level, ms);
+            ax_sleep_ms(ms);
         } else {
             do_get();
         }

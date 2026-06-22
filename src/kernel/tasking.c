@@ -368,7 +368,7 @@ void task_set_current_mls_level(unsigned int level) {
 
 // Заполняет информацию о задаче с порядковым номером index (см. tasking.h).
 int task_get_info(unsigned int index, int* pid_out, char* name_out,
-                  unsigned int* ticks_out, int* slot_out) {
+                  unsigned int* ticks_out, int* slot_out, unsigned int* level_out) {
     if (!current_task) return 0;
     task_t* t = current_task;
     unsigned int i = 0;
@@ -381,6 +381,7 @@ int task_get_info(unsigned int index, int* pid_out, char* name_out,
             name_out[j] = '\0';
             *ticks_out = (unsigned int)t->ticks;
             *slot_out = t->user_slot_index;
+            *level_out = t->mls_level;
             return 1;
         }
         i++;
