@@ -78,10 +78,11 @@ struct close_args {
 #define SYS_TASK_ALIVE  0x0C  // ESI -> struct task_alive_args
 #define SYS_SHELL_CLAIM 0x0D  // ESI = 1 (захват), 0 (освобождение) — не указатель
 
-// SYS_EXEC: запустить бинарник из FAT12; result = slot (>= 0) или -1/-2.
+// SYS_EXEC: запустить бинарник из FAT12; result = slot (>= 0) или -1/-2/-3.
 struct exec_args {
     char* cmdline;   // "filename arg1 arg2..."
-    int   result;    // >= 0: slot-индекс, -1: файл не найден, -2: нет слотов
+    int   result;    // >= 0: slot-индекс, -1: файл не найден, -2: нет слотов,
+                      // -3: файл не валидный ELF (см. elf.h)
 };
 
 // SYS_TASK_ALIVE: проверить, жива ли задача в слоте (без блокировки).
@@ -141,7 +142,7 @@ struct sbrk_args {
 struct exec_redir_args {
     char* cmdline;   // имя программы + аргументы
     char* redir_out; // имя выходного файла (uppercase FAT12, e.g. "OUT.TXT")
-    int   result;    // >= 0: slot, -1: не найден, -2: нет слотов
+    int   result;    // >= 0: slot, -1: не найден, -2: нет слотов, -3: не валидный ELF
 };
 
 // --- Удаление файла (0x15) ---

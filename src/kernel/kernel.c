@@ -9,6 +9,7 @@
 #include "heap.h" // kmalloc/kfree - простой кучевой аллокатор
 #include "tasking.h" // простой preemptive round-robin планировщик
 #include "selftest.h" // команда "selftest" - регрессионные тесты heap/paging/FAT12
+#include "elf.h" // минимальный ELF32-загрузчик пользовательских программ
 
 #define SCREEN_WIDTH 80
 #define VIDEO_MEMORY 0xB8000
@@ -34,6 +35,29 @@
 #define USER_ARGS_VADDR    (USER_WINDOW_BASE + USER_ARGS_OFFSET)
 #define USER_ARGS_MAX_ARGC 7       // максимум 7 аргументов (argv[0]..argv[6] + NULL)
 #define USER_ARGS_STR_OFF  32      // строки после 8 указателей (8 * sizeof(char*) = 32)
+
+// Буфер для чтения целого ELF-файла программы перед разбором. vfs_read/
+// fat12_load не умеют читать "со смещения" (см. fat12.h) - сначала читаем
+// файл целиком сюда, парсим Ehdr/Phdr на месте, и только потом копируем
+// нужный кусок (по Program Header) в физическую память слота (elf_load,
+// elf.h). Размер - ровно потолок легального размера программы
+// (USER_ARGS_OFFSET - дальше начинается зона argv) плюс запас на
+// ELF-заголовки.
+//
+// ВАЖНО: это НЕ static-массив в .bss ядра (как можно было бы подумать) -
+// .bss ядра физически начинается сразу после .data по адресу __bss_start
+// и идёт ВВЕРХ от него (kernel.bin грузится с 0x1000), а GDT загрузочного
+// сектора живёт по 0x7c00-0x7e00 (см. предупреждение в kernel_entry.asm -
+// "если .bss ядра когда-нибудь дорастёт до 0x7c00, rep stosb стирает GDT
+// и валит систему в #GP -> тройной сбой"). ~32 КБ static-буфера тут же
+// утащили __bss_end далеко за 0x7c00 - проверено на практике (boot
+// триггерил ровно это: #GP -> #DF -> Triple fault). Поэтому, как и
+// PAGE_DIRECTORY/PAGE_TABLE (paging.h) и PD_POOL_BASE/PT_POOL_BASE -
+// фиксированный физический адрес в свободной зоне сразу после пула
+// PD/PT (0x124000+0x4000=0x128000), а не часть кучи ядра.
+#define ELF_STAGING_SIZE (USER_ARGS_OFFSET + 0x200)
+#define ELF_STAGING_BASE 0x128000
+#define elf_staging_buf ((unsigned char*)ELF_STAGING_BASE)
 
 // slot_free[i] == 1, если слот i свободен. "run" занимает первый свободный
 // слот; при завершении задачи (SYS_EXIT или killed page fault, см.
@@ -782,7 +806,8 @@ void sys_close(char* arg) {
     fd_table[fd].valid = 0;
 }
 
-// Общая логика запуска бинарника. Возвращает slot >= 0 или -1/-2.
+// Общая логика запуска бинарника. Возвращает slot >= 0, или -1 (файл не
+// найден/пуст), -2 (нет свободных слотов), -3 (файл не валидный ELF).
 static int do_exec(char* cmdline) {
     if (!cmdline) return -1;
 
@@ -810,8 +835,13 @@ static int do_exec(char* cmdline) {
     if (slot < 0) return -2;
 
     unsigned int addr = USER_PROGRAM_BASE + slot * USER_PROGRAM_SLOT_SIZE;
-    unsigned int size = vfs_read(filename, (unsigned char*)addr, USER_ARGS_OFFSET);
-    if (size == 0) return -1;
+    unsigned int file_size = vfs_read(filename, elf_staging_buf, ELF_STAGING_SIZE);
+    if (file_size == 0) return -1;
+
+    struct elf_load_result elf_res;
+    int elf_err = elf_load(elf_staging_buf, file_size, (unsigned char*)addr,
+                            USER_WINDOW_BASE, USER_ARGS_OFFSET, &elf_res);
+    if (elf_err != ELF_OK) return -3;
 
     char** argv_phys = (char**)(addr + USER_ARGS_OFFSET);
     char*  sp        = (char*)(addr + USER_ARGS_OFFSET + USER_ARGS_STR_OFF);
@@ -831,7 +861,7 @@ static int do_exec(char* cmdline) {
     }
     argv_phys[argc] = 0;
 
-    slot_heap_brk[slot] = USER_WINDOW_BASE + ((size + 15) & ~15u);
+    slot_heap_brk[slot] = USER_WINDOW_BASE + elf_res.max_vaddr_end;
     slot_free[slot] = 0;
     // Слот наследует консоль вызывающей задачи (caller_tty уже определена
     // ниже по файлу для syscall'ов, но do_exec идёт раньше - дублируем
@@ -841,7 +871,7 @@ static int do_exec(char* cmdline) {
         slot_tty[slot] = (caller_slot >= 0 && caller_slot < USER_PROGRAM_SLOTS)
             ? slot_tty[caller_slot] : tty_active();
     }
-    task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR);
+    task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR, elf_res.entry);
     return slot;
 }
 
@@ -1365,43 +1395,53 @@ void execute_command(char* cmd) {
             print_string("No free program slots, try again later.\n");
         } else {
             unsigned int addr = USER_PROGRAM_BASE + slot * USER_PROGRAM_SLOT_SIZE;
-            // Загружаем бинарник только в первые USER_ARGS_OFFSET байт слота
-            unsigned int size = vfs_read(filename, (unsigned char*)addr, USER_ARGS_OFFSET);
-            if (size == 0) {
+            // Читаем файл целиком во временный буфер - elf_load() сам
+            // разберёт заголовки и скопирует нужный кусок по нужному
+            // адресу (vfs_read/fat12_load не умеют читать "со смещения",
+            // см. elf.h).
+            unsigned int file_size = vfs_read(filename, elf_staging_buf, ELF_STAGING_SIZE);
+            if (file_size == 0) {
                 print_string("File not found.\n");
             } else {
-                // Строим argv-блок по физическому адресу (identity-mapped ядром).
-                // USER_ARGS_VADDR — виртуальный адрес того же места для задачи.
-                char** argv_phys = (char**)(addr + USER_ARGS_OFFSET);
-                char*  sp = (char*)(addr + USER_ARGS_OFFSET + USER_ARGS_STR_OFF);
-                unsigned int sv = USER_ARGS_VADDR + USER_ARGS_STR_OFF;
-                int argc = 0;
+                struct elf_load_result elf_res;
+                int elf_err = elf_load(elf_staging_buf, file_size, (unsigned char*)addr,
+                                        USER_WINDOW_BASE, USER_ARGS_OFFSET, &elf_res);
+                if (elf_err != ELF_OK) {
+                    print_string("Not a valid AxOS ELF executable.\n");
+                } else {
+                    // Строим argv-блок по физическому адресу (identity-mapped ядром).
+                    // USER_ARGS_VADDR — виртуальный адрес того же места для задачи.
+                    char** argv_phys = (char**)(addr + USER_ARGS_OFFSET);
+                    char*  sp = (char*)(addr + USER_ARGS_OFFSET + USER_ARGS_STR_OFF);
+                    unsigned int sv = USER_ARGS_VADDR + USER_ARGS_STR_OFF;
+                    int argc = 0;
 
-                // argv[0] = имя файла
-                argv_phys[argc++] = (char*)sv;
-                for (int i = 0; filename[i]; i++) { *sp++ = filename[i]; sv++; }
-                *sp++ = '\0'; sv++;
-
-                // argv[1..] — остаток командной строки, токен за токеном
-                char* p = rest + fi;
-                while (*p == ' ') p++;
-                while (*p && argc <= USER_ARGS_MAX_ARGC) {
+                    // argv[0] = имя файла
                     argv_phys[argc++] = (char*)sv;
-                    while (*p && *p != ' ') { *sp++ = *p++; sv++; }
+                    for (int i = 0; filename[i]; i++) { *sp++ = filename[i]; sv++; }
                     *sp++ = '\0'; sv++;
-                    while (*p == ' ') p++;
-                }
-                argv_phys[argc] = 0;  // argv[argc] = NULL (POSIX)
 
-                slot_heap_brk[slot] = USER_WINDOW_BASE + ((size + 15) & ~15u);
-                slot_free[slot] = 0;
-                // Запущенное отсюда (kernel-shell команда "run", в т.ч. из
-                // autoboot() и из авто-запуска AxSH при первом переключении
-                // на консоль) привязывается к консоли, с которой эта команда
-                // пришла - см. KERNEL_TTY_COUNT/slot_tty выше.
-                slot_tty[slot] = tty_active();
-                task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR);
-                print_string("Started.\n");
+                    // argv[1..] — остаток командной строки, токен за токеном
+                    char* p = rest + fi;
+                    while (*p == ' ') p++;
+                    while (*p && argc <= USER_ARGS_MAX_ARGC) {
+                        argv_phys[argc++] = (char*)sv;
+                        while (*p && *p != ' ') { *sp++ = *p++; sv++; }
+                        *sp++ = '\0'; sv++;
+                        while (*p == ' ') p++;
+                    }
+                    argv_phys[argc] = 0;  // argv[argc] = NULL (POSIX)
+
+                    slot_heap_brk[slot] = USER_WINDOW_BASE + elf_res.max_vaddr_end;
+                    slot_free[slot] = 0;
+                    // Запущенное отсюда (kernel-shell команда "run", в т.ч. из
+                    // autoboot() и из авто-запуска AxSH при первом переключении
+                    // на консоль) привязывается к консоли, с которой эта команда
+                    // пришла - см. KERNEL_TTY_COUNT/slot_tty выше.
+                    slot_tty[slot] = tty_active();
+                    task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR, elf_res.entry);
+                    print_string("Started.\n");
+                }
             }
         }
     } else if (str_eq(cmd, "usermode")) {

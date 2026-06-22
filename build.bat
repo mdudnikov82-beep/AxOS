@@ -47,6 +47,10 @@ echo Compiling Self-test (C)...
 gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/selftest.c -o build/selftest.o
 if %errorlevel% neq 0 goto :error
 
+echo Compiling ELF loader (C)...
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/elf.c -o build/elf.o
+if %errorlevel% neq 0 goto :error
+
 echo Compiling VFS (C)...
 gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/vfs.c -o build/vfs.o
 if %errorlevel% neq 0 goto :error
@@ -73,7 +77,7 @@ if %errorlevel% neq 0 goto :error
 
 echo Linking to PE...
 :: Линкуем в формат, который он понимает (i386pe)
-ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\syscalls.o build\usermode.o -o build\kernel.exe
+ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\elf.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\syscalls.o build\usermode.o -o build\kernel.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping to Binary...
@@ -106,8 +110,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\hello.exe build\hello.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\hello.bin build\hello.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\hello.bin fs\HELLO.BIN
+copy /b build\hello.elf fs\HELLO.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (exitdemo.c)...
@@ -122,8 +130,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\exitdemo.exe build\exitdemo.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\exitdemo.bin build\exitdemo.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\exitdemo.bin fs\EXIT.BIN
+copy /b build\exitdemo.elf fs\EXIT.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (crashdemo.c)...
@@ -138,8 +150,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\crashdemo.exe build\crashdemo.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\crashdemo.bin build\crashdemo.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\crashdemo.bin fs\CRASH.BIN
+copy /b build\crashdemo.elf fs\CRASH.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (echo.c)...
@@ -154,8 +170,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\echo.exe build\echo.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\echo.bin build\echo.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\echo.bin fs\ECHO.BIN
+copy /b build\echo.elf fs\ECHO.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (cat.c)...
@@ -170,8 +190,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\cat.exe build\cat.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\cat.bin build\cat.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\cat.bin fs\CAT.BIN
+copy /b build\cat.elf fs\CAT.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (sh.c)...
@@ -186,8 +210,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\sh.exe build\sh.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\sh.bin build\sh.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\sh.bin fs\SH.BIN
+copy /b build\sh.elf fs\SH.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (uptime.c)...
@@ -202,8 +230,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\uptime.exe build\uptime.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\uptime.bin build\uptime.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\uptime.bin fs\UPTIME.BIN
+copy /b build\uptime.elf fs\UPTIME.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (ls.c)...
@@ -218,8 +250,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\ls.exe build\ls.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\ls.bin build\ls.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\ls.bin fs\LS.BIN
+copy /b build\ls.elf fs\LS.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (sleep_test.c)...
@@ -234,8 +270,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\sleep_test.exe build\sleep_test.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\sleep_test.bin build\sleep_test.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\sleep_test.bin fs\SLEEP.BIN
+copy /b build\sleep_test.elf fs\SLEEP.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (malloc_test.c)...
@@ -250,8 +290,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\malloc_test.exe build\malloc_test.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\malloc_test.bin build\malloc_test.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\malloc_test.bin fs\MALLOC.BIN
+copy /b build\malloc_test.elf fs\MALLOC.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (rm.c)...
@@ -266,8 +310,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\rm.exe build\rm.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\rm.bin build\rm.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\rm.bin fs\RM.BIN
+copy /b build\rm.elf fs\RM.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (mkdir.c)...
@@ -282,8 +330,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\mkdir.exe build\mkdir.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\mkdir.bin build\mkdir.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\mkdir.bin fs\MKDIR.BIN
+copy /b build\mkdir.elf fs\MKDIR.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (ps.c)...
@@ -298,8 +350,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\ps.exe build\ps.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\ps.bin build\ps.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\ps.bin fs\PS.BIN
+copy /b build\ps.elf fs\PS.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (top.c)...
@@ -314,8 +370,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\top.exe build\top.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\top.bin build\top.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\top.bin fs\TOP.BIN
+copy /b build\top.elf fs\TOP.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (grep.c)...
@@ -330,8 +390,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\grep.exe build\grep.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\grep.bin build\grep.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\grep.bin fs\GREP.BIN
+copy /b build\grep.elf fs\GREP.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (write.c)...
@@ -346,8 +410,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\write.exe build\write.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\write.bin build\write.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\write.bin fs\WRITE.BIN
+copy /b build\write.elf fs\WRITE.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (disktool.c)...
@@ -362,8 +430,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\disktool.exe build\disktool.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\disktool.bin build\disktool.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\disktool.bin fs\DISKTOOL.BIN
+copy /b build\disktool.elf fs\DISKTOOL.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (fdtest.c)...
@@ -378,8 +450,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\fdtest.exe build\fdtest.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\fdtest.bin build\fdtest.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\fdtest.bin fs\FDTEST.BIN
+copy /b build\fdtest.elf fs\FDTEST.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (date.c)...
@@ -394,8 +470,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\date.exe build\date.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\date.bin build\date.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\date.bin fs\DATE.BIN
+copy /b build\date.elf fs\DATE.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (reboot.c)...
@@ -410,8 +490,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\reboot.exe build\reboot.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\reboot.bin build\reboot.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\reboot.bin fs\REBOOT.BIN
+copy /b build\reboot.elf fs\REBOOT.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (mouse.c)...
@@ -426,8 +510,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\mouse_tool.exe build\mouse_tool.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\mouse_tool.bin build\mouse_tool.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\mouse_tool.bin fs\MOUSE.BIN
+copy /b build\mouse_tool.elf fs\MOUSE.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (beep.c)...
@@ -442,8 +530,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\beep.exe build\beep.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\beep.bin build\beep.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\beep.bin fs\BEEP.BIN
+copy /b build\beep.elf fs\BEEP.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (clip.c)...
@@ -458,8 +550,12 @@ echo Stripping user program to flat binary...
 objcopy -O binary build\clip.exe build\clip.bin
 if %errorlevel% neq 0 goto :error
 
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\clip.bin build\clip.elf
+if %errorlevel% neq 0 goto :error
+
 echo Copying user program into fs/ for FAT12 image...
-copy /b build\clip.bin fs\CLIP.BIN
+copy /b build\clip.elf fs\CLIP.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Building FAT12 RAM-disk image from fs/...

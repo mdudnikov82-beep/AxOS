@@ -38,7 +38,7 @@ int  ax_fwrite(int fd, const void* buf, unsigned int n); // возвращает
 void ax_close(int fd);
 
 // Управление процессами
-int  ax_exec(char* cmdline);                        // запустить программу, вернуть slot или -1/-2
+int  ax_exec(char* cmdline);                        // запустить программу, вернуть slot или -1 (не найден) / -2 (нет слотов) / -3 (не валидный ELF)
 int  ax_exec_redir(char* cmdline, char* outfile);   // то же + перенаправить stdout в файл
 int  ax_task_alive(int slot);      // 1 = ещё работает, 0 = завершена
 void ax_shell_claim(int claim);    // 1 = захватить клавиатуру, 0 = вернуть ядру

@@ -150,6 +150,8 @@ int main(int argc, char** argv) {
                         ax_print("\033[31msh: pipe: right side not found\033[0m\n");
                     } else if (slot2 == -2) {
                         ax_print("\033[31msh: no free slots\033[0m\n");
+                    } else if (slot2 == -3) {
+                        ax_print("\033[31msh: pipe: right side not a valid executable\033[0m\n");
                     } else {
                         ax_set_foreground(slot2);
                         while (ax_task_alive(slot2)) { ax_sleep_ms(10); }
@@ -202,6 +204,8 @@ int main(int argc, char** argv) {
             ax_print("\033[31msh: not found\033[0m\n");
         } else if (slot == -2) {
             ax_print("\033[31msh: no free slots\033[0m\n");
+        } else if (slot == -3) {
+            ax_print("\033[31msh: not a valid executable\033[0m\n");
         } else if (has_bg) {
             ax_printf("\033[33m[%d] bg\033[0m\n", slot);
         } else {

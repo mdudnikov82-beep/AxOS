@@ -29,8 +29,13 @@ void task_create_user(char* name, void (*entry)(void));
 // argc/argv_vaddr - аргументы командной строки: kernel.c записывает блок
 // argv[] в phys_slot_base+USER_ARGS_OFFSET; argv_vaddr - его виртуальный
 // адрес (0x107C00). Задача получает argc в EBX, argv_vaddr в ECX при старте.
+// entry_vaddr - точка входа (EIP), которую сообщил ELF-загрузчик
+// (struct elf_load_result.entry, см. elf.h) - на практике сегодня всегда
+// совпадает с USER_WINDOW_BASE (любая программа линкуется с этого адреса,
+// см. src/user/user.ld), но теперь это решается данными из файла, а не
+// зашитой константой.
 void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index,
-                               int argc, unsigned int argv_vaddr);
+                               int argc, unsigned int argv_vaddr, unsigned int entry_vaddr);
 
 // Вызывается из idt.asm при каждом IRQ0: сохраняет esp текущей задачи,
 // переключается на следующую по кольцу и возвращает её esp. Если

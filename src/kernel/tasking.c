@@ -213,7 +213,7 @@ void task_create_user(char* name, void (*entry)(void)) {
 #define STACK_ASLR_MAX_SHIFT 64
 
 void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index,
-                               int argc, unsigned int argv_vaddr) {
+                               int argc, unsigned int argv_vaddr, unsigned int entry_vaddr) {
     unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
     if (!kstack) return;
 
@@ -224,14 +224,16 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     unsigned int stack_top = USER_STACK_TOP - stack_shift;
 
     // Кадр ring3->ring0, как в task_create_user, но EIP/ESP - виртуальные
-    // адреса окна 0x100000-0x108000 (одинаковые для любой задачи: окно
-    // переотображается на физический слот этой задачи в её приватном PD).
+    // адреса окна 0x100000-0x108000. ESP всегда у верха окна (одинаков
+    // для любой задачи, с ASLR-сдвигом); EIP - точка входа из ELF
+    // (entry_vaddr, обычно == USER_WINDOW_BASE, но не предполагается
+    // равным ей навечно - см. elf.h/elf_load).
     unsigned int* sp = (unsigned int*)(kstack + KSTACK_SIZE);
     *(--sp) = USER_DATA_SEG | 3;     // SS
     *(--sp) = stack_top;             // ESP: ниже верха окна, со случайным сдвигом (STACK_ASLR_MAX_SHIFT)
     *(--sp) = 0x202;                 // EFLAGS: IF=1
     *(--sp) = USER_CODE_SEG | 3;     // CS
-    *(--sp) = USER_WINDOW_BASE;        // EIP: начало окна (_start crt0)
+    *(--sp) = entry_vaddr;             // EIP: точка входа (ELF e_entry)
     *(--sp) = 0;                       // EAX
     *(--sp) = argv_vaddr;              // ECX = virtual ptr to argv[] array (0x107C00)
     *(--sp) = 0;                       // EDX
