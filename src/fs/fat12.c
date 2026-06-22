@@ -12,14 +12,12 @@
 // ide_write_sector - изменения переживают перезапуск QEMU.
 
 #include "ide.h"
+#include "fat12.h" // прототипы своих же функций - даёт компилятору проверить
+                    // сигнатуры (и константы FAT12_MKDIR_*/FAT12_DELETE_NOTFOUND)
+                    // внутри этого файла, а не только в местах вызова (vfs.c)
 
 #define FAT12_BASE 0x20000
 #define FAT12_TOTAL_SECTORS 512 // 256 КБ / 512 = TOTAL_SECTORS в make_fat12.py
-
-// Коды fat12_mkdir()/fat12_delete() помимо 0/1 - см. fat12.h.
-#define FAT12_MKDIR_EXISTS   -1
-#define FAT12_MKDIR_NOSPACE  -2
-#define FAT12_DELETE_NOTFOUND -1
 
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
