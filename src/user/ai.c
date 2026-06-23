@@ -26,6 +26,12 @@
 // случайной инициализацией веса иногда застревают в локальном минимуме
 // (проверено на 30 случайных сидах: 25/30 сходится) - 4 нейрона дают
 // избыточность, на 200 сидах сходится 200/200.
+//
+// "ai ask" - отдельный режим, не имеющий отношения к MLP выше: жёстко
+// заданная база вопрос/ответ про сам AxOS (см. QA_DB) с поиском
+// подстроки по ключевым словам. Никакого обучения тут нет - это просто
+// lookup, "ИИ" в названии относится к программе в целом, а не к этому
+// конкретному режиму.
 
 #define FX_BITS  16
 #define FX_SCALE (1 << FX_BITS)      // 1.0 в Q16.16
@@ -202,7 +208,115 @@ static const char* name_for(const int* ys) {
     return "?";
 }
 
+// =================================================================
+//  "ai ask" - жёстко заданная база вопрос/ответ про сам AxOS.
+//  Никакого ML тут нет - просто поиск подстроки по ключевым словам
+//  (см. QA_DB ниже), первое совпадение побеждает. Клавиатурный драйвер
+//  (kernel.c: scancode_to_char[]) понимает только ASCII/US-layout, так
+//  что вопросы и ответы - на английском, как и весь остальной UI ai.c.
+// =================================================================
+
+// Копирует src в dst в нижнем регистре (только A-Z), максимум max-1
+// символов + '\0' - своя версия strlen/tolower, их тут нет.
+static void lower_copy(const char* src, char* dst, int max) {
+    int i;
+    for (i = 0; i < max - 1 && src[i]; i++) {
+        char c = src[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        dst[i] = c;
+    }
+    dst[i] = '\0';
+}
+
+static int streq(const char* a, const char* b) {
+    while (*a && *b && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+// needle ненулевой, ищет его как подстроку в hay - оба уже в нижнем
+// регистре (lower_copy), сравнение тут чисто посимвольное.
+static int contains(const char* hay, const char* needle) {
+    for (int i = 0; hay[i]; i++) {
+        int j = 0;
+        while (needle[j] && hay[i + j] == needle[j]) j++;
+        if (needle[j] == '\0') return 1;
+    }
+    return 0;
+}
+
+#define QA_MAX_KEYWORDS 3
+
+static const struct { const char* keywords[QA_MAX_KEYWORDS]; const char* answer; } QA_DB[] = {
+    { { "who made you", "who wrote you", "author" },
+      "Maxim wrote AxOS as a personal systems-programming project." },
+    { { "what is axos", "what are you" },
+      "AxOS is a small 32-bit x86 OS: own bootloader, kernel, FAT12 "
+      "filesystem, MAC/MLS security, and ELF32 user programs." },
+    { { "hidden layer", "perceptron", "neuron" },
+      "This network is a 2-4-1 MLP: 2 inputs, 4 hidden neurons, 1 output, "
+      "trained by backpropagation." },
+    { { "xor" },
+      "XOR is the classic function a single-layer perceptron cannot learn "
+      "(Minsky/Papert) - that's why this MLP has a hidden layer." },
+    { { "fpu", "float", "double" },
+      "AxOS never initializes the FPU, so all math here (including this "
+      "network) is fixed-point Q16.16, not float." },
+    { { "syscall", "system call" },
+      "User programs talk to the kernel via int 0x80, dispatched by "
+      "syscall_dispatch() in kernel.c." },
+    { { "fat12", "filesystem", "disk" },
+      "AxOS uses a FAT12 filesystem on a raw IDE disk image (build/disk.img)." },
+    { { "mac", "selinux", "type enforcement" },
+      "AxOS has a SELinux-style Type Enforcement MAC layer: domains x "
+      "classes, denials logged as 'avc: denied'." },
+    { { "mls", "clearance", "sensitivity level" },
+      "AxOS supports MLS sensitivity levels s0-s15 with a no-read-up "
+      "dominance check on the clipboard." },
+    { { "elf", "loader" },
+      "User programs are real ELF32 executables, parsed by src/kernel/elf.c "
+      "- not flat binaries." },
+    { { "axos" },
+      "AxOS is a small 32-bit x86 OS written from scratch - see 'what is axos'." },
+    { { "help", "what can you do", "commands" },
+      "Ask me about axos, xor, fpu, syscalls, fat12, mac, mls, elf, or "
+      "neurons - or run 'ai <4 bits>' to train a boolean function." },
+};
+#define QA_COUNT (int)(sizeof(QA_DB) / sizeof(QA_DB[0]))
+
+static const char* find_answer(const char* q) {
+    for (int i = 0; i < QA_COUNT; i++) {
+        for (int k = 0; k < QA_MAX_KEYWORDS && QA_DB[i].keywords[k]; k++) {
+            if (contains(q, QA_DB[i].keywords[k])) return QA_DB[i].answer;
+        }
+    }
+    return "I don't know that one yet - try asking about axos, xor, fpu, "
+           "syscalls, fat12, mac, mls, elf, or neurons.";
+}
+
+static void run_ask_mode(void) {
+    ax_printf("\033[36m=== AxOS AI: ask me something (type 'exit' to quit) ===\033[0m\n");
+    char line[64];
+    char lower[64];
+    for (;;) {
+        ax_printf("? ");
+        ax_readline(line, sizeof(line));
+        if (line[0] == '\0') continue;
+        lower_copy(line, lower, sizeof(lower));
+        if (streq(lower, "exit") || streq(lower, "quit")) break;
+        ax_printf("%s\n", find_answer(lower));
+    }
+}
+
 int main(int argc, char** argv) {
+    if (argc > 1) {
+        char arg_lower[16];
+        lower_copy(argv[1], arg_lower, sizeof(arg_lower));
+        if (streq(arg_lower, "ask")) {
+            run_ask_mode();
+            return 0;
+        }
+    }
+
     int ys[4] = { 0, 1, 1, 0 };  // дефолт: XOR
     int have_pattern = 0;
 
@@ -222,7 +336,8 @@ int main(int argc, char** argv) {
     if (!have_pattern) {
         ax_printf("\033[36m=== AxOS AI: 2-4-1 MLP learns any 2-input boolean function ===\033[0m\n");
         ax_printf("Enter the 4 outputs for inputs 00,01,10,11 as a 4-bit string\n");
-        ax_printf("(e.g. 0110 = XOR, 0001 = AND, 0111 = OR), or Enter for XOR:\n");
+        ax_printf("(e.g. 0110 = XOR, 0001 = AND, 0111 = OR), or Enter for XOR.\n");
+        ax_printf("(Run 'ai ask' instead for a Q&A mode about AxOS itself.)\n");
 
         char line[16];
         for (int attempt = 0; attempt < 3 && !have_pattern; attempt++) {
