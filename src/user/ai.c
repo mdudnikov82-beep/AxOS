@@ -1,7 +1,8 @@
 #include "axiom.h"
 
 // =================================================================
-//  Игрушечная нейросеть: учится предсказывать XOR прямо в шелле.
+//  Игрушечная нейросеть: учится предсказывать ЛЮБУЮ булеву функцию
+//  двух аргументов прямо в шелле.
 // =================================================================
 //
 // Никакого float/double - в этом freestanding-окружении FPU не
@@ -13,10 +14,15 @@
 // вкомпилирована как константа), а не через exp() в рантайме.
 //
 // Архитектура: 2 входа -> 4 скрытых нейрона (сигмоида) -> 1 выход
-// (сигмоида), обучение - обратное распространение ошибки. XOR не
-// линейно разделим - однослойный перцептрон в принципе не может его
-// выучить (классический контрпример Минского/Паперта) - отсюда и
-// скрытый слой. 2 скрытых нейрона теоретически достаточно, но с
+// (сигмоида), обучение - обратное распространение ошибки. Таблица
+// истинности (4 бита - выходы для входов 00,01,10,11) задаётся
+// пользователем: аргументом командной строки ("ai 0110") или
+// интерактивно через ax_readline, по умолчанию - XOR. Из 2 входов
+// есть всего 16 различных булевых функций (см. KNOWN_FNS); XOR/XNOR -
+// самые сложные из них, не линейно разделимы - однослойный перцептрон
+// в принципе не может их выучить (классический контрпример
+// Минского/Паперта), отсюда и скрытый слой, которого достаточно для
+// всех 16. 2 скрытых нейрона теоретически достаточно для XOR, но с
 // случайной инициализацией веса иногда застревают в локальном минимуме
 // (проверено на 30 случайных сидах: 25/30 сходится) - 4 нейрона дают
 // избыточность, на 200 сидах сходится 200/200.
@@ -151,15 +157,93 @@ static int forward(int in0, int in1, int* hidden_out) {
 }
 
 static const int xs[4][2] = { {0, 0}, {0, 1}, {1, 0}, {1, 1} };
-static const int ys[4]    = { 0, 1, 1, 0 };
+
+// Парсит ровно 4 символа '0'/'1' из s (и завершающий '\0' сразу после
+// них) в out[0..3]. Возвращает 1 при успехе, 0 иначе - нет ни strlen,
+// ни atoi в этом freestanding-окружении, так что проверяем вручную.
+static int parse_bits(const char* s, int* out) {
+    int i;
+    for (i = 0; i < 4; i++) {
+        char c = s[i];
+        if (c != '0' && c != '1') return 0;
+        out[i] = c - '0';
+    }
+    return s[4] == '\0';
+}
+
+// Все 16 булевых функций двух аргументов - таблица истинности (выходы
+// для 00,01,10,11) однозначно определяет функцию, так что lookup
+// всегда находит совпадение.
+static const struct { int y0, y1, y2, y3; const char* name; } KNOWN_FNS[16] = {
+    { 0, 0, 0, 0, "FALSE (always 0)" },
+    { 0, 0, 0, 1, "AND" },
+    { 0, 0, 1, 0, "A AND NOT B" },
+    { 0, 0, 1, 1, "A (first input)" },
+    { 0, 1, 0, 0, "NOT A AND B" },
+    { 0, 1, 0, 1, "B (second input)" },
+    { 0, 1, 1, 0, "XOR" },
+    { 0, 1, 1, 1, "OR" },
+    { 1, 0, 0, 0, "NOR" },
+    { 1, 0, 0, 1, "XNOR" },
+    { 1, 0, 1, 0, "NOT B" },
+    { 1, 0, 1, 1, "A OR NOT B" },
+    { 1, 1, 0, 0, "NOT A" },
+    { 1, 1, 0, 1, "NOT A OR B" },
+    { 1, 1, 1, 0, "NAND" },
+    { 1, 1, 1, 1, "TRUE (always 1)" },
+};
+
+static const char* name_for(const int* ys) {
+    for (int i = 0; i < 16; i++) {
+        if (KNOWN_FNS[i].y0 == ys[0] && KNOWN_FNS[i].y1 == ys[1] &&
+            KNOWN_FNS[i].y2 == ys[2] && KNOWN_FNS[i].y3 == ys[3])
+            return KNOWN_FNS[i].name;
+    }
+    return "?";
+}
 
 int main(int argc, char** argv) {
-    (void)argc; (void)argv;
+    int ys[4] = { 0, 1, 1, 0 };  // дефолт: XOR
+    int have_pattern = 0;
+
+    if (argc > 1) {
+        if (parse_bits(argv[1], ys)) {
+            have_pattern = 1;
+        } else {
+            ax_printf("ai: invalid pattern \"%s\" (need 4 chars of 0/1, e.g. 0110). "
+                      "Defaulting to XOR.\n", argv[1]);
+            have_pattern = 1;  // ys уже = XOR
+        }
+    }
 
     rng_state = ax_get_ticks() ^ 0x9E3779B9u;
     if (rng_state == 0) rng_state = 0x9E3779B9u;
 
-    ax_printf("\033[36m=== AxOS AI demo: 2-4-1 MLP learns XOR ===\033[0m\n");
+    if (!have_pattern) {
+        ax_printf("\033[36m=== AxOS AI: 2-4-1 MLP learns any 2-input boolean function ===\033[0m\n");
+        ax_printf("Enter the 4 outputs for inputs 00,01,10,11 as a 4-bit string\n");
+        ax_printf("(e.g. 0110 = XOR, 0001 = AND, 0111 = OR), or Enter for XOR:\n");
+
+        char line[16];
+        for (int attempt = 0; attempt < 3 && !have_pattern; attempt++) {
+            ax_printf("> ");
+            ax_readline(line, sizeof(line));
+            if (line[0] == '\0') {
+                have_pattern = 1;  // ys уже = XOR
+            } else if (parse_bits(line, ys)) {
+                have_pattern = 1;
+            } else {
+                ax_printf("Invalid input, need exactly 4 chars of 0/1.\n");
+            }
+        }
+        if (!have_pattern) {
+            ax_printf("Giving up, defaulting to XOR.\n");
+            ys[0] = 0; ys[1] = 1; ys[2] = 1; ys[3] = 0;
+        }
+    }
+
+    ax_printf("\n\033[36m=== Training: %s (truth table %d%d%d%d) ===\033[0m\n",
+              name_for(ys), ys[0], ys[1], ys[2], ys[3]);
     ax_printf("fixed-point Q16.16, sigmoid LUT, backprop, %d epochs\n\n", EPOCHS);
 
     for (int j = 0; j < HIDDEN; j++) {
@@ -221,12 +305,12 @@ int main(int argc, char** argv) {
         int ok = (pred == ys[i]);
         all_ok &= ok;
 
-        ax_printf("  %d XOR %d = ", xs[i][0], xs[i][1]);
+        ax_printf("  f(%d, %d) = ", xs[i][0], xs[i][1]);
         print_fixed(o_out);
         ax_printf(" (target %d) %s\n", ys[i], ok ? "\033[32mOK\033[0m" : "\033[31mFAIL\033[0m");
     }
 
-    ax_printf("\n%s\n", all_ok ? "\033[32mPASS: network learned XOR\033[0m"
+    ax_printf("\n%s\n", all_ok ? "\033[32mPASS: network learned the function\033[0m"
                                 : "\033[31mFAIL: network did not converge\033[0m");
     return all_ok ? 0 : 1;
 }
