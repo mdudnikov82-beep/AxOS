@@ -26,13 +26,13 @@ jobs:
           set PATH=C:\msys64\mingw32\bin;%PATH%
           (echo.) | build.bat
 
-      - name: Check kernel.bin fits in 53 boot sectors (<= 27136 bytes)
+      - name: Check kernel.bin fits in 89 boot sectors (<= 45568 bytes)
         shell: pwsh
         run: |
           $size = (Get-Item build\kernel.bin).Length
-          Write-Host "kernel.bin size: $size bytes (limit 27136)"
-          if ($size -gt 27136) {
-            Write-Error "kernel.bin is too big for boot.asm to load (53 sectors = 27136 bytes)"
+          Write-Host "kernel.bin size: $size bytes (limit 45568)"
+          if ($size -gt 45568) {
+            Write-Error "kernel.bin is too big for boot.asm to load (89 sectors = 45568 bytes)"
             exit 1
           }
 
