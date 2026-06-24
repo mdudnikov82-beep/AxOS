@@ -38,6 +38,10 @@ def main():
 
         sock = connect_monitor(MONITOR_PORT)
         wait_for_text(sock, DUMP_FILE, ["AxSH v0.1"], timeout=BOOT_TIMEOUT_SEC)
+        # AxSH's own keyboard handling needs a moment after the banner
+        # appears - sending input immediately can drop/garble the first
+        # few characters (seen intermittently: "ai ask" -> "a ask").
+        time.sleep(1)
 
         # "exit" hands the keyboard from AxSH back to the kernel shell
         # (AUTOSTART=shell auto-launches AxSH on boot - see module docstring).

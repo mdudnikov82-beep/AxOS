@@ -44,6 +44,10 @@ def main():
 
         sock = connect_monitor(MONITOR_PORT)
         wait_for_text(sock, DUMP_FILE, ["AxSH v0.1"], timeout=BOOT_TIMEOUT_SEC)
+        # AxSH's own keyboard handling needs a moment after the banner
+        # appears - sending input immediately can drop/garble the first
+        # few characters.
+        time.sleep(1)
 
         # 1) AxSH path: ax_exec()/SYS_EXEC -> do_exec()
         send_text(sock, "echo axsh-exec-path-ok")

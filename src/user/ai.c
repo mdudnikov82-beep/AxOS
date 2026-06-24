@@ -583,18 +583,111 @@ static const struct { const char* keywords[QA_MAX_KEYWORDS]; const char* answer;
 };
 #define QA_COUNT (int)(sizeof(QA_DB) / sizeof(QA_DB[0]))
 
-static const char* find_answer(const char* q) {
+#define ASK_FALLBACK_MSG "I don't know that one yet - try asking about axos, xor, " \
+                          "fpu, syscalls, fat12, mac, mls, elf, or neurons."
+
+// NULL, а не ASK_FALLBACK_MSG, на отсутствие совпадения - вызывающему
+// (run_ask_mode) нужно отличить "правда не нашли" от "нашли", чтобы
+// решить, предлагать ли обучение (см. ниже).
+static const char* find_builtin_answer(const char* q) {
     for (int i = 0; i < QA_COUNT; i++) {
         for (int k = 0; k < QA_MAX_KEYWORDS && QA_DB[i].keywords[k]; k++) {
             if (contains(q, QA_DB[i].keywords[k])) return QA_DB[i].answer;
         }
     }
-    return "I don't know that one yet - try asking about axos, xor, fpu, "
-           "syscalls, fat12, mac, mls, elf, or neurons.";
+    return 0;
+}
+
+// =================================================================
+//  "ai ask" учится: когда ни встроенная QA_DB, ни уже выученные
+//  записи не дают ответа, предлагаем пользователю научить - вопрос
+//  (целиком, как ключевая фраза) и ответ сохраняются на FAT12 в AI.QA,
+//  тем же банковым механизмом, что и веса в AI.WTS (см. там) - тоже
+//  round-robin вытеснение, тоже требует unlock для записи, чтение
+//  тоже работает всегда. В памяти держим один банк на весь run_ask_mode
+//  (a не перечитываем с диска на каждый вопрос) - выученное в этой
+//  же сессии сразу доступно для повторного вопроса.
+// =================================================================
+#define LEARNED_FILE "AI.QA"
+#define LEARNED_MAX 16
+#define LEARNED_KEYWORD_LEN 64
+#define LEARNED_ANSWER_LEN 160
+
+typedef struct {
+    int used;
+    char keyword[LEARNED_KEYWORD_LEN];  // вопрос целиком, как его ввёл пользователь (в нижнем регистре)
+    char answer[LEARNED_ANSWER_LEN];
+} learned_entry_t;
+
+typedef struct {
+    int next_slot;
+    learned_entry_t entries[LEARNED_MAX];
+} learned_bank_t;
+
+static void load_learned_bank(learned_bank_t* bank) {
+    unsigned int n = ax_readfile(LEARNED_FILE, (unsigned char*)bank, sizeof(*bank));
+    if (n != sizeof(*bank)) {
+        bank->next_slot = 0;
+        for (int i = 0; i < LEARNED_MAX; i++) bank->entries[i].used = 0;
+    }
+}
+
+static const char* find_learned_answer(const learned_bank_t* bank, const char* q) {
+    for (int i = 0; i < LEARNED_MAX; i++) {
+        if (bank->entries[i].used && contains(q, bank->entries[i].keyword))
+            return bank->entries[i].answer;
+    }
+    return 0;
+}
+
+// Копирует ровно max-1 байт из src в dst (с '\0') - своя версия strncpy,
+// её тут нет.
+static void copy_truncated(char* dst, const char* src, int max) {
+    int i;
+    for (i = 0; i < max - 1 && src[i]; i++) dst[i] = src[i];
+    dst[i] = '\0';
+}
+
+// ax_writefile() отказывает, пока диск заблокирован - см. save_weights
+// (тот же случай, та же причина: fat12_locked=1 по умолчанию).
+static int save_learned(const char* keyword, const char* answer) {
+    // static, не локальная на стеке - sizeof(learned_bank_t) ~3.6 КБ,
+    // вместе с другими локалами превышает порог, после которого gcc
+    // вставляет вызов __chkstk_ms (проверка/рост стека большими кусками
+    // на Windows) - в этом freestanding-окружении такого хелпера нет,
+    // линковка падала с "undefined reference". Не реентерабельно, но
+    // эта функция и так не вызывается рекурсивно/из нескольких потоков.
+    static learned_bank_t bank;
+    load_learned_bank(&bank);
+
+    int slot = -1;
+    for (int i = 0; i < LEARNED_MAX; i++) {
+        if (bank.entries[i].used && streq(keyword, bank.entries[i].keyword)) { slot = i; break; }
+    }
+    if (slot < 0) {
+        for (int i = 0; i < LEARNED_MAX; i++) {
+            if (!bank.entries[i].used) { slot = i; break; }
+        }
+    }
+    if (slot < 0) {
+        slot = bank.next_slot;
+        bank.next_slot = (bank.next_slot + 1) % LEARNED_MAX;
+    }
+
+    learned_entry_t* e = &bank.entries[slot];
+    e->used = 1;
+    copy_truncated(e->keyword, keyword, LEARNED_KEYWORD_LEN);
+    copy_truncated(e->answer, answer, LEARNED_ANSWER_LEN);
+
+    return ax_writefile(LEARNED_FILE, (unsigned char*)&bank, sizeof(bank));
 }
 
 static void run_ask_mode(void) {
     print_boxed("AxOS AI: ask me something (type 'exit' to quit)", "\033[36m");
+
+    static learned_bank_t learned;  // см. комментарий в save_learned()
+    load_learned_bank(&learned);
+
     char line[64];
     char lower[64];
     for (;;) {
@@ -603,7 +696,48 @@ static void run_ask_mode(void) {
         if (line[0] == '\0') continue;
         lower_copy(line, lower, sizeof(lower));
         if (streq(lower, "exit") || streq(lower, "quit")) break;
-        ax_printf("\033[32mAI:\033[0m %s\n", find_answer(lower));
+
+        const char* ans = find_builtin_answer(lower);
+        if (!ans) ans = find_learned_answer(&learned, lower);
+
+        if (ans) {
+            ax_printf("\033[32mAI:\033[0m %s\n", ans);
+            continue;
+        }
+
+        ax_printf("\033[32mAI:\033[0m " ASK_FALLBACK_MSG "\n");
+        ax_printf("Teach me the answer? Type it now, or Enter to skip:\n");
+        ax_printf("\033[33m> \033[0m");
+        char teach[LEARNED_ANSWER_LEN];
+        ax_readline(teach, sizeof(teach));
+        if (teach[0] == '\0') continue;
+
+        // "exit"/"quit" здесь - это попытка выйти, не буквальный текст
+        // ответа (та же ловушка, что и в обычном "? "-промпте) - иначе
+        // пользователь, по привычке набравший "exit", навсегда обучил
+        // бы программу отвечать "exit" на этот вопрос.
+        char teach_lower[LEARNED_ANSWER_LEN];
+        lower_copy(teach, teach_lower, sizeof(teach_lower));
+        if (streq(teach_lower, "exit") || streq(teach_lower, "quit")) break;
+
+        if (save_learned(lower, teach)) {
+            // обновляем И диск, И in-memory копию - повторный вопрос в
+            // этой же сессии не должен снова просить научить.
+            load_learned_bank(&learned);
+            ax_printf("\033[32mAI:\033[0m Got it, thanks - I'll remember that.\n");
+        } else {
+            ax_printf("\033[33mAI:\033[0m Could not save (disk locked - run 'unlock' "
+                      "first to persist), but I'll remember it for this session.\n");
+            int slot = learned.next_slot;
+            learned.next_slot = (learned.next_slot + 1) % LEARNED_MAX;
+            for (int i = 0; i < LEARNED_MAX; i++) {
+                if (!learned.entries[i].used) { slot = i; break; }
+            }
+            learned_entry_t* e = &learned.entries[slot];
+            e->used = 1;
+            copy_truncated(e->keyword, lower, LEARNED_KEYWORD_LEN);
+            copy_truncated(e->answer, teach, LEARNED_ANSWER_LEN);
+        }
     }
 }
 
