@@ -2,6 +2,14 @@
 TSS_BASE  equ 0x9E000
 TSS_LIMIT equ 0x67 ; 104 байта - 1
 
+; RELOC_DELTA - поправка для gdt_descriptor ниже, если этот файл
+; подключён загрузчиком, который сам себя релоцирует (см. boot.asm).
+; boot_gfx.asm и другие, кто не релоцируется, его не определяют -
+; дефолт 0 (без поправки) сохраняет их поведение неизменным.
+%ifndef RELOC_DELTA
+%define RELOC_DELTA 0
+%endif
+
 gdt_start:
     dq 0x0
 
@@ -52,7 +60,11 @@ gdt_end:
 
 gdt_descriptor:
     dw gdt_end - gdt_start - 1
-    dd gdt_start
+    ; gdt_start - реальный физический адрес GDT нужен CPU для lgdt, а
+    ; RELOC_DELTA (boot.asm) - поправка после самоперемещения бутлоадера
+    ; на 0x0600 (см. там). Без неё lgdt указал бы на 0x7c00+offset, где
+    ; уже лежат данные с диска, а не GDT-таблица.
+    dd gdt_start + RELOC_DELTA
 
 CODE_SEG equ gdt_code - gdt_start
 DATA_SEG equ gdt_data - gdt_start
