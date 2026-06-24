@@ -139,7 +139,7 @@ def main():
     with open(out_path, 'wb') as f:
         f.write(image)
 
-    print(f"FAT12-раздел создан: {out_path} ({len(image)} bytes)")
+    print(f"FAT12 partition created: {out_path} ({len(image)} bytes)")
 
 
 if __name__ == '__main__':
