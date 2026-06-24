@@ -2,7 +2,7 @@
 
 // =================================================================
 //  Игрушечная нейросеть: учится предсказывать ЛЮБУЮ булеву функцию
-//  двух аргументов прямо в шелле.
+//  ТРЁХ аргументов прямо в шелле.
 // =================================================================
 //
 // Никакого float/double - в этом freestanding-окружении FPU не
@@ -13,19 +13,20 @@
 // заранее (см. tools/, генератор не входит в сборку - таблица просто
 // вкомпилирована как константа), а не через exp() в рантайме.
 //
-// Архитектура: 2 входа -> 4 скрытых нейрона (сигмоида) -> 1 выход
+// Архитектура: 3 входа -> 6 скрытых нейронов (сигмоида) -> 1 выход
 // (сигмоида), обучение - обратное распространение ошибки. Таблица
-// истинности (4 бита - выходы для входов 00,01,10,11) задаётся
-// пользователем: аргументом командной строки ("ai 0110") или
-// интерактивно через ax_readline, по умолчанию - XOR. Из 2 входов
-// есть всего 16 различных булевых функций (см. KNOWN_FNS); XOR/XNOR -
-// самые сложные из них, не линейно разделимы - однослойный перцептрон
-// в принципе не может их выучить (классический контрпример
-// Минского/Паперта), отсюда и скрытый слой, которого достаточно для
-// всех 16. 2 скрытых нейрона теоретически достаточно для XOR, но с
-// случайной инициализацией веса иногда застревают в локальном минимуме
-// (проверено на 30 случайных сидах: 25/30 сходится) - 4 нейрона дают
-// избыточность, на 200 сидах сходится 200/200.
+// истинности (8 бит - выходы для входов 000,001,010,011,100,101,110,111)
+// задаётся пользователем: аргументом командной строки ("ai 01101001")
+// или интерактивно через ax_readline, по умолчанию - parity (XOR трёх
+// входов). У 3 входов 2^8=256 различных булевых функций - в отличие от
+// версии на 2 входа (16 функций, помещались в exhaustive-таблицу
+// целиком), здесь именами покрыты только несколько "известных" (см.
+// KNOWN_FNS) - остальные печатаются просто как "custom". Parity/XOR3 и
+// XNOR3 - самые сложные из известных: не линейно разделимы (обобщение
+// контрпримера Минского/Паперта на 3 входа), отсюда и скрытый слой. С 4
+// скрытыми нейронами (как в 2-входовой версии) parity иногда не
+// сходилась за отведённые эпохи - 6 нейронов и больше эпох дают
+// устойчивую сходимость.
 //
 // "ai ask" - отдельный режим, не имеющий отношения к MLP выше: жёстко
 // заданная база вопрос/ответ про сам AxOS (см. QA_DB) с поиском
@@ -38,9 +39,11 @@
 #define FX_HALF  (FX_SCALE / 2)      // 0.5
 #define LR_FX    FX_HALF             // learning rate = 0.5
 
-#define HIDDEN   4
-#define EPOCHS   5000
-#define PRINT_INTERVAL 500
+#define INPUTS   3
+#define ROWS     8              // 1 << INPUTS - строк в таблице истинности
+#define HIDDEN   6
+#define EPOCHS   8000
+#define PRINT_INTERVAL 800
 
 static int fx_mul(int a, int b) {
     // 32x32->64 - один аппаратный imul, без вызовов libgcc (проверено
@@ -237,16 +240,17 @@ static void print_progress_bar(int epoch, int total_epochs, int err_fx) {
     ax_putchar('\n');
 }
 
-static int w1[2][HIDDEN];   // вход i -> скрытый j
+static int w1[INPUTS][HIDDEN];   // вход i -> скрытый j
 static int b1[HIDDEN];
-static int w2[HIDDEN];      // скрытый j -> выход
+static int w2[HIDDEN];           // скрытый j -> выход
 static int b2;
 
 // Прямой проход: возвращает выход сети, заполняет hidden_out[HIDDEN]
 // (нужны backprop'у, чтобы не пересчитывать дважды).
-static int forward(int in0, int in1, int* hidden_out) {
+static int forward(int in0, int in1, int in2, int* hidden_out) {
     for (int j = 0; j < HIDDEN; j++) {
-        int h_in = fx_mul(in0, w1[0][j]) + fx_mul(in1, w1[1][j]) + b1[j];
+        int h_in = fx_mul(in0, w1[0][j]) + fx_mul(in1, w1[1][j]) +
+                   fx_mul(in2, w1[2][j]) + b1[j];
         hidden_out[j] = sigmoid_fx(h_in);
     }
     int o_in = b2;
@@ -254,63 +258,65 @@ static int forward(int in0, int in1, int* hidden_out) {
     return sigmoid_fx(o_in);
 }
 
-static const int xs[4][2] = { {0, 0}, {0, 1}, {1, 0}, {1, 1} };
+static const int xs[ROWS][INPUTS] = {
+    { 0, 0, 0 }, { 0, 0, 1 }, { 0, 1, 0 }, { 0, 1, 1 },
+    { 1, 0, 0 }, { 1, 0, 1 }, { 1, 1, 0 }, { 1, 1, 1 },
+};
 
-// Парсит ровно 4 символа '0'/'1' из s (и завершающий '\0' сразу после
-// них) в out[0..3]. Возвращает 1 при успехе, 0 иначе - нет ни strlen,
-// ни atoi в этом freestanding-окружении, так что проверяем вручную.
+// Парсит ровно ROWS символов '0'/'1' из s (и завершающий '\0' сразу
+// после них) в out[0..ROWS-1]. Возвращает 1 при успехе, 0 иначе - нет
+// ни strlen, ни atoi в этом freestanding-окружении, так что проверяем
+// вручную.
 static int parse_bits(const char* s, int* out) {
     int i;
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < ROWS; i++) {
         char c = s[i];
         if (c != '0' && c != '1') return 0;
         out[i] = c - '0';
     }
-    return s[4] == '\0';
+    return s[ROWS] == '\0';
 }
 
-// Все 16 булевых функций двух аргументов - таблица истинности (выходы
-// для 00,01,10,11) однозначно определяет функцию, так что lookup
-// всегда находит совпадение.
-static const struct { int y0, y1, y2, y3; const char* name; } KNOWN_FNS[16] = {
-    { 0, 0, 0, 0, "FALSE (always 0)" },
-    { 0, 0, 0, 1, "AND" },
-    { 0, 0, 1, 0, "A AND NOT B" },
-    { 0, 0, 1, 1, "A (first input)" },
-    { 0, 1, 0, 0, "NOT A AND B" },
-    { 0, 1, 0, 1, "B (second input)" },
-    { 0, 1, 1, 0, "XOR" },
-    { 0, 1, 1, 1, "OR" },
-    { 1, 0, 0, 0, "NOR" },
-    { 1, 0, 0, 1, "XNOR" },
-    { 1, 0, 1, 0, "NOT B" },
-    { 1, 0, 1, 1, "A OR NOT B" },
-    { 1, 1, 0, 0, "NOT A" },
-    { 1, 1, 0, 1, "NOT A OR B" },
-    { 1, 1, 1, 0, "NAND" },
-    { 1, 1, 1, 1, "TRUE (always 1)" },
+// Из 256 булевых функций трёх аргументов именами покрыты только
+// несколько "известных" - в отличие от 2-входовой версии, где таблица
+// была исчерпывающей (16 функций = 16 записей), здесь lookup может не
+// найти совпадение - тогда name_for() возвращает generic-строку.
+static const struct { int bits[ROWS]; const char* name; } KNOWN_FNS[] = {
+    { { 0, 0, 0, 0, 0, 0, 0, 0 }, "FALSE (always 0)" },
+    { { 1, 1, 1, 1, 1, 1, 1, 1 }, "TRUE (always 1)" },
+    { { 0, 0, 0, 0, 0, 0, 0, 1 }, "AND (A&B&C)" },
+    { { 0, 1, 1, 1, 1, 1, 1, 1 }, "OR (A|B|C)" },
+    { { 1, 1, 1, 1, 1, 1, 1, 0 }, "NAND" },
+    { { 1, 0, 0, 0, 0, 0, 0, 0 }, "NOR" },
+    { { 0, 1, 1, 0, 1, 0, 0, 1 }, "XOR/parity (odd # of 1s)" },
+    { { 1, 0, 0, 1, 0, 1, 1, 0 }, "XNOR (even # of 1s)" },
+    { { 0, 0, 0, 1, 0, 1, 1, 1 }, "MAJORITY (2 or more of 3)" },
 };
+#define KNOWN_FNS_COUNT (int)(sizeof(KNOWN_FNS) / sizeof(KNOWN_FNS[0]))
 
 static const char* name_for(const int* ys) {
-    for (int i = 0; i < 16; i++) {
-        if (KNOWN_FNS[i].y0 == ys[0] && KNOWN_FNS[i].y1 == ys[1] &&
-            KNOWN_FNS[i].y2 == ys[2] && KNOWN_FNS[i].y3 == ys[3])
-            return KNOWN_FNS[i].name;
+    for (int i = 0; i < KNOWN_FNS_COUNT; i++) {
+        int match = 1;
+        for (int j = 0; j < ROWS; j++) {
+            if (KNOWN_FNS[i].bits[j] != ys[j]) { match = 0; break; }
+        }
+        if (match) return KNOWN_FNS[i].name;
     }
-    return "?";
+    return "custom (no common name)";
 }
 
-// Таблица финальных предсказаний - 5 колонок, ширина каждой включает
-// рамки и обе окружающие content пробела (см. print_cell). Те же ширины
-// используются для горизонтальных линий, иначе рамка не совпадёт со
-// столбцами.
-static const int PRED_TABLE_WIDTHS[5] = { 3, 3, 11, 8, 8 };
+// Таблица финальных предсказаний - колонки A/B/C/predicted/target/status;
+// ширина каждой включает рамки и оба окружающих content пробела (см.
+// print_cell). Те же ширины используются для горизонтальных линий,
+// иначе рамка не совпадёт со столбцами.
+#define PRED_TABLE_COLS 6
+static const int PRED_TABLE_WIDTHS[PRED_TABLE_COLS] = { 3, 3, 3, 11, 8, 8 };
 
 static void print_table_border(char left, char mid, char right) {
     ax_putchar(left);
-    for (int c = 0; c < 5; c++) {
+    for (int c = 0; c < PRED_TABLE_COLS; c++) {
         for (int i = 0; i < PRED_TABLE_WIDTHS[c]; i++) ax_putchar('\xC4');
-        ax_putchar(c < 4 ? mid : right);
+        ax_putchar(c < PRED_TABLE_COLS - 1 ? mid : right);
     }
     ax_putchar('\n');
 }
@@ -379,11 +385,11 @@ static const struct { const char* keywords[QA_MAX_KEYWORDS]; const char* answer;
       "AxOS is a small 32-bit x86 OS: own bootloader, kernel, FAT12 "
       "filesystem, MAC/MLS security, and ELF32 user programs." },
     { { "hidden layer", "perceptron", "neuron" },
-      "This network is a 2-4-1 MLP: 2 inputs, 4 hidden neurons, 1 output, "
+      "This network is a 3-6-1 MLP: 3 inputs, 6 hidden neurons, 1 output, "
       "trained by backpropagation." },
     { { "xor" },
-      "XOR is the classic function a single-layer perceptron cannot learn "
-      "(Minsky/Papert) - that's why this MLP has a hidden layer." },
+      "XOR (parity) is the classic function a single-layer perceptron "
+      "cannot learn (Minsky/Papert) - that's why this MLP has a hidden layer." },
     { { "fpu", "float", "double" },
       "AxOS never initializes the FPU, so all math here (including this "
       "network) is fixed-point Q16.16, not float." },
@@ -405,7 +411,7 @@ static const struct { const char* keywords[QA_MAX_KEYWORDS]; const char* answer;
       "AxOS is a small 32-bit x86 OS written from scratch - see 'what is axos'." },
     { { "help", "what can you do", "commands" },
       "Ask me about axos, xor, fpu, syscalls, fat12, mac, mls, elf, or "
-      "neurons - or run 'ai <4 bits>' to train a boolean function." },
+      "neurons - or run 'ai <8 bits>' to train a 3-input boolean function." },
 };
 #define QA_COUNT (int)(sizeof(QA_DB) / sizeof(QA_DB[0]))
 
@@ -443,16 +449,18 @@ int main(int argc, char** argv) {
         }
     }
 
-    int ys[4] = { 0, 1, 1, 0 };  // дефолт: XOR
+    // дефолт: parity/XOR3 (0,1,1,0,1,0,0,1) - самая сложная из известных
+    // функций, как и XOR был дефолтом в 2-входовой версии.
+    int ys[ROWS] = { 0, 1, 1, 0, 1, 0, 0, 1 };
     int have_pattern = 0;
 
     if (argc > 1) {
         if (parse_bits(argv[1], ys)) {
             have_pattern = 1;
         } else {
-            ax_printf("ai: invalid pattern \"%s\" (need 4 chars of 0/1, e.g. 0110). "
-                      "Defaulting to XOR.\n", argv[1]);
-            have_pattern = 1;  // ys уже = XOR
+            ax_printf("ai: invalid pattern \"%s\" (need 8 chars of 0/1, e.g. 01101001). "
+                      "Defaulting to parity.\n", argv[1]);
+            have_pattern = 1;  // ys уже = parity
         }
     }
 
@@ -460,9 +468,10 @@ int main(int argc, char** argv) {
     if (rng_state == 0) rng_state = 0x9E3779B9u;
 
     if (!have_pattern) {
-        print_boxed("AxOS AI: 2-4-1 MLP learns any 2-input boolean function", "\033[36m");
-        ax_printf("Enter the 4 outputs for inputs 00,01,10,11 as a 4-bit string\n");
-        ax_printf("(e.g. 0110 = XOR, 0001 = AND, 0111 = OR), or Enter for XOR.\n");
+        print_boxed("AxOS AI: 3-6-1 MLP learns any 3-input boolean function", "\033[36m");
+        ax_printf("Enter the 8 outputs for inputs 000,001,010,011,100,101,110,111\n");
+        ax_printf("as an 8-bit string (e.g. 01101001 = parity/XOR3, 00010111 =\n");
+        ax_printf("majority, 00000001 = AND3), or Enter for parity.\n");
         ax_printf("(Run 'ai ask' instead for a Q&A mode about AxOS itself.)\n");
 
         char line[16];
@@ -470,29 +479,27 @@ int main(int argc, char** argv) {
             ax_printf("\033[33m> \033[0m");
             ax_readline(line, sizeof(line));
             if (line[0] == '\0') {
-                have_pattern = 1;  // ys уже = XOR
+                have_pattern = 1;  // ys уже = parity
             } else if (parse_bits(line, ys)) {
                 have_pattern = 1;
             } else {
-                ax_printf("Invalid input, need exactly 4 chars of 0/1.\n");
+                ax_printf("Invalid input, need exactly 8 chars of 0/1.\n");
             }
         }
         if (!have_pattern) {
-            ax_printf("Giving up, defaulting to XOR.\n");
-            ys[0] = 0; ys[1] = 1; ys[2] = 1; ys[3] = 0;
+            ax_printf("Giving up, defaulting to parity.\n");
+            int parity[ROWS] = { 0, 1, 1, 0, 1, 0, 0, 1 };
+            for (int i = 0; i < ROWS; i++) ys[i] = parity[i];
         }
     }
 
     {
-        char banner[64];
+        char banner[96];
         int pos = 0;
         pos = append_str(banner, pos, "Training: ");
         pos = append_str(banner, pos, name_for(ys));
         pos = append_str(banner, pos, " (truth table ");
-        banner[pos++] = (char)('0' + ys[0]);
-        banner[pos++] = (char)('0' + ys[1]);
-        banner[pos++] = (char)('0' + ys[2]);
-        banner[pos++] = (char)('0' + ys[3]);
+        for (int i = 0; i < ROWS; i++) banner[pos++] = (char)('0' + ys[i]);
         banner[pos++] = ')';
         banner[pos] = '\0';
         ax_putchar('\n');
@@ -503,6 +510,7 @@ int main(int argc, char** argv) {
     for (int j = 0; j < HIDDEN; j++) {
         w1[0][j] = rnd_weight_fx();
         w1[1][j] = rnd_weight_fx();
+        w1[2][j] = rnd_weight_fx();
         b1[j]    = rnd_weight_fx();
         w2[j]    = rnd_weight_fx();
     }
@@ -511,13 +519,14 @@ int main(int argc, char** argv) {
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
         int total_err = 0;
 
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < ROWS; i++) {
             int in0 = xs[i][0] ? FX_SCALE : 0;
             int in1 = xs[i][1] ? FX_SCALE : 0;
+            int in2 = xs[i][2] ? FX_SCALE : 0;
             int tgt = ys[i]    ? FX_SCALE : 0;
 
             int hidden[HIDDEN];
-            int o_out = forward(in0, in1, hidden);
+            int o_out = forward(in0, in1, in2, hidden);
 
             int err = tgt - o_out;
             total_err += (err < 0) ? -err : err;
@@ -537,6 +546,7 @@ int main(int argc, char** argv) {
             for (int j = 0; j < HIDDEN; j++) {
                 w1[0][j] += fx_mul(LR_FX, fx_mul(h_delta[j], in0));
                 w1[1][j] += fx_mul(LR_FX, fx_mul(h_delta[j], in1));
+                w1[2][j] += fx_mul(LR_FX, fx_mul(h_delta[j], in2));
                 b1[j]    += fx_mul(LR_FX, h_delta[j]);
             }
         }
@@ -551,34 +561,38 @@ int main(int argc, char** argv) {
     print_table_border('\xDA', '\xC2', '\xBF');
     print_cell(PRED_TABLE_WIDTHS[0], "A");
     print_cell(PRED_TABLE_WIDTHS[1], "B");
-    print_cell(PRED_TABLE_WIDTHS[2], "predicted");
-    print_cell(PRED_TABLE_WIDTHS[3], "target");
-    print_cell(PRED_TABLE_WIDTHS[4], "status");
+    print_cell(PRED_TABLE_WIDTHS[2], "C");
+    print_cell(PRED_TABLE_WIDTHS[3], "predicted");
+    print_cell(PRED_TABLE_WIDTHS[4], "target");
+    print_cell(PRED_TABLE_WIDTHS[5], "status");
     ax_putchar('\xB3');
     ax_putchar('\n');
     print_table_border('\xC3', '\xC5', '\xB4');
 
     int all_ok = 1;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < ROWS; i++) {
         int in0 = xs[i][0] ? FX_SCALE : 0;
         int in1 = xs[i][1] ? FX_SCALE : 0;
+        int in2 = xs[i][2] ? FX_SCALE : 0;
         int hidden[HIDDEN];
-        int o_out = forward(in0, in1, hidden);
+        int o_out = forward(in0, in1, in2, hidden);
         int pred = (o_out > FX_HALF) ? 1 : 0;
         int ok = (pred == ys[i]);
         all_ok &= ok;
 
         char a_str[2] = { (char)('0' + xs[i][0]), '\0' };
         char b_str[2] = { (char)('0' + xs[i][1]), '\0' };
+        char c_str[2] = { (char)('0' + xs[i][2]), '\0' };
         char target_str[2] = { (char)('0' + ys[i]), '\0' };
         char pred_str[16];
         fixed_to_str(o_out, pred_str);
 
         print_cell(PRED_TABLE_WIDTHS[0], a_str);
         print_cell(PRED_TABLE_WIDTHS[1], b_str);
-        print_cell(PRED_TABLE_WIDTHS[2], pred_str);
-        print_cell(PRED_TABLE_WIDTHS[3], target_str);
-        print_cell_colored(PRED_TABLE_WIDTHS[4], ok ? "OK" : "FAIL",
+        print_cell(PRED_TABLE_WIDTHS[2], c_str);
+        print_cell(PRED_TABLE_WIDTHS[3], pred_str);
+        print_cell(PRED_TABLE_WIDTHS[4], target_str);
+        print_cell_colored(PRED_TABLE_WIDTHS[5], ok ? "OK" : "FAIL",
                             ok ? "\033[32m" : "\033[31m");
         ax_putchar('\xB3');
         ax_putchar('\n');
