@@ -28,6 +28,16 @@
 // сходилась за отведённые эпохи - 6 нейронов и больше эпох дают
 // устойчивую сходимость.
 //
+// Веса переживают выход из программы: после успешного обучения (только
+// если all_ok - несошедшуюся модель сохранять бессмысленно) пишутся на
+// FAT12 в AI.WTS (см. save_weights/load_weights) вместе с обученным ys,
+// чтобы следующий запуск с ТЕМ ЖЕ паттерном просто загрузил готовые
+// веса и сразу показал таблицу, без повторного обучения. Запись требует
+// разблокированного диска (fat12.c: fat12_locked=1 по умолчанию,
+// команда "unlock" в AxSH) - если диск заблокирован, просто
+// предупреждаем и работаем как раньше (без сохранения); чтение не
+// требует unlock вообще.
+//
 // "ai ask" - отдельный режим, не имеющий отношения к MLP выше: жёстко
 // заданная база вопрос/ответ про сам AxOS (см. QA_DB) с поиском
 // подстроки по ключевым словам. Никакого обучения тут нет - это просто
@@ -256,6 +266,67 @@ static int forward(int in0, int in1, int in2, int* hidden_out) {
     int o_in = b2;
     for (int j = 0; j < HIDDEN; j++) o_in += fx_mul(hidden_out[j], w2[j]);
     return sigmoid_fx(o_in);
+}
+
+// =================================================================
+//  Сохранение/загрузка обученных весов на FAT12 (AI.WTS) - сеть не
+//  забывает выученное после выхода. Файл - один raw-блоб (sizeof
+//  saved_weights_t, без версионирования формата: сборка одна и та же,
+//  читает и пишет только этот же ai.bin), хранит И веса, И паттерн
+//  (ys), под который они обучены - при следующем запуске грузим
+//  только если запрошенный паттерн совпадает с сохранённым, иначе
+//  обучаем заново (старые веса для другой функции бесполезны).
+// =================================================================
+#define WEIGHTS_FILE "AI.WTS"
+
+typedef struct {
+    int ys[ROWS];
+    int w1[INPUTS][HIDDEN];
+    int b1[HIDDEN];
+    int w2[HIDDEN];
+    int b2;
+} saved_weights_t;
+
+static int ys_equal(const int* a, const int* b) {
+    for (int i = 0; i < ROWS; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+// Возвращает 1 и загружает w1/b1/w2/b2, если на диске есть веса именно
+// для этого ys; иначе 0 (веса не трогает - обучение пойдёт как обычно).
+// Чтение не требует unlock - fat12_read_file() не проверяет блокировку,
+// в отличие от записи (см. save_weights).
+static int load_weights(const int* ys) {
+    saved_weights_t saved;
+    unsigned int n = ax_readfile(WEIGHTS_FILE, (unsigned char*)&saved, sizeof(saved));
+    if (n != sizeof(saved)) return 0;
+    if (!ys_equal(saved.ys, ys)) return 0;
+
+    for (int i = 0; i < INPUTS; i++)
+        for (int j = 0; j < HIDDEN; j++) w1[i][j] = saved.w1[i][j];
+    for (int j = 0; j < HIDDEN; j++) { b1[j] = saved.b1[j]; w2[j] = saved.w2[j]; }
+    b2 = saved.b2;
+    return 1;
+}
+
+// ax_writefile() отказывает, пока диск заблокирован (fat12_locked=1 по
+// умолчанию - см. fat12.c) - тогда просто предупреждаем и не падаем,
+// как и write.bin в этом же случае.
+static void save_weights(const int* ys) {
+    saved_weights_t saved;
+    for (int i = 0; i < ROWS; i++) saved.ys[i] = ys[i];
+    for (int i = 0; i < INPUTS; i++)
+        for (int j = 0; j < HIDDEN; j++) saved.w1[i][j] = w1[i][j];
+    for (int j = 0; j < HIDDEN; j++) { saved.b1[j] = b1[j]; saved.w2[j] = w2[j]; }
+    saved.b2 = b2;
+
+    if (ax_writefile(WEIGHTS_FILE, (unsigned char*)&saved, sizeof(saved))) {
+        ax_printf("\033[32mSaved trained weights to %s\033[0m - next run with this "
+                  "pattern will skip training.\n", WEIGHTS_FILE);
+    } else {
+        ax_printf("\033[33mCould not save weights (disk locked - run 'unlock' first "
+                  "to persist).\033[0m\n");
+    }
 }
 
 static const int xs[ROWS][INPUTS] = {
@@ -493,10 +564,12 @@ int main(int argc, char** argv) {
         }
     }
 
+    int loaded = load_weights(ys);
+
     {
         char banner[96];
         int pos = 0;
-        pos = append_str(banner, pos, "Training: ");
+        pos = append_str(banner, pos, loaded ? "Loaded: " : "Training: ");
         pos = append_str(banner, pos, name_for(ys));
         pos = append_str(banner, pos, " (truth table ");
         for (int i = 0; i < ROWS; i++) banner[pos++] = (char)('0' + ys[i]);
@@ -505,54 +578,60 @@ int main(int argc, char** argv) {
         ax_putchar('\n');
         print_boxed(banner, "\033[36m");
     }
-    ax_printf("fixed-point Q16.16, sigmoid LUT, backprop, %d epochs\n\n", EPOCHS);
 
-    for (int j = 0; j < HIDDEN; j++) {
-        w1[0][j] = rnd_weight_fx();
-        w1[1][j] = rnd_weight_fx();
-        w1[2][j] = rnd_weight_fx();
-        b1[j]    = rnd_weight_fx();
-        w2[j]    = rnd_weight_fx();
-    }
-    b2 = rnd_weight_fx();
+    if (loaded) {
+        ax_printf("Found saved weights for this pattern in %s - skipping training.\n\n",
+                  WEIGHTS_FILE);
+    } else {
+        ax_printf("fixed-point Q16.16, sigmoid LUT, backprop, %d epochs\n\n", EPOCHS);
 
-    for (int epoch = 0; epoch < EPOCHS; epoch++) {
-        int total_err = 0;
-
-        for (int i = 0; i < ROWS; i++) {
-            int in0 = xs[i][0] ? FX_SCALE : 0;
-            int in1 = xs[i][1] ? FX_SCALE : 0;
-            int in2 = xs[i][2] ? FX_SCALE : 0;
-            int tgt = ys[i]    ? FX_SCALE : 0;
-
-            int hidden[HIDDEN];
-            int o_out = forward(in0, in1, in2, hidden);
-
-            int err = tgt - o_out;
-            total_err += (err < 0) ? -err : err;
-
-            // backprop: delta = error * sigmoid'(out), sigmoid'(s) = s*(1-s)
-            int o_delta = fx_mul(err, fx_mul(o_out, FX_SCALE - o_out));
-
-            int h_delta[HIDDEN];
-            for (int j = 0; j < HIDDEN; j++) {
-                h_delta[j] = fx_mul(fx_mul(o_delta, w2[j]),
-                                     fx_mul(hidden[j], FX_SCALE - hidden[j]));
-            }
-
-            for (int j = 0; j < HIDDEN; j++) w2[j] += fx_mul(LR_FX, fx_mul(o_delta, hidden[j]));
-            b2 += fx_mul(LR_FX, o_delta);
-
-            for (int j = 0; j < HIDDEN; j++) {
-                w1[0][j] += fx_mul(LR_FX, fx_mul(h_delta[j], in0));
-                w1[1][j] += fx_mul(LR_FX, fx_mul(h_delta[j], in1));
-                w1[2][j] += fx_mul(LR_FX, fx_mul(h_delta[j], in2));
-                b1[j]    += fx_mul(LR_FX, h_delta[j]);
-            }
+        for (int j = 0; j < HIDDEN; j++) {
+            w1[0][j] = rnd_weight_fx();
+            w1[1][j] = rnd_weight_fx();
+            w1[2][j] = rnd_weight_fx();
+            b1[j]    = rnd_weight_fx();
+            w2[j]    = rnd_weight_fx();
         }
+        b2 = rnd_weight_fx();
 
-        if (epoch % PRINT_INTERVAL == 0 || epoch == EPOCHS - 1) {
-            print_progress_bar(epoch, EPOCHS, total_err);
+        for (int epoch = 0; epoch < EPOCHS; epoch++) {
+            int total_err = 0;
+
+            for (int i = 0; i < ROWS; i++) {
+                int in0 = xs[i][0] ? FX_SCALE : 0;
+                int in1 = xs[i][1] ? FX_SCALE : 0;
+                int in2 = xs[i][2] ? FX_SCALE : 0;
+                int tgt = ys[i]    ? FX_SCALE : 0;
+
+                int hidden[HIDDEN];
+                int o_out = forward(in0, in1, in2, hidden);
+
+                int err = tgt - o_out;
+                total_err += (err < 0) ? -err : err;
+
+                // backprop: delta = error * sigmoid'(out), sigmoid'(s) = s*(1-s)
+                int o_delta = fx_mul(err, fx_mul(o_out, FX_SCALE - o_out));
+
+                int h_delta[HIDDEN];
+                for (int j = 0; j < HIDDEN; j++) {
+                    h_delta[j] = fx_mul(fx_mul(o_delta, w2[j]),
+                                         fx_mul(hidden[j], FX_SCALE - hidden[j]));
+                }
+
+                for (int j = 0; j < HIDDEN; j++) w2[j] += fx_mul(LR_FX, fx_mul(o_delta, hidden[j]));
+                b2 += fx_mul(LR_FX, o_delta);
+
+                for (int j = 0; j < HIDDEN; j++) {
+                    w1[0][j] += fx_mul(LR_FX, fx_mul(h_delta[j], in0));
+                    w1[1][j] += fx_mul(LR_FX, fx_mul(h_delta[j], in1));
+                    w1[2][j] += fx_mul(LR_FX, fx_mul(h_delta[j], in2));
+                    b1[j]    += fx_mul(LR_FX, h_delta[j]);
+                }
+            }
+
+            if (epoch % PRINT_INTERVAL == 0 || epoch == EPOCHS - 1) {
+                print_progress_bar(epoch, EPOCHS, total_err);
+            }
         }
     }
 
@@ -598,6 +677,12 @@ int main(int argc, char** argv) {
         ax_putchar('\n');
     }
     print_table_border('\xC0', '\xC1', '\xD9');
+
+    // Сохраняем только то, что только что обучили и что реально сошлось -
+    // переписывать уже сохранённые (loaded) веса самими же ними бессмысленно,
+    // а сохранять несошедшуюся (all_ok=0) модель ещё хуже - следующий запуск
+    // загрузил бы её и доложил "PASS" не пытаясь обучиться вообще.
+    if (!loaded && all_ok) save_weights(ys);
 
     ax_printf("\n%s\n", all_ok ? "\033[32mPASS: network learned the function\033[0m"
                                 : "\033[31mFAIL: network did not converge\033[0m");
