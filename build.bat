@@ -3,6 +3,12 @@ setlocal
 :: Указываем путь к папке w64devkit
 set "PATH=%~dp0w64devkit\bin;%PATH%"
 
+:: build/ - в .gitignore, не коммитится; на чистом чекауте (CI) её ещё
+:: нет, а первая запись в неё (boot.bin ниже) идёт раньше, чем mkdir
+:: build\libaxiom дальше в скрипте - без этой строки nasm падает с
+:: unable to open output file на самом первом шаге.
+if not exist build mkdir build
+
 echo Compiling boot...
 .\tools\nasm.exe -f bin src\boot\boot.asm -o build\boot.bin
 if %errorlevel% neq 0 goto :error
