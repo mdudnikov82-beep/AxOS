@@ -135,14 +135,106 @@ static int rnd_weight_fx(void) {
     return (int)(rng_next() % (unsigned int)(2 * FX_SCALE + 1)) - FX_SCALE;
 }
 
-static void print_fixed(int v) {
+// Пишет "[-]D.DDDD" в buf (с '\0') вместо печати - нужно для таблицы
+// предсказаний ниже, где значение должно влезть в выровненную ячейку.
+static void fixed_to_str(int v, char* buf) {
     unsigned int uv;
-    if (v < 0) { ax_putchar('-'); uv = (unsigned int)(-v); }
+    int i = 0;
+    if (v < 0) { buf[i++] = '-'; uv = (unsigned int)(-v); }
     else uv = (unsigned int)v;
     unsigned int ip = uv >> FX_BITS;
     unsigned int frac = uv & (FX_SCALE - 1);
     unsigned int dec = (frac * 10000u) >> FX_BITS;  // frac/65536 * 10000
-    ax_printf("%u.%04u", ip, dec);
+
+    char ip_digits[12];
+    int n = 0;
+    if (ip == 0) ip_digits[n++] = '0';
+    while (ip > 0) { ip_digits[n++] = (char)('0' + ip % 10); ip /= 10; }
+    while (n > 0) buf[i++] = ip_digits[--n];
+
+    buf[i++] = '.';
+    buf[i++] = (char)('0' + (dec / 1000) % 10);
+    buf[i++] = (char)('0' + (dec / 100) % 10);
+    buf[i++] = (char)('0' + (dec / 10) % 10);
+    buf[i++] = (char)('0' + dec % 10);
+    buf[i] = '\0';
+}
+
+static void print_fixed(int v) {
+    char buf[16];
+    fixed_to_str(v, buf);
+    ax_printf("%s", buf);
+}
+
+// ASCII-art UI ниже - коробки/таблицы/прогресс-бар через CP437
+// box-drawing/block-элементы (аппаратный VGA-текстовый шрифт всегда
+// содержит CP437, независимо от настроек ОС, так что эти байты рисуются
+// как линии/блоки, а не мусор). \xB3/\xC4/... ниже - это именно эти
+// глифы, не control-коды.
+
+static int slen(const char* s) { int n = 0; while (s[n]) n++; return n; }
+
+static int append_str(char* buf, int pos, const char* s) {
+    while (*s) buf[pos++] = *s++;
+    return pos;
+}
+
+// Левосторонне выравнивает text в поле шириной width пробелами - аналог
+// "%-Ns", но с шириной из переменной (ax_printf понимает только
+// литеральную ширину в самой строке формата).
+static void print_padded(const char* text, int width) {
+    int i = 0;
+    while (text[i] && i < width) { ax_putchar(text[i]); i++; }
+    while (i < width) { ax_putchar(' '); i++; }
+}
+
+// Рисует рамку вокруг text (однострочный текст, ширина по содержимому)
+// в цвете color (ANSI SGR-код типа "\033[36m") - замена старому "=== ... ===".
+static void print_boxed(const char* text, const char* color) {
+    int len = slen(text);
+    ax_printf("%s", color);
+
+    ax_putchar('\xDA');
+    for (int i = 0; i < len + 2; i++) ax_putchar('\xC4');
+    ax_putchar('\xBF');
+    ax_putchar('\n');
+
+    ax_putchar('\xB3');
+    ax_putchar(' ');
+    ax_printf("%s", text);
+    ax_putchar(' ');
+    ax_putchar('\xB3');
+    ax_putchar('\n');
+
+    ax_putchar('\xC0');
+    for (int i = 0; i < len + 2; i++) ax_putchar('\xC4');
+    ax_putchar('\xD9');
+    ax_putchar('\n');
+
+    ax_printf("\033[0m");
+}
+
+// Живой прогресс-бар обучения вместо плоского списка "epoch N: err=...".
+// Цвет полосы по величине ошибки - чисто косметика, ошибка и так печатается
+// числом рядом.
+static void print_progress_bar(int epoch, int total_epochs, int err_fx) {
+    const int BAR_WIDTH = 20;
+    int filled = (epoch + 1) * BAR_WIDTH / total_epochs;
+    if (filled > BAR_WIDTH) filled = BAR_WIDTH;
+    int pct = (epoch + 1) * 100 / total_epochs;
+
+    const char* color;
+    if (err_fx > FX_SCALE) color = "\033[31m";            // err > 1.0 - красный
+    else if (err_fx > FX_SCALE / 5) color = "\033[33m";    // 0.2-1.0 - желтый
+    else color = "\033[32m";                                // < 0.2 - зелёный
+
+    ax_printf("epoch %5d/%d %s[", epoch, total_epochs, color);
+    int i = 0;
+    for (; i < filled; i++) ax_putchar('\xDB');
+    for (; i < BAR_WIDTH; i++) ax_putchar('\xB0');
+    ax_printf("]\033[0m %3d%%  err=", pct);
+    print_fixed(err_fx);
+    ax_putchar('\n');
 }
 
 static int w1[2][HIDDEN];   // вход i -> скрытый j
@@ -206,6 +298,40 @@ static const char* name_for(const int* ys) {
             return KNOWN_FNS[i].name;
     }
     return "?";
+}
+
+// Таблица финальных предсказаний - 5 колонок, ширина каждой включает
+// рамки и обе окружающие content пробела (см. print_cell). Те же ширины
+// используются для горизонтальных линий, иначе рамка не совпадёт со
+// столбцами.
+static const int PRED_TABLE_WIDTHS[5] = { 3, 3, 11, 8, 8 };
+
+static void print_table_border(char left, char mid, char right) {
+    ax_putchar(left);
+    for (int c = 0; c < 5; c++) {
+        for (int i = 0; i < PRED_TABLE_WIDTHS[c]; i++) ax_putchar('\xC4');
+        ax_putchar(c < 4 ? mid : right);
+    }
+    ax_putchar('\n');
+}
+
+static void print_cell(int width, const char* text) {
+    ax_putchar('\xB3');
+    ax_putchar(' ');
+    print_padded(text, width - 2);
+    ax_putchar(' ');
+}
+
+// Цвет применяется отдельными ax_printf-вызовами вокруг print_padded, а
+// не внутри её аргумента - иначе невидимые ANSI-байты посчитались бы в
+// ширину поля и таблица бы "поехала".
+static void print_cell_colored(int width, const char* text, const char* color) {
+    ax_putchar('\xB3');
+    ax_putchar(' ');
+    ax_printf("%s", color);
+    print_padded(text, width - 2);
+    ax_printf("\033[0m");
+    ax_putchar(' ');
 }
 
 // =================================================================
@@ -294,16 +420,16 @@ static const char* find_answer(const char* q) {
 }
 
 static void run_ask_mode(void) {
-    ax_printf("\033[36m=== AxOS AI: ask me something (type 'exit' to quit) ===\033[0m\n");
+    print_boxed("AxOS AI: ask me something (type 'exit' to quit)", "\033[36m");
     char line[64];
     char lower[64];
     for (;;) {
-        ax_printf("? ");
+        ax_printf("\033[33m? \033[0m");
         ax_readline(line, sizeof(line));
         if (line[0] == '\0') continue;
         lower_copy(line, lower, sizeof(lower));
         if (streq(lower, "exit") || streq(lower, "quit")) break;
-        ax_printf("%s\n", find_answer(lower));
+        ax_printf("\033[32mAI:\033[0m %s\n", find_answer(lower));
     }
 }
 
@@ -334,14 +460,14 @@ int main(int argc, char** argv) {
     if (rng_state == 0) rng_state = 0x9E3779B9u;
 
     if (!have_pattern) {
-        ax_printf("\033[36m=== AxOS AI: 2-4-1 MLP learns any 2-input boolean function ===\033[0m\n");
+        print_boxed("AxOS AI: 2-4-1 MLP learns any 2-input boolean function", "\033[36m");
         ax_printf("Enter the 4 outputs for inputs 00,01,10,11 as a 4-bit string\n");
         ax_printf("(e.g. 0110 = XOR, 0001 = AND, 0111 = OR), or Enter for XOR.\n");
         ax_printf("(Run 'ai ask' instead for a Q&A mode about AxOS itself.)\n");
 
         char line[16];
         for (int attempt = 0; attempt < 3 && !have_pattern; attempt++) {
-            ax_printf("> ");
+            ax_printf("\033[33m> \033[0m");
             ax_readline(line, sizeof(line));
             if (line[0] == '\0') {
                 have_pattern = 1;  // ys уже = XOR
@@ -357,8 +483,21 @@ int main(int argc, char** argv) {
         }
     }
 
-    ax_printf("\n\033[36m=== Training: %s (truth table %d%d%d%d) ===\033[0m\n",
-              name_for(ys), ys[0], ys[1], ys[2], ys[3]);
+    {
+        char banner[64];
+        int pos = 0;
+        pos = append_str(banner, pos, "Training: ");
+        pos = append_str(banner, pos, name_for(ys));
+        pos = append_str(banner, pos, " (truth table ");
+        banner[pos++] = (char)('0' + ys[0]);
+        banner[pos++] = (char)('0' + ys[1]);
+        banner[pos++] = (char)('0' + ys[2]);
+        banner[pos++] = (char)('0' + ys[3]);
+        banner[pos++] = ')';
+        banner[pos] = '\0';
+        ax_putchar('\n');
+        print_boxed(banner, "\033[36m");
+    }
     ax_printf("fixed-point Q16.16, sigmoid LUT, backprop, %d epochs\n\n", EPOCHS);
 
     for (int j = 0; j < HIDDEN; j++) {
@@ -403,13 +542,22 @@ int main(int argc, char** argv) {
         }
 
         if (epoch % PRINT_INTERVAL == 0 || epoch == EPOCHS - 1) {
-            ax_printf("epoch %5d: total_err=", epoch);
-            print_fixed(total_err);
-            ax_putchar('\n');
+            print_progress_bar(epoch, EPOCHS, total_err);
         }
     }
 
     ax_printf("\n\033[36mFinal predictions:\033[0m\n");
+
+    print_table_border('\xDA', '\xC2', '\xBF');
+    print_cell(PRED_TABLE_WIDTHS[0], "A");
+    print_cell(PRED_TABLE_WIDTHS[1], "B");
+    print_cell(PRED_TABLE_WIDTHS[2], "predicted");
+    print_cell(PRED_TABLE_WIDTHS[3], "target");
+    print_cell(PRED_TABLE_WIDTHS[4], "status");
+    ax_putchar('\xB3');
+    ax_putchar('\n');
+    print_table_border('\xC3', '\xC5', '\xB4');
+
     int all_ok = 1;
     for (int i = 0; i < 4; i++) {
         int in0 = xs[i][0] ? FX_SCALE : 0;
@@ -420,10 +568,22 @@ int main(int argc, char** argv) {
         int ok = (pred == ys[i]);
         all_ok &= ok;
 
-        ax_printf("  f(%d, %d) = ", xs[i][0], xs[i][1]);
-        print_fixed(o_out);
-        ax_printf(" (target %d) %s\n", ys[i], ok ? "\033[32mOK\033[0m" : "\033[31mFAIL\033[0m");
+        char a_str[2] = { (char)('0' + xs[i][0]), '\0' };
+        char b_str[2] = { (char)('0' + xs[i][1]), '\0' };
+        char target_str[2] = { (char)('0' + ys[i]), '\0' };
+        char pred_str[16];
+        fixed_to_str(o_out, pred_str);
+
+        print_cell(PRED_TABLE_WIDTHS[0], a_str);
+        print_cell(PRED_TABLE_WIDTHS[1], b_str);
+        print_cell(PRED_TABLE_WIDTHS[2], pred_str);
+        print_cell(PRED_TABLE_WIDTHS[3], target_str);
+        print_cell_colored(PRED_TABLE_WIDTHS[4], ok ? "OK" : "FAIL",
+                            ok ? "\033[32m" : "\033[31m");
+        ax_putchar('\xB3');
+        ax_putchar('\n');
     }
+    print_table_border('\xC0', '\xC1', '\xD9');
 
     ax_printf("\n%s\n", all_ok ? "\033[32mPASS: network learned the function\033[0m"
                                 : "\033[31mFAIL: network did not converge\033[0m");
