@@ -16,15 +16,15 @@ import subprocess
 import sys
 import time
 
-from qemu_test_helpers import connect_monitor, dump_screen, launch_qemu, send_text
+from qemu_test_helpers import connect_monitor, dump_screen, launch_qemu, send_text, wait_for_text
 
 IMAGE = os.path.join("build", "os-image.bin")
 DISK_IMAGE = os.path.join("build", "disk.img")
 MONITOR_PORT = 55593
 DUMP_FILE = "vga_dump_ai_ask.bin"
-BOOT_WAIT_SEC = 10
+BOOT_TIMEOUT_SEC = 60
 POLL_INTERVAL_SEC = 1
-MAX_WAIT_SEC = 20
+MAX_WAIT_SEC = 30
 
 
 def unwrapped(screen):
@@ -60,9 +60,10 @@ def main():
     ok = True
     screen_banner = screen_q1 = screen_q2 = screen_fallback = screen_exit = ""
     try:
-        time.sleep(BOOT_WAIT_SEC)
+        time.sleep(2)  # let QEMU's own host-side monitor server come up
 
         sock = connect_monitor(MONITOR_PORT)
+        wait_for_text(sock, DUMP_FILE, ["AxSH v0.1"], timeout=BOOT_TIMEOUT_SEC)
 
         send_text(sock, "ai ask")
         sock.sendall(b"sendkey ret\n")
@@ -85,7 +86,7 @@ def main():
 
         send_text(sock, "exit")
         sock.sendall(b"sendkey ret\n")
-        time.sleep(1.5)
+        time.sleep(3)
         screen_exit = dump_screen(sock, DUMP_FILE)
 
         sock.sendall(b"quit\n")

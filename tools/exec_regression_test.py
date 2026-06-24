@@ -19,13 +19,14 @@ import subprocess
 import sys
 import time
 
-from qemu_test_helpers import connect_monitor, dump_screen, launch_qemu, send_text
+from qemu_test_helpers import connect_monitor, launch_qemu, send_text, wait_for_text
 
 IMAGE = os.path.join("build", "os-image.bin")
 DISK_IMAGE = os.path.join("build", "disk.img")
 MONITOR_PORT = 55592
 DUMP_FILE = "vga_dump_exec.bin"
-BOOT_WAIT_SEC = 10
+BOOT_TIMEOUT_SEC = 60
+STEP_TIMEOUT_SEC = 30
 
 
 def main():
@@ -39,24 +40,25 @@ def main():
     screen_axsh = ""
     screen_run = ""
     try:
-        time.sleep(BOOT_WAIT_SEC)
+        time.sleep(2)  # let QEMU's own host-side monitor server come up
 
         sock = connect_monitor(MONITOR_PORT)
+        wait_for_text(sock, DUMP_FILE, ["AxSH v0.1"], timeout=BOOT_TIMEOUT_SEC)
 
         # 1) AxSH path: ax_exec()/SYS_EXEC -> do_exec()
         send_text(sock, "echo axsh-exec-path-ok")
         sock.sendall(b"sendkey ret\n")
-        time.sleep(1.5)
-        screen_axsh = dump_screen(sock, DUMP_FILE)
+        screen_axsh = wait_for_text(sock, DUMP_FILE, ["axsh-exec-path-ok"],
+                                    timeout=STEP_TIMEOUT_SEC)
 
         # 2) kernel-shell path: execute_command()'s own "run " branch
         send_text(sock, "exit")
         sock.sendall(b"sendkey ret\n")
-        time.sleep(1.5)
+        wait_for_text(sock, DUMP_FILE, ["AxOS>"], timeout=STEP_TIMEOUT_SEC)
         send_text(sock, "run ECHO.BIN run-path-ok")
         sock.sendall(b"sendkey ret\n")
-        time.sleep(1.5)
-        screen_run = dump_screen(sock, DUMP_FILE)
+        screen_run = wait_for_text(sock, DUMP_FILE, ["run-path-ok", "Not a valid AxOS ELF executable"],
+                                   timeout=STEP_TIMEOUT_SEC)
 
         sock.sendall(b"quit\n")
         time.sleep(1)

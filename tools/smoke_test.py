@@ -8,13 +8,13 @@ import subprocess
 import sys
 import time
 
-from qemu_test_helpers import connect_monitor, dump_screen, launch_qemu
+from qemu_test_helpers import connect_monitor, launch_qemu, wait_for_text
 
 IMAGE = os.path.join("build", "os-image.bin")
 DISK_IMAGE = os.path.join("build", "disk.img")
 MONITOR_PORT = 55590
 DUMP_FILE = "vga_dump.bin"
-BOOT_WAIT_SEC = 10
+BOOT_TIMEOUT_SEC = 60
 
 
 def main():
@@ -25,10 +25,10 @@ def main():
     proc = launch_qemu(IMAGE, DISK_IMAGE, MONITOR_PORT)
 
     try:
-        time.sleep(BOOT_WAIT_SEC)
-
+        time.sleep(2)  # let QEMU's own host-side monitor server come up
         sock = connect_monitor(MONITOR_PORT)
-        screen = dump_screen(sock, DUMP_FILE, settle_sec=1)
+        screen = wait_for_text(sock, DUMP_FILE, ["Welcome to AxOS!", "AxSH v0.1"],
+                                timeout=BOOT_TIMEOUT_SEC)
         sock.sendall(b"quit\n")
         time.sleep(1)
         sock.close()

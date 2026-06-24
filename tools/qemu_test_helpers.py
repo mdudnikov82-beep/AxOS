@@ -100,3 +100,23 @@ def dump_screen(sock, dump_file="vga_dump.bin", settle_sec=0.3):
         data = f.read()
     os.remove(dump_file)
     return "\n".join(decode_vga(data))
+
+
+def wait_for_text(sock, dump_file, needles, timeout=60, poll_interval=2):
+    """Опрашивает экран, пока не появится любая строка из needles, или не
+    истечёт timeout. Раньше каждый тест делал один фиксированный
+    time.sleep(BOOT_WAIT_SEC) перед первым dump_screen - ок на локальной
+    машине с аппаратным ускорением QEMU (KVM/HAXM), но GitHub Actions
+    Windows runner-ы его не дают, так что QEMU там работает в чистой
+    программной эмуляции (TCG) и грузится заметно дольше: на CI 10
+    секунд не хватало даже на загрузочный баннер - VGA-экран приходил
+    полностью пустым. Поллинг переживает разную скорость хоста, в
+    отличие от угаданной константы."""
+    deadline = time.time() + timeout
+    screen = ""
+    while time.time() < deadline:
+        screen = dump_screen(sock, dump_file)
+        if any(n in screen for n in needles):
+            return screen
+        time.sleep(poll_interval)
+    return screen
