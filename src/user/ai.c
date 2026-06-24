@@ -268,67 +268,6 @@ static int forward(int in0, int in1, int in2, int* hidden_out) {
     return sigmoid_fx(o_in);
 }
 
-// =================================================================
-//  Сохранение/загрузка обученных весов на FAT12 (AI.WTS) - сеть не
-//  забывает выученное после выхода. Файл - один raw-блоб (sizeof
-//  saved_weights_t, без версионирования формата: сборка одна и та же,
-//  читает и пишет только этот же ai.bin), хранит И веса, И паттерн
-//  (ys), под который они обучены - при следующем запуске грузим
-//  только если запрошенный паттерн совпадает с сохранённым, иначе
-//  обучаем заново (старые веса для другой функции бесполезны).
-// =================================================================
-#define WEIGHTS_FILE "AI.WTS"
-
-typedef struct {
-    int ys[ROWS];
-    int w1[INPUTS][HIDDEN];
-    int b1[HIDDEN];
-    int w2[HIDDEN];
-    int b2;
-} saved_weights_t;
-
-static int ys_equal(const int* a, const int* b) {
-    for (int i = 0; i < ROWS; i++) if (a[i] != b[i]) return 0;
-    return 1;
-}
-
-// Возвращает 1 и загружает w1/b1/w2/b2, если на диске есть веса именно
-// для этого ys; иначе 0 (веса не трогает - обучение пойдёт как обычно).
-// Чтение не требует unlock - fat12_read_file() не проверяет блокировку,
-// в отличие от записи (см. save_weights).
-static int load_weights(const int* ys) {
-    saved_weights_t saved;
-    unsigned int n = ax_readfile(WEIGHTS_FILE, (unsigned char*)&saved, sizeof(saved));
-    if (n != sizeof(saved)) return 0;
-    if (!ys_equal(saved.ys, ys)) return 0;
-
-    for (int i = 0; i < INPUTS; i++)
-        for (int j = 0; j < HIDDEN; j++) w1[i][j] = saved.w1[i][j];
-    for (int j = 0; j < HIDDEN; j++) { b1[j] = saved.b1[j]; w2[j] = saved.w2[j]; }
-    b2 = saved.b2;
-    return 1;
-}
-
-// ax_writefile() отказывает, пока диск заблокирован (fat12_locked=1 по
-// умолчанию - см. fat12.c) - тогда просто предупреждаем и не падаем,
-// как и write.bin в этом же случае.
-static void save_weights(const int* ys) {
-    saved_weights_t saved;
-    for (int i = 0; i < ROWS; i++) saved.ys[i] = ys[i];
-    for (int i = 0; i < INPUTS; i++)
-        for (int j = 0; j < HIDDEN; j++) saved.w1[i][j] = w1[i][j];
-    for (int j = 0; j < HIDDEN; j++) { saved.b1[j] = b1[j]; saved.w2[j] = w2[j]; }
-    saved.b2 = b2;
-
-    if (ax_writefile(WEIGHTS_FILE, (unsigned char*)&saved, sizeof(saved))) {
-        ax_printf("\033[32mSaved trained weights to %s\033[0m - next run with this "
-                  "pattern will skip training.\n", WEIGHTS_FILE);
-    } else {
-        ax_printf("\033[33mCould not save weights (disk locked - run 'unlock' first "
-                  "to persist).\033[0m\n");
-    }
-}
-
 static const int xs[ROWS][INPUTS] = {
     { 0, 0, 0 }, { 0, 0, 1 }, { 0, 1, 0 }, { 0, 1, 1 },
     { 1, 0, 0 }, { 1, 0, 1 }, { 1, 1, 0 }, { 1, 1, 1 },
@@ -374,6 +313,138 @@ static const char* name_for(const int* ys) {
         if (match) return KNOWN_FNS[i].name;
     }
     return "custom (no common name)";
+}
+
+// =================================================================
+//  Сохранение/загрузка обученных весов на FAT12 (AI.WTS) - сеть не
+//  забывает выученное после выхода. Файл - "банк" из BANK_SIZE слотов
+//  (а не одни веса под одну функцию): можно обучить parity, потом
+//  majority, потом AND - каждая своя, без переобучения при переключении
+//  между уже выученными паттернами. used=0 - слот свободен. Когда банк
+//  полон и совпадения нет, next_slot задаёт round-robin вытеснение
+//  (циклически переписываем слоты по порядку, простейшая FIFO-замена
+//  без реального учёта времени последнего использования).
+// =================================================================
+#define WEIGHTS_FILE "AI.WTS"
+#define BANK_SIZE 8
+
+typedef struct {
+    int used;
+    int ys[ROWS];
+    int w1[INPUTS][HIDDEN];
+    int b1[HIDDEN];
+    int w2[HIDDEN];
+    int b2;
+} bank_entry_t;
+
+typedef struct {
+    int next_slot;               // round-robin индекс для вытеснения
+    bank_entry_t entries[BANK_SIZE];
+} weights_bank_t;
+
+static int ys_equal(const int* a, const int* b) {
+    for (int i = 0; i < ROWS; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+// Читает банк с диска в bank; если файла нет/не того размера - чистый
+// банк (все слоты свободны), как при самом первом запуске. Чтение не
+// требует unlock - fat12_read_file() не проверяет блокировку, в
+// отличие от записи (см. save_weights).
+static void load_bank(weights_bank_t* bank) {
+    unsigned int n = ax_readfile(WEIGHTS_FILE, (unsigned char*)bank, sizeof(*bank));
+    if (n != sizeof(*bank)) {
+        bank->next_slot = 0;
+        for (int i = 0; i < BANK_SIZE; i++) bank->entries[i].used = 0;
+    }
+}
+
+// Возвращает 1 и загружает w1/b1/w2/b2, если в банке есть слот именно
+// для этого ys; иначе 0 (веса не трогает - обучение пойдёт как обычно).
+static int load_weights(const int* ys) {
+    weights_bank_t bank;
+    load_bank(&bank);
+
+    for (int i = 0; i < BANK_SIZE; i++) {
+        bank_entry_t* e = &bank.entries[i];
+        if (!e->used || !ys_equal(e->ys, ys)) continue;
+
+        for (int a = 0; a < INPUTS; a++)
+            for (int j = 0; j < HIDDEN; j++) w1[a][j] = e->w1[a][j];
+        for (int j = 0; j < HIDDEN; j++) { b1[j] = e->b1[j]; w2[j] = e->w2[j]; }
+        b2 = e->b2;
+        return 1;
+    }
+    return 0;
+}
+
+// ax_writefile() отказывает, пока диск заблокирован (fat12_locked=1 по
+// умолчанию - см. fat12.c) - тогда просто предупреждаем и не падаем,
+// как и write.bin в этом же случае. Слот выбирается в порядке:
+// существующий слот с тем же ys (перезапись) -> первый свободный ->
+// next_slot по кругу (банк полон, вытесняем по FIFO).
+static void save_weights(const int* ys) {
+    weights_bank_t bank;
+    load_bank(&bank);
+
+    int slot = -1;
+    for (int i = 0; i < BANK_SIZE; i++) {
+        if (bank.entries[i].used && ys_equal(bank.entries[i].ys, ys)) { slot = i; break; }
+    }
+    if (slot < 0) {
+        for (int i = 0; i < BANK_SIZE; i++) {
+            if (!bank.entries[i].used) { slot = i; break; }
+        }
+    }
+    int evicted = (slot < 0);
+    if (slot < 0) {
+        slot = bank.next_slot;
+        bank.next_slot = (bank.next_slot + 1) % BANK_SIZE;
+    }
+
+    bank_entry_t* e = &bank.entries[slot];
+    e->used = 1;
+    for (int i = 0; i < ROWS; i++) e->ys[i] = ys[i];
+    for (int a = 0; a < INPUTS; a++)
+        for (int j = 0; j < HIDDEN; j++) e->w1[a][j] = w1[a][j];
+    for (int j = 0; j < HIDDEN; j++) { e->b1[j] = b1[j]; e->w2[j] = w2[j]; }
+    e->b2 = b2;
+
+    if (ax_writefile(WEIGHTS_FILE, (unsigned char*)&bank, sizeof(bank))) {
+        if (evicted) {
+            ax_printf("\033[32mSaved trained weights to %s\033[0m (bank was full - "
+                      "evicted the oldest slot). Run 'ai list' to see what's stored.\n",
+                      WEIGHTS_FILE);
+        } else {
+            ax_printf("\033[32mSaved trained weights to %s\033[0m - next run with this "
+                      "pattern will skip training. Run 'ai list' to see what's stored.\n",
+                      WEIGHTS_FILE);
+        }
+    } else {
+        ax_printf("\033[33mCould not save weights (disk locked - run 'unlock' first "
+                  "to persist).\033[0m\n");
+    }
+}
+
+// "ai list" - показывает, какие функции уже обучены и лежат в банке,
+// без обучения чего-либо.
+static void list_bank(void) {
+    weights_bank_t bank;
+    load_bank(&bank);
+
+    int any = 0;
+    for (int i = 0; i < BANK_SIZE; i++) {
+        if (!bank.entries[i].used) continue;
+        any = 1;
+        char pattern[ROWS + 1];
+        for (int j = 0; j < ROWS; j++) pattern[j] = (char)('0' + bank.entries[i].ys[j]);
+        pattern[ROWS] = '\0';
+        ax_printf("  [%d] %s - %s\n", i, pattern, name_for(bank.entries[i].ys));
+    }
+    if (!any) {
+        ax_printf("%s is empty - nothing trained and saved yet (need 'unlock' before "
+                  "training to persist).\n", WEIGHTS_FILE);
+    }
 }
 
 // Таблица финальных предсказаний - колонки A/B/C/predicted/target/status;
@@ -482,7 +553,8 @@ static const struct { const char* keywords[QA_MAX_KEYWORDS]; const char* answer;
       "AxOS is a small 32-bit x86 OS written from scratch - see 'what is axos'." },
     { { "help", "what can you do", "commands" },
       "Ask me about axos, xor, fpu, syscalls, fat12, mac, mls, elf, or "
-      "neurons - or run 'ai <8 bits>' to train a 3-input boolean function." },
+      "neurons - or run 'ai <8 bits>' to train a 3-input boolean function, "
+      "or 'ai list' to see saved weights." },
 };
 #define QA_COUNT (int)(sizeof(QA_DB) / sizeof(QA_DB[0]))
 
@@ -518,6 +590,10 @@ int main(int argc, char** argv) {
             run_ask_mode();
             return 0;
         }
+        if (streq(arg_lower, "list")) {
+            list_bank();
+            return 0;
+        }
     }
 
     // дефолт: parity/XOR3 (0,1,1,0,1,0,0,1) - самая сложная из известных
@@ -543,7 +619,7 @@ int main(int argc, char** argv) {
         ax_printf("Enter the 8 outputs for inputs 000,001,010,011,100,101,110,111\n");
         ax_printf("as an 8-bit string (e.g. 01101001 = parity/XOR3, 00010111 =\n");
         ax_printf("majority, 00000001 = AND3), or Enter for parity.\n");
-        ax_printf("(Run 'ai ask' instead for a Q&A mode about AxOS itself.)\n");
+        ax_printf("(Run 'ai ask' for Q&A about AxOS, or 'ai list' to see saved weights.)\n");
 
         char line[16];
         for (int attempt = 0; attempt < 3 && !have_pattern; attempt++) {
