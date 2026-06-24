@@ -47,3 +47,6 @@ jobs:
 
       - name: ELF loader regression test in QEMU
         run: python tools\exec_regression_test.py
+
+      - name: ai ask regression test in QEMU
+        run: python tools\ai_ask_regression_test.py
