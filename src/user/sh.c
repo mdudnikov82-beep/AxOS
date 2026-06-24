@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
     ax_shell_claim(1);  // захватываем клавиатуру у kernel shell
 
     ax_print("\n\033[36mAxSH v0.1 - AxOS user shell\033[0m\n");
-    ax_print("Run: <program> [args]  |  exit\n\n");
+    ax_print("Run: <program> [args]  |  exit  |  help\n\n");
 
     char line[64];
     char current_dir[13] = ""; // Пусто = корневой каталог
@@ -47,6 +47,42 @@ int main(int argc, char** argv) {
         if (sh_streq(line, "lock")) {
             ax_disk_lock(1);
             ax_print("\033[32mdisk: locked\033[0m\n");
+            continue;
+        }
+
+        if (sh_streq(line, "clear")) {
+            ax_clear();
+            continue;
+        }
+
+        // current_dir (см. "cd" ниже) хранит путь без ведущего "/" (или
+        // пусто для корня) - pwd просто восстанавливает привычный вид.
+        if (sh_streq(line, "pwd")) {
+            if (current_dir[0] == '\0') {
+                ax_print("/\n");
+            } else {
+                ax_printf("/%s\n", current_dir);
+            }
+            continue;
+        }
+
+        if (sh_streq(line, "help")) {
+            ax_print("Built-in commands:\n");
+            ax_print("  cd <dir> | cd / | cd ..   change directory\n");
+            ax_print("  pwd                       print current directory\n");
+            ax_print("  clear                     clear the screen\n");
+            ax_print("  unlock / lock             unlock/lock the disk for writing\n");
+            ax_print("  paste                     print the clipboard (clip get)\n");
+            ax_print("  help                      show this message\n");
+            ax_print("  exit                      quit AxSH\n");
+            ax_print("\n");
+            ax_print("Syntax:\n");
+            ax_print("  <program> [args]          run a program (e.g. ls, cat, grep)\n");
+            ax_print("  cmd1 | cmd2               pipe (cmd1's output -> cmd2, one level)\n");
+            ax_print("  cmd > file                redirect output to file\n");
+            ax_print("  cmd &                     run in background\n");
+            ax_print("\n");
+            ax_print("Run 'ls' to see available files/programs on disk.\n");
             continue;
         }
 
