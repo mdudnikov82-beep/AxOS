@@ -447,12 +447,37 @@ static void list_bank(void) {
     }
 }
 
-// Таблица финальных предсказаний - колонки A/B/C/predicted/target/status;
-// ширина каждой включает рамки и оба окружающих content пробела (см.
-// print_cell). Те же ширины используются для горизонтальных линий,
-// иначе рамка не совпадёт со столбцами.
-#define PRED_TABLE_COLS 6
-static const int PRED_TABLE_WIDTHS[PRED_TABLE_COLS] = { 3, 3, 3, 11, 8, 8 };
+// Уверенность сети в своём предсказании - не то же самое, что
+// правильность (OK/FAIL сравнивает с target, эта величина смотрит
+// только на то, насколько output далёк от неопределённых 0.5).
+// |output - 0.5| * 2: 0% на самой границе принятия решения (output
+// ровно 0.5 - сеть совсем не уверена, в какую сторону), 100% на
+// выходах, прижатых сигмоидой к самым 0 или 1.
+static int confidence_pct(int o_out) {
+    int diff = (o_out > FX_HALF) ? (o_out - FX_HALF) : (FX_HALF - o_out);
+    int conf_fx = diff << 1;  // *2 в Q16.16 - просто сдвиг, не fx_mul
+    int pct = (conf_fx * 100) >> FX_BITS;
+    if (pct > 100) pct = 100;  // на случай округления у самой границы
+    return pct;
+}
+
+static void pct_to_str(int pct, char* buf) {
+    int i = 0;
+    if (pct >= 100) { buf[i++] = '1'; buf[i++] = '0'; buf[i++] = '0'; }
+    else {
+        if (pct >= 10) buf[i++] = (char)('0' + pct / 10);
+        buf[i++] = (char)('0' + pct % 10);
+    }
+    buf[i++] = '%';
+    buf[i] = '\0';
+}
+
+// Таблица финальных предсказаний - колонки A/B/C/predicted/target/
+// status/conf; ширина каждой включает рамки и оба окружающих content
+// пробела (см. print_cell). Те же ширины используются для
+// горизонтальных линий, иначе рамка не совпадёт со столбцами.
+#define PRED_TABLE_COLS 7
+static const int PRED_TABLE_WIDTHS[PRED_TABLE_COLS] = { 3, 3, 3, 11, 8, 8, 8 };
 
 static void print_table_border(char left, char mid, char right) {
     ax_putchar(left);
@@ -720,6 +745,7 @@ int main(int argc, char** argv) {
     print_cell(PRED_TABLE_WIDTHS[3], "predicted");
     print_cell(PRED_TABLE_WIDTHS[4], "target");
     print_cell(PRED_TABLE_WIDTHS[5], "status");
+    print_cell(PRED_TABLE_WIDTHS[6], "conf");
     ax_putchar('\xB3');
     ax_putchar('\n');
     print_table_border('\xC3', '\xC5', '\xB4');
@@ -742,6 +768,11 @@ int main(int argc, char** argv) {
         char pred_str[16];
         fixed_to_str(o_out, pred_str);
 
+        int conf = confidence_pct(o_out);
+        char conf_str[8];
+        pct_to_str(conf, conf_str);
+        const char* conf_color = (conf >= 80) ? "\033[32m" : (conf >= 50) ? "\033[33m" : "\033[31m";
+
         print_cell(PRED_TABLE_WIDTHS[0], a_str);
         print_cell(PRED_TABLE_WIDTHS[1], b_str);
         print_cell(PRED_TABLE_WIDTHS[2], c_str);
@@ -749,6 +780,7 @@ int main(int argc, char** argv) {
         print_cell(PRED_TABLE_WIDTHS[4], target_str);
         print_cell_colored(PRED_TABLE_WIDTHS[5], ok ? "OK" : "FAIL",
                             ok ? "\033[32m" : "\033[31m");
+        print_cell_colored(PRED_TABLE_WIDTHS[6], conf_str, conf_color);
         ax_putchar('\xB3');
         ax_putchar('\n');
     }
