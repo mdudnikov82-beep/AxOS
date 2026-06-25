@@ -682,8 +682,23 @@ static int save_learned(const char* keyword, const char* answer) {
     return ax_writefile(LEARNED_FILE, (unsigned char*)&bank, sizeof(bank));
 }
 
+// "ai ask" -> "list" - печатает все выученные пары вопрос/ответ из AI.QA
+// (in-memory копию, не перечитывая диск) - просто чтобы было видно, чему
+// программа уже научена, без поиска по ключевому слову.
+static void list_learned(const learned_bank_t* bank) {
+    int any = 0;
+    for (int i = 0; i < LEARNED_MAX; i++) {
+        if (!bank->entries[i].used) continue;
+        any = 1;
+        ax_printf("  [%d] \"%s\" -> %s\n", i, bank->entries[i].keyword, bank->entries[i].answer);
+    }
+    if (!any) {
+        ax_printf("Nothing learned yet - ask me something I don't know and teach me.\n");
+    }
+}
+
 static void run_ask_mode(void) {
-    print_boxed("AxOS AI: ask me something (type 'exit' to quit)", "\033[36m");
+    print_boxed("AxOS AI: ask me something ('list' = learned, 'exit' = quit)", "\033[36m");
 
     static learned_bank_t learned;  // см. комментарий в save_learned()
     load_learned_bank(&learned);
@@ -696,6 +711,7 @@ static void run_ask_mode(void) {
         if (line[0] == '\0') continue;
         lower_copy(line, lower, sizeof(lower));
         if (streq(lower, "exit") || streq(lower, "quit")) break;
+        if (streq(lower, "list")) { list_learned(&learned); continue; }
 
         const char* ans = find_builtin_answer(lower);
         if (!ans) ans = find_learned_answer(&learned, lower);
