@@ -1,9 +1,9 @@
 // =================================================================
-//  Heap allocator: kmalloc/kfree поверх региона 0x60000-0x90000
+//  Heap allocator: kmalloc/kfree поверх региона 0x70000-0x90000
 // =================================================================
 //
-// Регион 0x60000-0x90000 (192 КБ) свободен: выше FAT12-образа
-// (0x20000-0x60000, 256 КБ - см. FAT12_TOTAL_SECTORS, fat12.c) и ниже
+// Регион 0x70000-0x90000 (128 КБ) свободен: выше FAT12-образа
+// (0x20000-0x70000, 320 КБ - см. FAT12_TOTAL_SECTORS, fat12.c) и ниже
 // стека ядра (растёт вниз от 0x90000). Он identity-mapped и доступен
 // на запись (init_paging помечает read-only только страницы внутри
 // .text).
@@ -71,7 +71,7 @@
 extern void print_string(char* str);
 extern volatile unsigned long timer_ticks; // kernel.c, IRQ0 (100 Гц) - энтропия для тега
 
-#define HEAP_START 0x60000  /* must be > FAT12_BASE + FAT12_TOTAL_SECTORS*512 = 0x5FFFF */
+#define HEAP_START 0x70000  /* must be > FAT12_BASE + FAT12_TOTAL_SECTORS*512 = 0x6FFFF */
 #define HEAP_END   0x90000
 #define HEAP_SIZE  (HEAP_END - HEAP_START)
 

@@ -60,7 +60,7 @@ extern volatile unsigned long timer_ticks; // kernel.c, IRQ0 (100 Гц)
 // "угадываемого по умолчанию" адреса между запусками.
 static unsigned int aslr_prng_state = 0;
 
-static unsigned int aslr_next_random() {
+unsigned int aslr_next_random() {
     if (aslr_prng_state == 0) {
         aslr_prng_state = (unsigned int)timer_ticks ^ 0x9E3779B9u;
         if (aslr_prng_state == 0) aslr_prng_state = 0x9E3779B9u; // xorshift не переживает state==0
@@ -207,10 +207,11 @@ void task_create_user(char* name, void (*entry)(void)) {
 #define USER_STACK_TOP (USER_WINDOW_TOP - 16)
 
 // Случайный сдвиг ESP вниз от USER_STACK_TOP, кратный 16 байт (сохраняет
-// выравнивание стека). До 64 байт - заведомо безопасно: между
-// USER_STACK_TOP и блоком argv (USER_ARGS_VADDR, kernel.c) около 1000
-// байт зазора, такой сдвиг его не выест.
-#define STACK_ASLR_MAX_SHIFT 64
+// выравнивание стека). USER_STACK_TOP=0x10FFF0, USER_ARGS_VADDR=0x10F800 →
+// зазор 0x7F0=2032 байта. При сдвиге до 1024 и типичном росте стека ~512
+// минимальный адрес стека ≈ 0x10F9F0 > 0x10F800 → безопасно.
+// 1024/16+1 = 65 позиций → ~6 бит энтропии (было 5 позиций → ~2 бита).
+#define STACK_ASLR_MAX_SHIFT 1024
 
 void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index,
                                int argc, unsigned int argv_vaddr, unsigned int entry_vaddr) {

@@ -42,6 +42,12 @@ void init_paging() {
         page_table[i] = addr | flags;
     }
 
+    // Guard page: стек ядра начинается в 0x90000 и растёт вниз.
+    // Страница 0x8C000 помечается NOT PRESENT — overflow глубже 16 КБ
+    // вызывает #PF и останавливает систему, вместо того чтобы молча
+    // затереть данные кучи (0x70000-0x90000).
+    page_table[0x8C] = 0;
+
     page_directory[0] = ((unsigned int)page_table) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
     for (unsigned int i = 1; i < 1024; i++) {
         page_directory[i] = 0;

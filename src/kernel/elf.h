@@ -12,11 +12,11 @@
 // Результат разбора - один на вызов elf_load (на сегодня всегда ровно
 // один PT_LOAD-сегмент, но поле считает максимум по всем найденным).
 struct elf_load_result {
-    unsigned int entry;         // e_entry - точка входа (виртуальный адрес)
-    unsigned int max_vaddr_end; // max(p_vaddr + p_memsz) по всем PT_LOAD,
-                                 // округлённый вверх до кратного 16 байт -
-                                 // используется как начальный heap break
+    unsigned int entry;         // e_entry + aslr_delta (виртуальный адрес точки входа)
+    unsigned int max_vaddr_end; // max(p_vaddr + p_memsz) + aslr_delta, округлённый
+                                 // вверх до кратного 16 байт - начальный heap break
                                  // (см. slot_heap_brk, kernel.c)
+    unsigned int aslr_delta;    // случайное смещение кода (0 если нет .reloc в ELF)
 };
 
 // Коды ошибок - каждая причина отказа отдельная, не одно общее "не ELF":

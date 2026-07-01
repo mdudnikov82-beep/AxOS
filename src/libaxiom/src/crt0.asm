@@ -14,8 +14,10 @@
 
 global _start
 extern _main
+extern _ax_init_stack_guard
 
 _start:
+    call _ax_init_stack_guard   ; инициализировать канарейку до пролога main()
     push ecx        ; argv (char**)
     push ebx        ; argc (int)
     call _main

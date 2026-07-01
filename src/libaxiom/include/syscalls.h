@@ -204,6 +204,27 @@ struct set_level_args {
     unsigned int level; // зажимается в [0, 15] на стороне ядра
 };
 
+#define SYS_PCI_GET_DEVICE 0x22  // ESI -> struct pci_device_args
+
+// Вход: index (0-based номер устройства в порядке обхода шины, см.
+// pci_scan()/pci.c). Выход: остальные поля + result (1 = найдено, 0 =
+// конец списка - index вышел за пределы того, что нашло сканирование).
+// Все числовые ID - полные unsigned int (а не unsigned char/short), как у
+// struct ps_entry, чтобы раскладка структуры не зависела от выравнивания
+// компилятора - смещения те же что и в коде syscalls.asm.
+struct pci_device_args {
+    unsigned int index;
+    unsigned int bus;
+    unsigned int device;
+    unsigned int function;
+    unsigned int vendor_id;
+    unsigned int device_id;
+    unsigned int class_code;
+    unsigned int subclass;
+    char         class_name[32];
+    int          result;
+};
+
 #define SYS_PS 0x13
 
 struct ps_entry {

@@ -81,10 +81,23 @@ int ax_readdir(struct readdir_args* a);
 // Заполняет *e и возвращает e->result (1 = запись найдена, 0 = конец)
 int ax_ps(struct ps_entry* e);
 
-// Динамическая память (sbrk + malloc/free)
+// Список PCI-устройств (обёртка над SYS_PCI_GET_DEVICE), см. lspci.c.
+// d->index - вход (0-based); заполняет остальные поля *d, возвращает
+// d->result (1 = запись найдена, 0 = конец списка).
+int ax_pci_get_device(struct pci_device_args* d);
+
+// Динамическая память (sbrk + malloc/free + shadow memory)
 void* ax_sbrk(int increment);           // сдвинуть heap break; (void*)-1 при ошибке
 void* ax_malloc(unsigned int size);     // выделить size байт или NULL
 void  ax_free(void* ptr);               // освободить блок
+
+// Shadow + Memory Tagging API:
+// ax_check      — 1 если [ptr,ptr+size) в состоянии OK (любой тег).
+// ax_alloc_tag  — тег текущего поколения блока (0 = freed/не выделен).
+// ax_check_tag  — 1 если OK И тег совпадает; ловит UAF после переиспользования.
+int          ax_check(void* ptr, unsigned int size);
+unsigned int ax_alloc_tag(void* ptr);
+int          ax_check_tag(void* ptr, unsigned int expected_tag, unsigned int size);
 
 // Уровень stdio (реализован в stdio.c)
 void ax_putchar(char c);

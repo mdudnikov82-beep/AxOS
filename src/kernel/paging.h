@@ -11,8 +11,8 @@
 // одной паре 4КБ+4КБ на каждый USER_PROGRAM_SLOTS (kernel.c). Лежит сразу
 // после слотов пользовательских программ (0x100000-0x120000) - НЕ в
 // 0xA0000-0xBFFFF, это апертура видеопамяти VGA (MMIO в QEMU), а не RAM.
-#define PD_POOL_BASE 0x120000
-#define PT_POOL_BASE 0x124000
+#define PD_POOL_BASE 0x140000
+#define PT_POOL_BASE 0x144000
 
 // Виртуальное окно [0x100000, 0x100000+USER_WINDOW_SIZE) - см.
 // paging_create_user_directory. USER_SPIN_ADDR - последние 2 байта окна:
@@ -21,7 +21,7 @@
 // окна) перенаправляет туда EIP - безопасное место для "добивания" кванта
 // до реапа в schedule().
 #define USER_WINDOW_BASE  0x100000
-#define USER_WINDOW_PAGES 8
+#define USER_WINDOW_PAGES 16
 #define USER_WINDOW_SIZE  (USER_WINDOW_PAGES * 0x1000)
 #define USER_SPIN_ADDR    (USER_WINDOW_BASE + USER_WINDOW_SIZE - 2)
 

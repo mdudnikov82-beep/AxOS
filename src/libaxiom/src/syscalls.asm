@@ -41,6 +41,7 @@ global _ax_beep
 global _ax_clipboard_set
 global _ax_clipboard_get
 global _ax_set_level
+global _ax_pci_get_device
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -351,6 +352,23 @@ _ax_ps:
     mov ah, 0x13            ; SYS_PS
     int 0x80
     mov eax, [esi+36]       ; e->result (offset 36)
+    pop ebx
+    pop esi
+    ret
+
+; int ax_pci_get_device(struct pci_device_args* d)
+; ESI = указатель на struct pci_device_args (передаётся напрямую).
+; Возвращает d->result (1=найдено, 0=конец списка).
+; Раскладка struct (все поля по 4 байта, см. syscalls.h):
+;   index(0) bus(4) device(8) function(12) vendor_id(16) device_id(20)
+;   class_code(24) subclass(28) class_name[32](32) result(64)
+_ax_pci_get_device:
+    push esi
+    push ebx
+    mov esi, [esp+12]       ; ESI -> struct pci_device_args
+    mov ah, 0x22            ; SYS_PCI_GET_DEVICE
+    int 0x80
+    mov eax, [esi+64]       ; d->result (offset 64)
     pop ebx
     pop esi
     ret

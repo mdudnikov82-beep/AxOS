@@ -16,8 +16,8 @@
                     // сигнатуры (и константы FAT12_MKDIR_*/FAT12_DELETE_NOTFOUND)
                     // внутри этого файла, а не только в местах вызова (vfs.c)
 
-#define FAT12_BASE 0x20000
-#define FAT12_TOTAL_SECTORS 512 // 256 КБ / 512 = TOTAL_SECTORS в make_fat12.py
+#define FAT12_BASE 0x200000
+#define FAT12_TOTAL_SECTORS 2048 // 1 МБ / 512 = TOTAL_SECTORS в make_fat12.py
 
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);

@@ -11,14 +11,13 @@ import struct
 import sys
 
 SECTOR_SIZE = 512
-TOTAL_SECTORS = 512
+TOTAL_SECTORS = 2048
 RESERVED_SECTORS = 1
 NUM_FATS = 1
 ROOT_ENTRIES = 32
-# 1 сектор FAT12 (512 байт, 12 бит/запись) вмещает ~340 кластеров - мало
-# для DATA_SECTORS на этом объёме (без увеличения вылетели бы за границу
-# bytearray в set_fat_entry). 2 сектора (~680 записей) - с запасом.
-SECTORS_PER_FAT = 2
+# 6 секторов FAT12 (6×512=3072 байт, 12 бит/запись) вмещают ~2048 кластеров -
+# достаточно для DATA_SECTORS=2039 при TOTAL_SECTORS=2048.
+SECTORS_PER_FAT = 6
 SECTORS_PER_CLUSTER = 1
 CLUSTER_SIZE = SECTOR_SIZE * SECTORS_PER_CLUSTER
 

@@ -600,9 +600,12 @@ AOSP. Реализован тот же ПРИНЦИП (Type Enforcement: суб�
   | `exec`          | `SYS_EXEC`/`SYS_EXEC_REDIR`                               | allow |
   | `clipboard`     | `SYS_CLIPBOARD_SET`                                       | allow (но см. MLS ниже) |
   | `task_info`     | `SYS_PS` (имена/`heap_brk` ДРУГИХ задач — info-disclosure поверхность) | allow |
+  | `pci_raw`       | `SYS_PCI_GET_DEVICE` (порты `0xCF8`/`0xCFC`, минуя любую абстракцию ядра) | deny |
 
-  Только первые два реально запрещены — остальные пять allow-правил
-  (как и большинство правил в настоящей политике SELinux): запрещать
+  Запрещены только `disk_raw`/`system_reboot`/`pci_raw` (прямой доступ к
+  железу мимо абстракций ядра — одна и та же категория риска во всех
+  трёх) — остальные пять allow-правил (как и большинство правил в
+  настоящей политике SELinux): запрещать
   повседневные операции AxSH и демо-программ (`write.bin`/`rm.bin`/`mkdir.bin`/
   `lock`/`unlock`) без причины означало бы ломать рекламируемую
   функциональность. Ценность — единообразная, проверяемая граница для
@@ -864,6 +867,12 @@ round-robin вытеснение) — повторный такой же воп�
   (`fat12_init`/`fat12_flush` через IDE, чтение и запись).
 - `src/drivers/ide.c`/`ide.h` — PIO-драйвер ATA/IDE (primary master, LBA28),
   доступ к `build/disk.img` (команды `diskinfo`/`diskread`/`diskwrite`).
+- `src/drivers/pci.c`/`pci.h` — драйвер шины PCI (config space mechanism #1,
+  порты `0xCF8`/`0xCFC`): `pci_scan()` обходит bus 0 и рекурсивно мосты
+  PCI-PCI, `pci_class_name()` — таблица базовых PCI class code. Доступ из
+  ring3 — `lspci.bin` (`src/user/lspci.c`, `SYS_PCI_GET_DEVICE`), confined
+  классом `pci_raw` (см. "MAC" выше) — как и `disktool.bin`, обычный запуск
+  получает `avc: denied`.
 - `src/drivers/keyboard.h` — порты ввода-вывода и таблица скан-кодов
   клавиатуры.
 - `src/user/syscall.h` — общий ABI системных вызовов (`SYS_*`-константы и
@@ -948,7 +957,7 @@ QEMU запускает образ как floppy (`-drive format=raw,file=build\
   overflow, карантин из 8 последних `free()` (см. "Куча" выше).
 - ✅ "ASLR-подобный" разброс начального стека изолированных `run`-задач
   (см. "Запуск пользовательских программ").
-- ✅ MAC (Type Enforcement в духе SELinux), 8 классов, + MLS-уровни
+- ✅ MAC (Type Enforcement в духе SELinux), 9 классов, + MLS-уровни
   чувствительности для буфера обмена (см. разделы "MAC"/"MLS" выше).
 - ✅ Preemptive round-robin планировщик (ring0 и ring3 задачи, per-task `TSS.ESP0`) + команда `ps`.
 - ✅ FAT12-том на `build/disk.img` через IDE (чтение и запись, персистентно)
@@ -1035,8 +1044,8 @@ QEMU запускает образ как floppy (`-drive format=raw,file=build\
     (0-64 байта, xorshift32 от `timer_ticks`, `tasking.c`) — см. "Запуск
     пользовательских программ".
   - ✅ MAC (Type Enforcement в духе SELinux): домены (`kernel_t`/`user_t`) ×
-    8 классов (`disk_raw`, `system_reboot`, `file_write`, `file_unlink`,
-    `fs_lock`, `exec`, `clipboard`, `task_info`) × статическая политика,
+    9 классов (`disk_raw`, `system_reboot`, `file_write`, `file_unlink`,
+    `fs_lock`, `exec`, `clipboard`, `task_info`, `pci_raw`) × статическая политика,
     default-deny, audit-подобный лог при отказе (`kernel.c`) — см. раздел
     "MAC" выше.
   - ✅ MLS-уровни (`SYS_SET_LEVEL`, `s0`-`s15`) с dominance-проверкой

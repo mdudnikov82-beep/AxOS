@@ -35,7 +35,7 @@ struct tty_state {
 // промежутке 0x130000+ (после пула PD/PT изолированных задач, kernel.c/
 // paging.h: PT_POOL_BASE=0x124000 + 4*0x1000 = заканчивается на 0x128000),
 // а не в .bss.
-#define TTYS_BASE 0x130000
+#define TTYS_BASE 0x158000
 static struct tty_state* const ttys = (struct tty_state*) TTYS_BASE;
 static int active_tty = 0;
 

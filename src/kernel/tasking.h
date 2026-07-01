@@ -84,4 +84,8 @@ int task_get_info(unsigned int index, int* pid_out, char* name_out,
 unsigned int task_current_mls_level();
 void task_set_current_mls_level(unsigned int level);
 
+// xorshift32 ГПСЧ, общий для ASLR стека и кучи. Сид = timer_ticks,
+// обновляется при каждом вызове.
+unsigned int aslr_next_random(void);
+
 #endif

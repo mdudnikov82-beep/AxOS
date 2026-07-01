@@ -3,6 +3,7 @@
 #include "../user/syscall.h" // ABI системных вызовов, общий с ring3-программами
 #include "ide.h" // PIO-драйвер ATA/IDE (build/disk.img - настоящий диск)
 #include "mouse.h" // PS/2-мышь, IRQ12
+#include "pci.h" // сканирование шины PCI (mechanism #1), см. lspci.c
 #include "speaker.h" // системный динамик (PC speaker)
 #include "paging.h" // Защита памяти: paging + read-only код ядра
 #include "tss.h" // TSS: переключение стека ring3 -> ring0
@@ -22,7 +23,7 @@
 // приватным Page Directory (paging.c) - несколько программ могут работать
 // одновременно в изоляции друг от друга.
 #define USER_PROGRAM_SLOTS     4
-#define USER_PROGRAM_SLOT_SIZE 0x8000
+#define USER_PROGRAM_SLOT_SIZE 0x10000
 #define USER_PROGRAM_BASE      0x100000
 
 // Аргументы командной строки для run-программ.
@@ -31,7 +32,7 @@
 //   виртуальный: USER_ARGS_VADDR (одинаков для всех задач — разные PD)
 // Ядро пишет char*[] указатели и строки по физическому адресу (identity-map),
 // задача видит их по USER_ARGS_VADDR через свой приватный PD.
-#define USER_ARGS_OFFSET   0x7C00
+#define USER_ARGS_OFFSET   0xF800
 #define USER_ARGS_VADDR    (USER_WINDOW_BASE + USER_ARGS_OFFSET)
 #define USER_ARGS_MAX_ARGC 7       // максимум 7 аргументов (argv[0]..argv[6] + NULL)
 #define USER_ARGS_STR_OFF  32      // строки после 8 указателей (8 * sizeof(char*) = 32)
@@ -56,7 +57,7 @@
 // фиксированный физический адрес в свободной зоне сразу после пула
 // PD/PT (0x124000+0x4000=0x128000), а не часть кучи ядра.
 #define ELF_STAGING_SIZE (USER_ARGS_OFFSET + 0x200)
-#define ELF_STAGING_BASE 0x128000
+#define ELF_STAGING_BASE 0x148000
 #define elf_staging_buf ((unsigned char*)ELF_STAGING_BASE)
 
 // slot_free[i] == 1, если слот i свободен. "run" занимает первый свободный
@@ -522,6 +523,7 @@ typedef enum {
     AX_CLASS_EXEC,
     AX_CLASS_CLIPBOARD,
     AX_CLASS_TASK_INFO,
+    AX_CLASS_PCI_RAW,
     AX_CLASS_COUNT
 } ax_class_t;
 
@@ -537,10 +539,13 @@ typedef enum {
 // "disktool read/write" уже были под политикой). task_info - отдельный
 // класс для SYS_PS (раскрывает имена/heap_brk ДРУГИХ задач - честная
 // info-disclosure поверхность, но ps.bin - рекламируемая демо-команда,
-// поэтому allow, как и остальные неновые denial'ы выше).
+// поэтому allow, как и остальные неновые denial'ы выше). pci_raw - тот же
+// принцип, что и disk_raw: прямой порт-ввод/вывод в конфигурационное
+// пространство шины (0xCF8/0xCFC), минуя любую абстракцию ядра - confined
+// lspci.bin получает тот же "avc: denied", что disktool.bin на disk_raw.
 static const unsigned char ax_policy[AX_DOMAIN_COUNT][AX_CLASS_COUNT] = {
-    /* AX_DOMAIN_KERNEL */ {1, 1, 1, 1, 1, 1, 1, 1}, // unconfined - разрешено всё
-    /* AX_DOMAIN_USER   */ {0, 0, 1, 1, 1, 1, 1, 1}, // confined - см. комментарий выше
+    /* AX_DOMAIN_KERNEL */ {1, 1, 1, 1, 1, 1, 1, 1, 1}, // unconfined - разрешено всё
+    /* AX_DOMAIN_USER   */ {0, 0, 1, 1, 1, 1, 1, 1, 0}, // confined - см. комментарий выше
 };
 
 static char* ax_domain_name(ax_domain_t d) {
@@ -557,6 +562,7 @@ static char* ax_class_name(ax_class_t c) {
         case AX_CLASS_EXEC:        return "exec";
         case AX_CLASS_CLIPBOARD:   return "clipboard";
         case AX_CLASS_TASK_INFO:   return "task_info";
+        case AX_CLASS_PCI_RAW:     return "pci_raw";
         default:                   return "?";
     }
 }
@@ -843,6 +849,15 @@ static int do_exec(char* cmdline) {
                             USER_WINDOW_BASE, USER_ARGS_OFFSET, &elf_res);
     if (elf_err != ELF_OK) return -3;
 
+    // Показываем code ASLR delta при каждом запуске программы.
+    if (elf_res.aslr_delta > 0) {
+        print_string("[ASLR] code entry=0x");
+        print_hex(elf_res.entry);
+        print_string(" delta=0x");
+        print_hex(elf_res.aslr_delta);
+        print_string("\n");
+    }
+
     char** argv_phys = (char**)(addr + USER_ARGS_OFFSET);
     char*  sp        = (char*)(addr + USER_ARGS_OFFSET + USER_ARGS_STR_OFF);
     unsigned int sv  = USER_ARGS_VADDR + USER_ARGS_STR_OFF;
@@ -861,7 +876,15 @@ static int do_exec(char* cmdline) {
     }
     argv_phys[argc] = 0;
 
+    // Heap ASLR: сдвигаем начало кучи вверх на случайное кратное 64 байтам
+    // (0..63 × 64 = 0..4032 байт). Атакующий не знает точный адрес heap base,
+    // даже зная размер кода. USER_HEAP_LIMIT проверяется для защиты.
     slot_heap_brk[slot] = USER_WINDOW_BASE + elf_res.max_vaddr_end;
+    {
+        unsigned int heap_slide = (aslr_next_random() % 64u) * 64u;
+        if (slot_heap_brk[slot] + heap_slide < USER_HEAP_LIMIT)
+            slot_heap_brk[slot] += heap_slide;
+    }
     slot_free[slot] = 0;
     // Слот наследует консоль вызывающей задачи (caller_tty уже определена
     // ниже по файлу для syscall'ов, но do_exec идёт раньше - дублируем
@@ -1036,6 +1059,44 @@ void sys_ps(char* arg) {
     }
 }
 
+// Кэш pci_scan(): шина не меняется во время работы (hot-plug не поддерживается).
+#define PCI_DEVICE_CACHE_SIZE 32
+static struct pci_device pci_device_cache[PCI_DEVICE_CACHE_SIZE];
+static unsigned int pci_device_cache_count = 0;
+static int pci_scanned = 0;
+
+void sys_pci_get_device(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct pci_device_args))) return;
+    struct pci_device_args* a = (struct pci_device_args*)arg;
+    if (!ax_mac_check(AX_CLASS_PCI_RAW)) { a->result = 0; return; }
+
+    if (!pci_scanned) {
+        pci_device_cache_count = pci_scan(pci_device_cache, PCI_DEVICE_CACHE_SIZE);
+        pci_scanned = 1;
+    }
+
+    if (a->index >= pci_device_cache_count || a->index >= PCI_DEVICE_CACHE_SIZE) {
+        a->result = 0;
+        return;
+    }
+
+    struct pci_device* d = &pci_device_cache[a->index];
+    a->bus = d->bus;
+    a->device = d->device;
+    a->function = d->function;
+    a->vendor_id = d->vendor_id;
+    a->device_id = d->device_id;
+    a->class_code = d->class_code;
+    a->subclass = d->subclass;
+
+    const char* name = pci_class_name(d->class_code);
+    int j = 0;
+    while (name[j] && j < (int)sizeof(a->class_name) - 1) { a->class_name[j] = name[j]; j++; }
+    a->class_name[j] = '\0';
+
+    a->result = 1;
+}
+
 // SYS_SBRK: сдвигает heap break задачи на increment байт вперёд.
 // Возвращает старый break (начало выделенного региона) или -1 при переполнении.
 void sys_sbrk(char* arg) {
@@ -1177,6 +1238,7 @@ syscall_fn syscall_table[] = {
     sys_clipboard_set,     // 0x1F
     sys_clipboard_get,     // 0x20
     sys_set_level,         // 0x21
+    sys_pci_get_device,    // 0x22
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))
@@ -1433,6 +1495,11 @@ void execute_command(char* cmd) {
                     argv_phys[argc] = 0;  // argv[argc] = NULL (POSIX)
 
                     slot_heap_brk[slot] = USER_WINDOW_BASE + elf_res.max_vaddr_end;
+                    {
+                        unsigned int heap_slide = (aslr_next_random() % 64u) * 64u;
+                        if (slot_heap_brk[slot] + heap_slide < USER_HEAP_LIMIT)
+                            slot_heap_brk[slot] += heap_slide;
+                    }
                     slot_free[slot] = 0;
                     // Запущенное отсюда (kernel-shell команда "run", в т.ч. из
                     // autoboot() и из авто-запуска AxSH при первом переключении

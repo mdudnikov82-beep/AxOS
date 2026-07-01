@@ -292,4 +292,26 @@ struct ps_entry {
     int           result;    // выход: 1=найдена, 0=конец
 };
 
+// --- Список устройств на шине PCI (0x22) ---
+#define SYS_PCI_GET_DEVICE 0x22  // ESI -> struct pci_device_args
+
+// Возвращает устройство с порядковым номером index (0-based, порядок
+// обхода шины - см. pci_scan() в pci.c). result=1: запись найдена;
+// result=0: конец списка (или отказ MAC, см. AX_CLASS_PCI_RAW в kernel.c).
+// Все числовые ID - unsigned int (не unsigned char/short), как у
+// struct ps_entry, чтобы раскладка не зависела от выравнивания компилятора
+// - смещения те же, что в коде syscalls.asm (libaxiom).
+struct pci_device_args {
+    unsigned int index;
+    unsigned int bus;
+    unsigned int device;
+    unsigned int function;
+    unsigned int vendor_id;
+    unsigned int device_id;
+    unsigned int class_code;
+    unsigned int subclass;
+    char         class_name[32];
+    int          result;
+};
+
 #endif
