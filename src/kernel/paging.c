@@ -33,6 +33,8 @@ extern char _text_end[];
 
 // 1 если ЦП поддерживает NX/XD, определяется в init_paging()
 static int g_nx = 0;
+// 1 если ЦП поддерживает SMEP (CR4[20]), определяется в init_paging()
+static int g_smep = 0;
 
 void init_paging() {
     pae_t* pdpt = GLOBAL_PDPT;
@@ -47,20 +49,41 @@ void init_paging() {
         __asm__ volatile("cpuid" : "=d"(edx_ext) : "a"(0x80000001u) : "ebx", "ecx");
     g_nx = (edx_ext >> 20) & 1;
 
+    // Проверяем поддержку SMEP через CPUID.07H:EBX[7]
+    unsigned int max_basic = 0, ebx7 = 0;
+    __asm__ volatile("cpuid" : "=a"(max_basic) : "a"(0u) : "ebx", "ecx", "edx");
+    if (max_basic >= 7u) {
+        unsigned int eax7, ecx7, edx7;
+        __asm__ volatile("cpuid"
+            : "=a"(eax7), "=b"(ebx7), "=c"(ecx7), "=d"(edx7)
+            : "a"(7u), "c"(0u));
+        g_smep = (ebx7 >> 7) & 1;
+    }
+
     unsigned int text_end = (unsigned int)_text_end & ~(PAGE_SIZE - 1u);
 
     // PT0: identity-map VA 0x000000-0x1FFFFF (512 страниц × 4КБ).
-    // .text ядра (0x1000..text_end): read-only + executable.
-    // Остальные страницы ядра: RW + NX (данные не исполняемы).
+    // Ядро (.text, .data, .bss): без PAE_USER — ring3 не видит ядро, а при
+    // SMEP ядро не может исполнять страницы с PAE_USER (= страницы юзера).
+    // Окно пользователя [USER_WINDOW_BASE, +SIZE): PAE_USER сохраняем — туда
+    // маппятся слоты программ; SMEP сработает, если ядро попробует туда прыгнуть.
     for (unsigned int i = 0; i < 512; i++) {
         unsigned int addr = i * PAGE_SIZE;
-        pae_t flags = PAE_P | PAE_USER;
+        pae_t flags = PAE_P;
 
-        int is_text = (addr >= 0x1000 && addr + PAGE_SIZE <= text_end);
-        if (!is_text)
-            flags |= PAE_RW;
-        if (!is_text && g_nx)
-            flags |= PAE_XD;
+        int in_user_window = (addr >= USER_WINDOW_BASE &&
+                              addr <  USER_WINDOW_BASE + USER_WINDOW_SIZE);
+        if (in_user_window) {
+            // PAE_USER: ring3 видит окно; SMEP блокирует ядро от прыжка сюда.
+            flags |= PAE_USER | PAE_RW;
+        } else {
+            // Ядровые страницы: без PAE_USER (SMEP), без PAE_XD.
+            // PAE_XD не ставим: pe-i386 linker генерирует IAT-стабы за
+            // пределами .text — точная граница исполняемого кода неизвестна.
+            // NX для юзера обеспечивается per-task PT.
+            int is_text = (addr >= 0x1000 && addr + PAGE_SIZE <= text_end);
+            if (!is_text) flags |= PAE_RW; // .text = read-only (CR0.WP)
+        }
 
         pt0[i] = (pae_t)addr | flags;
     }
@@ -69,17 +92,13 @@ void init_paging() {
     // 16КБ бьёт в 0x8C000 (NOT PRESENT) → #PF → halt.
     pt0[0x8C] = 0;
 
-    // PT1: identity-map VA 0x200000-0x3FFFFF (512 страниц × 4КБ).
-    // Ядро туда не заходит, но таблица нужна для корректной инициализации.
-    // Помечаем RW + NX (данные), без USER (ядро-only).
+    // PT1: identity-map VA 0x200000-0x3FFFFF, RW без USER (ядро-only).
     for (unsigned int i = 0; i < 512; i++) {
         unsigned int addr = 0x200000u + i * PAGE_SIZE;
-        pae_t flags = PAE_P | PAE_RW;
-        if (g_nx) flags |= PAE_XD;
-        pt1[i] = (pae_t)addr | flags;
+        pt1[i] = (pae_t)addr | PAE_P | PAE_RW;
     }
 
-    // PD: [0] → PT0 (0-2МБ, с USER: ядро работает в ring0), [1] → PT1 (2-4МБ).
+    // PD: [0] → PT0 (0-2МБ, USER=1 нужен для ring3-walk через pt0), [1] → PT1 (2-4МБ).
     pd[0] = (pae_t)(unsigned int)pt0 | PAE_P | PAE_RW | PAE_USER;
     pd[1] = (pae_t)(unsigned int)pt1 | PAE_P | PAE_RW;
     for (unsigned int i = 2; i < 512; i++) pd[i] = 0;
@@ -89,12 +108,16 @@ void init_paging() {
     pdpt[0] = (pae_t)(unsigned int)pd | PAE_P;
     pdpt[1] = pdpt[2] = pdpt[3] = 0;
 
-    // Включаем CR4.PAE (бит 5).
+    // CR4: бит 5 = PAE (обязателен для PAE-страниц и NX).
+    //      бит 20 = SMEP: запрещает ring0 исполнять страницы с PAE_USER=1
+    //      (= страницы пользователя). Защита от jump-to-user атак на ядро.
+    unsigned int cr4_set = 0x20u;
+    if (g_smep) cr4_set |= 0x100000u;
     __asm__ volatile(
         "mov %%cr4, %%eax\n"
-        "or $0x20, %%eax\n"
+        "or %0, %%eax\n"
         "mov %%eax, %%cr4\n"
-        ::: "eax"
+        :: "r"(cr4_set) : "eax"
     );
 
     // Если NX поддерживается: EFER.NXE = 1 (MSR 0xC0000080, бит 11).
@@ -116,6 +139,12 @@ void init_paging() {
         "mov %%eax, %%cr0\n"
         :: "r"((unsigned int)pdpt) : "eax"
     );
+
+    print_string("[paging] NX=");
+    print_string(g_nx   ? "on" : "off");
+    print_string(" SMEP=");
+    print_string(g_smep ? "on" : "off");
+    print_string("\n");
 }
 
 
@@ -215,12 +244,26 @@ void page_fault_handler_main(unsigned int faulting_address, unsigned int* frame)
     }
 
     unsigned int eip = frame[PF_FRAME_EIP];
-    print_string("\n\033[31m*** PAGE FAULT at 0x");
-    print_hex(faulting_address);
-    print_string(" from EIP=0x");
-    print_hex(eip);
-    print_string(" cs=0x");
-    print_hex(cs);
-    print_string(" ***\nSystem halted.\033[0m\n");
+    unsigned int err2 = frame[PF_FRAME_ERR];
+    // Бит 4 (I/D) + ring0 (U/S=0) = instruction fetch в ядре.
+    // Причина: NX на странице ядра (баг в paging) ИЛИ SMEP (ядро прыгнуло
+    // на страницу юзера). Различить без walk-PT-таблицы невозможно.
+    int is_kernel_exec_fault = (err2 & (1u << 4)) && !(err2 & (1u << 2));
+    if (is_kernel_exec_fault) {
+        print_string("\n\033[41;37m[SMEP/NX] kernel exec fault addr=0x");
+        print_hex(faulting_address);
+        print_string(" eip=0x");
+        print_hex(eip);
+        print_string("\033[0m\n");
+    } else {
+        print_string("\n\033[31m*** PAGE FAULT at 0x");
+        print_hex(faulting_address);
+        print_string(" from EIP=0x");
+        print_hex(eip);
+        print_string(" cs=0x");
+        print_hex(cs);
+        print_string(" ***\033[0m\n");
+    }
+    print_string("System halted.\n");
     while (1) { __asm__("hlt"); }
 }

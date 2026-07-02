@@ -1730,7 +1730,7 @@ void kernel_main() {
     init_heap();
     init_tasking();
     task_create("heartbeat", heartbeat_task);
-    task_create_user("ring3demo", ring3_spinner_task);
+    task_create("ring3demo", ring3_spinner_task); /* ring0: ядровые страницы без PAE_USER */
 
     VGA_MARK(72, 'C', 0x4F); /* pre-vfs_init */
 
