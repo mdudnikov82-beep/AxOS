@@ -1,138 +1,226 @@
 // =================================================================
-//  Paging: identity-mapping + защита кода ядра от записи
+//  Paging: PAE mode + W^X (Write XOR Execute)
 // =================================================================
 //
-// Отображаем первые 4 МБ виртуальной памяти 1:1 на физическую (этого
-// достаточно: ядро, FAT12-раздел, стек и видеопамять все лежат внутри
-// этого диапазона). Страницы, целиком занятые секцией .text ядра,
-// помечаются как read-only — после включения CR0.WP даже код ring0
-// не сможет записать в них (случайно или намеренно).
+// PAE (Physical Address Extension) - 3-уровневые таблицы с 8-байтными
+// PTE. Структура для первых 4 МБ:
+//   CR3 → PDPT[0..3]                 (0x9C000, 4 × 8Б, 32Б-выровн.)
+//   PDPT[0] → PD                     (0x9D000, 512 × 8Б)
+//   PD[0]   → PT0                    (0x9E000, VA 0..2МБ, 512 × 8Б)
+//   PD[1]   → PT1                    (0x9F000, VA 2..4МБ, 512 × 8Б)
+//
+// W^X: бит 63 PTE = XD (Execute-Disable) при EFER.NXE=1.
+//   Страницы кода пользователя: Present|User, без R/W, без XD → R+X
+//   Страницы данных/стека:      Present|User|R/W|XD             → RW+NX
+//   Spin-страница (15):         Present|User|R/W                 → RW+X
+//
+// Ядро: .text → R+X (без записи); данные → RW+NX.
 
 #include "paging.h"
 #include "tasking.h"
 
-#define PAGE_PRESENT 0x1
-#define PAGE_RW      0x2
-#define PAGE_USER    0x4
-#define PAGE_SIZE    0x1000
+#define PAE_P    (1ULL)        // Present
+#define PAE_RW   (1ULL << 1)  // Read/Write
+#define PAE_USER (1ULL << 2)  // User/Supervisor
+#define PAE_XD   (1ULL << 63) // Execute-Disable (NX)
 
-// Каталог страниц и таблица страниц размещаются по фиксированным физическим
-// адресам в свободной области между стеком (растёт вниз от 0x90000) и
-// видеопамятью (0xA0000), а не как статические массивы в .bss. Так размер
-// kernel.bin не растёт на 8 КБ и не выходит за пределы региона, который
-// boot.asm грузит с диска. См. PAGE_DIRECTORY/PAGE_TABLE в paging.h.
+#define PAGE_SIZE 0x1000u
+
+typedef unsigned long long pae_t;
 
 extern void print_string(char* str);
-extern char _text_end[]; // GCC: __text_end из kernel.ld
+extern char _text_end[];
+
+// 1 если ЦП поддерживает NX/XD, определяется в init_paging()
+static int g_nx = 0;
 
 void init_paging() {
-    unsigned int text_end = (unsigned int)_text_end & ~(PAGE_SIZE - 1);
-    unsigned int* page_table = PAGE_TABLE;
-    unsigned int* page_directory = PAGE_DIRECTORY;
+    pae_t* pdpt = GLOBAL_PDPT;
+    pae_t* pd   = GLOBAL_PD;
+    pae_t* pt0  = GLOBAL_PT0;
+    pae_t* pt1  = GLOBAL_PT1;
 
-    for (unsigned int i = 0; i < 1024; i++) {
+    // Проверяем поддержку NX через CPUID.80000001H:EDX[20]
+    unsigned int max_ext = 0, edx_ext = 0;
+    __asm__ volatile("cpuid" : "=a"(max_ext) : "a"(0x80000000u) : "ebx", "ecx", "edx");
+    if (max_ext >= 0x80000001u)
+        __asm__ volatile("cpuid" : "=d"(edx_ext) : "a"(0x80000001u) : "ebx", "ecx");
+    g_nx = (edx_ext >> 20) & 1;
+
+    unsigned int text_end = (unsigned int)_text_end & ~(PAGE_SIZE - 1u);
+
+    // PT0: identity-map VA 0x000000-0x1FFFFF (512 страниц × 4КБ).
+    // .text ядра (0x1000..text_end): read-only + executable.
+    // Остальные страницы ядра: RW + NX (данные не исполняемы).
+    for (unsigned int i = 0; i < 512; i++) {
         unsigned int addr = i * PAGE_SIZE;
-        unsigned int flags = PAGE_PRESENT | PAGE_USER;
+        pae_t flags = PAE_P | PAE_USER;
 
-        // Страница целиком внутри .text (от 0x1000 до конца кода ядра) -> только чтение
-        if (!(addr >= 0x1000 && addr + PAGE_SIZE <= text_end)) {
-            flags |= PAGE_RW;
-        }
+        int is_text = (addr >= 0x1000 && addr + PAGE_SIZE <= text_end);
+        if (!is_text)
+            flags |= PAE_RW;
+        if (!is_text && g_nx)
+            flags |= PAE_XD;
 
-        page_table[i] = addr | flags;
+        pt0[i] = (pae_t)addr | flags;
     }
 
-    // Guard page: стек ядра начинается в 0x90000 и растёт вниз.
-    // Страница 0x8C000 помечается NOT PRESENT — overflow глубже 16 КБ
-    // вызывает #PF и останавливает систему, вместо того чтобы молча
-    // затереть данные кучи (0x70000-0x90000).
-    page_table[0x8C] = 0;
+    // Guard page: стек ядра растёт вниз от 0x90000; overflow глубже
+    // 16КБ бьёт в 0x8C000 (NOT PRESENT) → #PF → halt.
+    pt0[0x8C] = 0;
 
-    page_directory[0] = ((unsigned int)page_table) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
-    for (unsigned int i = 1; i < 1024; i++) {
-        page_directory[i] = 0;
+    // PT1: identity-map VA 0x200000-0x3FFFFF (512 страниц × 4КБ).
+    // Ядро туда не заходит, но таблица нужна для корректной инициализации.
+    // Помечаем RW + NX (данные), без USER (ядро-only).
+    for (unsigned int i = 0; i < 512; i++) {
+        unsigned int addr = 0x200000u + i * PAGE_SIZE;
+        pae_t flags = PAE_P | PAE_RW;
+        if (g_nx) flags |= PAE_XD;
+        pt1[i] = (pae_t)addr | flags;
     }
 
+    // PD: [0] → PT0 (0-2МБ, с USER: ядро работает в ring0), [1] → PT1 (2-4МБ).
+    pd[0] = (pae_t)(unsigned int)pt0 | PAE_P | PAE_RW | PAE_USER;
+    pd[1] = (pae_t)(unsigned int)pt1 | PAE_P | PAE_RW;
+    for (unsigned int i = 2; i < 512; i++) pd[i] = 0;
+
+    // PDPT: [0] → PD (покрывает 0..3ГБ; остальные записи - 0).
+    // PDPTE не имеет U/S и R/W битов, только P=1.
+    pdpt[0] = (pae_t)(unsigned int)pd | PAE_P;
+    pdpt[1] = pdpt[2] = pdpt[3] = 0;
+
+    // Включаем CR4.PAE (бит 5).
+    __asm__ volatile(
+        "mov %%cr4, %%eax\n"
+        "or $0x20, %%eax\n"
+        "mov %%eax, %%cr4\n"
+        ::: "eax"
+    );
+
+    // Если NX поддерживается: EFER.NXE = 1 (MSR 0xC0000080, бит 11).
+    if (g_nx) {
+        __asm__ volatile(
+            "mov $0xC0000080, %%ecx\n"
+            "rdmsr\n"
+            "or $0x800, %%eax\n"
+            "wrmsr\n"
+            ::: "eax", "ecx", "edx"
+        );
+    }
+
+    // Загружаем CR3 (адрес PDPT), включаем PG (бит 31) + WP (бит 16).
     __asm__ volatile(
         "mov %0, %%cr3\n"
         "mov %%cr0, %%eax\n"
-        "or $0x80010000, %%eax\n" // бит 31 (PG) + бит 16 (WP)
+        "or $0x80010000, %%eax\n"
         "mov %%eax, %%cr0\n"
-        :: "r"(page_directory) : "eax"
+        :: "r"((unsigned int)pdpt) : "eax"
     );
 }
 
-unsigned int paging_create_user_directory(int user_slot_index, unsigned int phys_slot_base) {
-    unsigned int* src_table = PAGE_TABLE;
-    unsigned int* dst_table = (unsigned int*)(PT_POOL_BASE + (unsigned int)user_slot_index * PAGE_SIZE);
-    unsigned int* dst_dir   = (unsigned int*)(PD_POOL_BASE + (unsigned int)user_slot_index * PAGE_SIZE);
 
-    // Копия глобальной PT, но без PAGE_USER - ring3 этой задачи по
-    // умолчанию не видит ничего (kernel-only).
-    for (unsigned int i = 0; i < 1024; i++) {
-        dst_table[i] = src_table[i] & ~(unsigned int)PAGE_USER;
-    }
+unsigned int paging_create_user_directory(int user_slot_index,
+                                           unsigned int phys_slot_base,
+                                           unsigned int wx_delta,
+                                           unsigned int wx_data_off) {
+    // Per-task pool (slot = 0..3):
+    //   PDPT: PDPT_POOL_BASE + slot*32  (32Б, выровнено на 32Б)
+    //   PD:   PD_POOL_BASE   + slot*4КБ (4КБ, выровнено на 4КБ)
+    //   PT:   PT_POOL_BASE   + slot*4КБ (512 × 8Б)
+    pae_t* dst_pdpt = (pae_t*)(PDPT_POOL_BASE + (unsigned int)user_slot_index * 32u);
+    pae_t* dst_pd   = (pae_t*)(PD_POOL_BASE   + (unsigned int)user_slot_index * PAGE_SIZE);
+    pae_t* dst_pt   = (pae_t*)(PT_POOL_BASE   + (unsigned int)user_slot_index * PAGE_SIZE);
 
-    // Окно 0x100000-0x108000 -> физический слот этой задачи, PRESENT|RW|USER.
-    unsigned int first_page = USER_WINDOW_BASE / PAGE_SIZE;
+    // Копируем глобальную PT0 в dst_pt, сбрасывая USER (кольцо 3 по
+    // умолчанию не видит ничего ядра).
+    pae_t* src_pt = GLOBAL_PT0;
+    for (unsigned int i = 0; i < 512; i++)
+        dst_pt[i] = src_pt[i] & ~PAE_USER;
+
+    // Окно [USER_WINDOW_BASE, +USER_WINDOW_SIZE): 16 страниц пользователя.
+    // W^X: data_start = wx_delta + wx_data_off - байт в слоте, с которого
+    // начинаются writable данные (.bss и выше).
+    unsigned int first_page = USER_WINDOW_BASE / PAGE_SIZE; // = 256
+    unsigned int data_start = wx_delta + wx_data_off;
+    int has_boundary = (wx_data_off > 0);
+
     for (unsigned int i = 0; i < USER_WINDOW_PAGES; i++) {
-        unsigned int addr = phys_slot_base + i * PAGE_SIZE;
-        dst_table[first_page + i] = addr | PAGE_PRESENT | PAGE_RW | PAGE_USER;
+        unsigned int phys = phys_slot_base + i * PAGE_SIZE;
+        pae_t entry = (pae_t)phys | PAE_P | PAE_USER;
+
+        int is_spin = (i == USER_WINDOW_PAGES - 1u);
+
+        if (!has_boundary || is_spin) {
+            // Нет границы W^X или spin-страница: RW (исполняемо).
+            entry |= PAE_RW;
+        } else {
+            // Slot byte range этой страницы: [i*0x1000 .. i*0x1000+0xFFF]
+            unsigned int byte_end = i * PAGE_SIZE + PAGE_SIZE - 1u;
+            if (byte_end < data_start) {
+                // Страница целиком до data_start → код: R+X (без записи)
+                // PAE_RW не устанавливаем → write-protected всегда
+            } else {
+                // Страница содержит данные → данные: RW + (NX если ЦП поддерживает)
+                entry |= PAE_RW;
+                if (g_nx) entry |= PAE_XD;
+            }
+        }
+
+        dst_pt[first_page + i] = entry;
     }
 
-    dst_dir[0] = ((unsigned int)dst_table) | PAGE_PRESENT | PAGE_RW | PAGE_USER;
-    for (unsigned int i = 1; i < 1024; i++) {
-        dst_dir[i] = 0;
-    }
+    // PD: [0] → dst_pt (0-2МБ, с USER; пользователь видит только своё окно),
+    //     [1] → глобальная PT1 без USER (2-4МБ: ядро-only).
+    pae_t* src_pd = GLOBAL_PD;
+    for (unsigned int i = 0; i < 512; i++)
+        dst_pd[i] = src_pd[i];
+    dst_pd[0] = (pae_t)(unsigned int)dst_pt | PAE_P | PAE_RW | PAE_USER;
+    dst_pd[1] = src_pd[1] & ~PAE_USER;  // 2-4МБ: ядро-only
 
-    return (unsigned int)dst_dir;
+    // PDPT: [0] → dst_pd, остальные 0.
+    dst_pdpt[0] = (pae_t)(unsigned int)dst_pd | PAE_P;
+    dst_pdpt[1] = dst_pdpt[2] = dst_pdpt[3] = 0;
+
+    return (unsigned int)dst_pdpt;
 }
 
 static void print_hex(unsigned int val) {
     char hex_digits[] = "0123456789ABCDEF";
-    char buf[9];
-    buf[8] = '\0';
-    for (int i = 7; i >= 0; i--) {
-        buf[i] = hex_digits[val & 0xF];
-        val >>= 4;
-    }
+    char buf[9]; buf[8] = '\0';
+    for (int i = 7; i >= 0; i--) { buf[i] = hex_digits[val & 0xF]; val >>= 4; }
     print_string(buf);
 }
 
-// Индексы в кадре pusha (idt.asm): после pusha (8 dword) и кода ошибки CPU
-// кладёт EIP, затем CS.
+#define PF_FRAME_ERR 8   // код ошибки CPU (P/W/U/I bits)
 #define PF_FRAME_EIP 9
 #define PF_FRAME_CS  10
 
-// Вызывается из idt.asm при исключении #14. CR2 содержит адрес,
-// обращение к которому вызвало сбой. frame - указатель на сохранённые
-// pusha-регистры (idt.asm передаёт esp сразу после pusha).
 void page_fault_handler_main(unsigned int faulting_address, unsigned int* frame) {
     unsigned int cs = frame[PF_FRAME_CS];
 
-    // Ring3-fault изолированной run-задачи - убиваем только её, а не всю
-    // систему: помечаем на удаление (schedule() реапнет на следующем
-    // тике) и перенаправляем EIP на безопасный "jmp $" в её собственном
-    // окне (USER_SPIN_ADDR, записан при создании задачи в tasking.c).
     if ((cs & 3) == 3 && task_current_is_isolated()) {
-        print_string("\n\033[33m*** PAGE FAULT in '"); // жёлтый - предупреждение, не фатально
+        unsigned int err = frame[PF_FRAME_ERR];
+        print_string("\n\033[33m*** PAGE FAULT in '");
         print_string(task_current_name());
         print_string("' at 0x");
         print_hex(faulting_address);
+        if (err & (1u << 4))
+            print_string(" [NX execute violation]");
+        else if (err & (1u << 1))
+            print_string(" [W^X write violation]");
         print_string(" - task killed ***\033[0m\n");
-
         task_mark_current_exiting();
         frame[PF_FRAME_EIP] = USER_SPIN_ADDR;
         return;
     }
 
-    // Fault в ring0 (баг ядра) или у встроенной демо-задачи без изоляции
-    // (ring3demo/usermode) - как раньше, останавливаем всю систему.
-    print_string("\n\033[31m*** PAGE FAULT at 0x"); // красный - фатально, система встала
+    unsigned int eip = frame[PF_FRAME_EIP];
+    print_string("\n\033[31m*** PAGE FAULT at 0x");
     print_hex(faulting_address);
+    print_string(" from EIP=0x");
+    print_hex(eip);
+    print_string(" cs=0x");
+    print_hex(cs);
     print_string(" ***\nSystem halted.\033[0m\n");
-
-    while (1) {
-        __asm__("hlt");
-    }
+    while (1) { __asm__("hlt"); }
 }

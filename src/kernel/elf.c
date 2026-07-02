@@ -20,13 +20,14 @@
 #include "elf.h"
 #include "tasking.h"  // aslr_next_random()
 
-#define ELF_MAX_PHNUM 4
+#define ELF_MAX_PHNUM 5
 
 #define ELF_EHDR_SIZE 52
 #define ELF_PHDR_SIZE 32
 
 #define PT_LOAD       1
 #define PT_AXOS_RELOC 0x6A584953u
+#define PT_AXOS_WX    0x6A584955u  // W^X boundary: один uint32 = flat offset начала .bss
 #define ET_EXEC       2
 #define EM_386        3
 
@@ -71,6 +72,7 @@ int elf_load(unsigned char* staging_buf, unsigned int staging_size,
     unsigned char* reloc_data  = 0;
     unsigned int   reloc_count = 0;
     unsigned int   code_max_end = 0;
+    unsigned int   wx_data_off  = 0;  // flat offset начала .bss (0 = нет)
     int found_load = 0;
 
     for (unsigned short i = 0; i < e_phnum; i++) {
@@ -86,6 +88,16 @@ int elf_load(unsigned char* staging_buf, unsigned int staging_size,
                 reloc_count = read_u32(reloc_data);
                 if (reloc_count > (p_filesz - 4u) / 4u)
                     reloc_count = 0;
+            }
+            continue;
+        }
+
+        if (p_type == PT_AXOS_WX) {
+            unsigned int p_offset = read_u32(ph + 4);
+            unsigned int p_filesz = read_u32(ph + 16);
+            if (p_offset <= staging_size && p_filesz >= 4u &&
+                p_filesz <= staging_size - p_offset) {
+                wx_data_off = read_u32(staging_buf + p_offset);
             }
             continue;
         }
@@ -176,8 +188,9 @@ int elf_load(unsigned char* staging_buf, unsigned int staging_size,
         entry_d - load_base_vaddr >= max_segment_end_offset)
         return ELF_ERR_BOUNDS;
 
-    out->entry        = entry_d;
-    out->max_vaddr_end = (max_end + 15u) & ~15u;
-    out->aslr_delta   = delta;
+    out->entry          = entry_d;
+    out->max_vaddr_end  = (max_end + 15u) & ~15u;
+    out->aslr_delta     = delta;
+    out->wx_data_offset = wx_data_off;
     return ELF_OK;
 }

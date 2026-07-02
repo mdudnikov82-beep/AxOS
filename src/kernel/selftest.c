@@ -9,10 +9,9 @@
 
 #include "vfs.h"
 
-#define PAGE_PRESENT 0x1
-#define PAGE_RW      0x2
-// Тот же физический адрес таблицы страниц, что и в paging.c.
-#define PAGE_TABLE   ((unsigned int*)0x9D000)
+// PAE: PT для VA 0..2МБ теперь по адресу 0x9E000 (GLOBAL_PT0 из paging.h),
+// каждая запись 8 байт. Бит 0 = P, бит 1 = R/W.
+#define PAE_PT0      ((unsigned long long*)0x9E000)
 
 extern void print_string(char* str);
 extern int memtest_demo();
@@ -25,32 +24,35 @@ static int buf_eq(unsigned char* a, unsigned char* b, unsigned int len) {
 }
 
 static int test_paging() {
-    unsigned int cr0;
+    unsigned int cr0, cr4;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
 
     if ((cr0 & 0x80010000) != 0x80010000) {
         print_string("\033[31mPaging: FAIL (CR0.PG/WP not set)\033[0m\n");
         return 0;
     }
+    if (!(cr4 & 0x20)) {
+        print_string("\033[31mPaging: FAIL (CR4.PAE not set)\033[0m\n");
+        return 0;
+    }
 
-    unsigned int* page_table = PAGE_TABLE;
-
-    // Страница 0x1000 (.text ядра) должна быть PRESENT и read-only.
-    unsigned int text_pte = page_table[1];
-    if (!(text_pte & PAGE_PRESENT) || (text_pte & PAGE_RW)) {
+    // PAE: PT0 (0x9E000) покрывает VA 0..2МБ, запись i = PTE для VA i*4КБ.
+    // PT0[1] → VA 0x1000 (.text ядра): PRESENT, read-only (R/W=0).
+    // PT0[0x60] → VA 0x60000 (куча): PRESENT, writable (R/W=1).
+    unsigned long long text_pte = PAE_PT0[1];
+    if (!(text_pte & 1) || (text_pte & 2)) {
         print_string("\033[31mPaging: FAIL (.text page not read-only)\033[0m\n");
         return 0;
     }
 
-    // Страница 0x60000 (начало кучи, см. HEAP_START в heap.c) должна быть
-    // PRESENT и доступна на запись.
-    unsigned int heap_pte = page_table[0x60];
-    if (!(heap_pte & PAGE_PRESENT) || !(heap_pte & PAGE_RW)) {
+    unsigned long long heap_pte = PAE_PT0[0x60];
+    if (!(heap_pte & 1) || !(heap_pte & 2)) {
         print_string("\033[31mPaging: FAIL (heap page not writable)\033[0m\n");
         return 0;
     }
 
-    print_string("\033[32mPaging: PASS\033[0m\n");
+    print_string("\033[32mPaging: PASS (PAE+W^X)\033[0m\n");
     return 1;
 }
 

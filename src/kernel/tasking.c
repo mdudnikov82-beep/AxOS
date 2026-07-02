@@ -37,7 +37,8 @@ typedef struct task {
     unsigned long ticks;
     int user_slot_index; // -1 для task0/heartbeat/ring3demo; 0..3 для run-задач (kernel.c)
     int exiting;         // 1 - schedule() уберёт задачу из кольца на следующем тике
-    unsigned int mls_level; // MLS-уровень чувствительности (s0..s15) - см. tasking.h
+    unsigned int mls_level;          // MLS-уровень чувствительности (s0..s15)
+    unsigned long long syscall_mask; // seccomp: бит N = syscall N разрешён; 0 = нет фильтра
     struct task* next;
 } task_t;
 
@@ -96,6 +97,7 @@ void init_tasking() {
     task0.user_slot_index = -1;
     task0.exiting = 0;
     task0.mls_level = 0;
+    task0.syscall_mask = 0;
     task0.next = &task0;
 
     // Отдельный стек ядра для task0: НЕ совпадает с её "живым" стеком
@@ -138,6 +140,7 @@ void task_create(char* name, void (*entry)(void)) {
     new_task->user_slot_index = -1;
     new_task->exiting = 0;
     new_task->mls_level = 0;
+    new_task->syscall_mask = 0;
 
     // Свой стек ядра (ESP0) для единообразия - schedule() обновляет
     // TSS.ESP0 для каждой задачи, даже если она остаётся в ring0.
@@ -187,6 +190,7 @@ void task_create_user(char* name, void (*entry)(void)) {
     new_task->user_slot_index = -1;
     new_task->exiting = 0;
     new_task->mls_level = 0;
+    new_task->syscall_mask = 0;
 
     new_task->next = current_task->next;
     current_task->next = new_task;
@@ -214,7 +218,8 @@ void task_create_user(char* name, void (*entry)(void)) {
 #define STACK_ASLR_MAX_SHIFT 1024
 
 void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index,
-                               int argc, unsigned int argv_vaddr, unsigned int entry_vaddr) {
+                               int argc, unsigned int argv_vaddr, unsigned int entry_vaddr,
+                               unsigned int wx_delta, unsigned int wx_data_off) {
     unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
     if (!kstack) return;
 
@@ -249,10 +254,12 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     new_task->id = next_id++;
     copy_name(new_task->name, name);
     new_task->ticks = 0;
-    new_task->page_directory = paging_create_user_directory(user_slot_index, phys_slot_base);
+    new_task->page_directory = paging_create_user_directory(user_slot_index, phys_slot_base,
+                                                              wx_delta, wx_data_off);
     new_task->user_slot_index = user_slot_index;
     new_task->exiting = 0;
     new_task->mls_level = 0; // s0 по умолчанию - поднимается самой задачей через SYS_SET_LEVEL
+    new_task->syscall_mask = 0; // нет фильтра - задача устанавливает свой через SYS_SECCOMP
 
     // "jmp $" (EB FE) в последние 2 байта окна задачи - см. USER_SPIN_ADDR
     // (paging.h). Сюда page_fault_handler_main перенаправляет EIP этой
@@ -318,6 +325,10 @@ void task_mark_current_exiting() {
     if (current_task) {
         current_task->exiting = 1;
     }
+}
+
+int task_current_is_exiting(void) {
+    return current_task ? current_task->exiting : 0;
 }
 
 // true, если текущая задача изолирована (см. tasking.h).
@@ -405,4 +416,27 @@ void task_kill_by_slot(int slot) {
         }
         t = t->next;
     } while (t != current_task);
+}
+
+// Seccomp: устанавливает/сужает маску разрешённых syscall'ов текущей задачи.
+// Если маска ещё не установлена (0) - ставим напрямую.
+// Если уже установлена - применяем AND (только сужение, как в Linux).
+void task_set_syscall_mask(unsigned long long mask) {
+    if (!current_task) return;
+    if (current_task->syscall_mask == 0)
+        current_task->syscall_mask = mask;
+    else
+        current_task->syscall_mask &= mask;
+}
+
+unsigned long long task_get_syscall_mask(void) {
+    return current_task ? current_task->syscall_mask : 0;
+}
+
+// 1 если syscall разрешён: фильтр не установлен (mask==0) ИЛИ бит num установлен.
+int task_syscall_allowed(unsigned char num) {
+    if (!current_task) return 1;
+    unsigned long long mask = current_task->syscall_mask;
+    if (mask == 0) return 1;
+    return (mask >> num) & 1;
 }

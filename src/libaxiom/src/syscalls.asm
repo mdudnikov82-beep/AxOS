@@ -42,6 +42,7 @@ global _ax_clipboard_set
 global _ax_clipboard_get
 global _ax_set_level
 global _ax_pci_get_device
+global _ax_seccomp_raw
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -599,6 +600,25 @@ _ax_readdir:
     mov ah, 0x11            ; SYS_READDIR
     int 0x80
     mov eax, [esi+24]       ; a->result (offset 24)
+    pop ebx
+    pop esi
+    ret
+
+; void ax_seccomp_raw(unsigned int mask_lo, unsigned int mask_hi)
+; Строит struct seccomp_args { mask_lo, mask_hi } на стеке.
+; Устанавливает/сужает seccomp-маску текущей задачи.
+_ax_seccomp_raw:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=mask_lo, [esp+16]=mask_hi
+    mov eax, [esp+12]       ; mask_lo
+    mov ecx, [esp+16]       ; mask_hi
+    push ecx                ; struct.mask_hi (offset 4)
+    push eax                ; struct.mask_lo (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x23            ; SYS_SECCOMP
+    int 0x80
+    add esp, 8
     pop ebx
     pop esi
     ret

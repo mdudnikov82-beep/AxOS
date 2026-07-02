@@ -34,8 +34,11 @@ void task_create_user(char* name, void (*entry)(void));
 // совпадает с USER_WINDOW_BASE (любая программа линкуется с этого адреса,
 // см. src/user/user.ld), но теперь это решается данными из файла, а не
 // зашитой константой.
+// wx_delta     = ASLR delta в байтах (elf_load_result.aslr_delta)
+// wx_data_off  = flat offset начала .bss (elf_load_result.wx_data_offset; 0=нет W^X)
 void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user_slot_index,
-                               int argc, unsigned int argv_vaddr, unsigned int entry_vaddr);
+                               int argc, unsigned int argv_vaddr, unsigned int entry_vaddr,
+                               unsigned int wx_delta, unsigned int wx_data_off);
 
 // Вызывается из idt.asm при каждом IRQ0: сохраняет esp текущей задачи,
 // переключается на следующую по кольцу и возвращает её esp. Если
@@ -45,6 +48,9 @@ unsigned int schedule(unsigned int current_esp);
 
 // Печатает список задач (id, имя, число тиков) - используется командой `ps`.
 void print_task_list();
+
+// Возвращает 1 если текущая задача уже помечена на завершение.
+int task_current_is_exiting(void);
 
 // Помечает текущую задачу на завершение: schedule() уберёт её из кольца
 // на следующем тике, освободит её kernel-стек/task_t и (если изолирована)
@@ -87,5 +93,13 @@ void task_set_current_mls_level(unsigned int level);
 // xorshift32 ГПСЧ, общий для ASLR стека и кучи. Сид = timer_ticks,
 // обновляется при каждом вызове.
 unsigned int aslr_next_random(void);
+
+// Seccomp-фильтр: 64-битная маска разрешённых syscall'ов (бит N = syscall N OK).
+// 0 = фильтр не установлен (все syscall'ы разрешены).
+// task_set_syscall_mask применяет AND с текущей маской — только сужение.
+// task_syscall_allowed возвращает 1 если syscall разрешён (или фильтр не установлен).
+void task_set_syscall_mask(unsigned long long mask);
+unsigned long long task_get_syscall_mask(void);
+int task_syscall_allowed(unsigned char num);
 
 #endif

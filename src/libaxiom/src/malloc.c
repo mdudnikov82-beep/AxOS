@@ -1,20 +1,33 @@
 #include "../include/axiom.h"
 
-// Shadow memory + Memory Tagging (software MTE, 32-bit теги):
+// Hardened heap: shadow memory + 32-bit generation tags + redzones + quarantine.
 //
-// Два параллельных shadow-массива (1 байт на 8 байт кучи):
-//   shadow_state[i]  — состояние гранулы: OK / RZONE / FREED  (4 KB)
-//   shadow_tag[i]    — 32-битный тег поколения (1..2^32-1; 0 = freed) (16 KB)
+// Макет каждого блока:
+//   [struct block : HDR]
+//   [левая redzone : RZONE_SIZE байт, 0xBE]   ← shadow RZONE
+//   [пользовательские данные : N байт, 0x00]  ← shadow OK + 32-bit тег
+//   [правая redzone : RZONE_SIZE байт, 0xBE]  ← shadow RZONE
+//   [канарейка : CANARY_SIZE байт, BASE^tag]
 //
-// 32 бит → вероятность угадать ≈ 1/4294967295 ≈ 2.3×10⁻¹⁰ (практически невозможно).
+// Shadow-массивы (гранула SHADOW_GRANULE = 8 байт):
+//   shadow_state[i]  — OK / RZONE / FREED
+//   shadow_tag[i]    — 32-бит тег поколения (1..2^32-1; 0 = rzone/freed)
+//
+// 32 бит → вероятность угадать тег ≈ 2.3×10⁻¹⁰ (практически невозможно).
+//
+// Что ловится:
+//   heap underflow     → left redzone 0xBE испорчен при free()
+//   heap overflow      → right redzone 0xBE испорчен при free()
+//   heap overflow+     → канарейка BASE^tag не совпала
+//   use-after-free     → shadow FREED; ax_check_tag() возвращает 0
+//   double-free        → magic == QUARANTINE при повторном free()
+//   stale ptr (reuse)  → новое поколение = новый 32-бит тег; ax_check_tag() = 0
+//   данные прошлого    → zero-on-alloc: всегда 0x00 при выдаче
 //
 // API:
 //   ax_alloc_tag(ptr)              — тег текущего поколения (0 если freed).
 //   ax_check(ptr, size)            — доступен ли диапазон (state == OK).
 //   ax_check_tag(ptr, tag, size)   — доступен И тег совпадает.
-//
-// ax_check_tag ловит use-after-free даже после переиспользования адреса:
-// новое поколение имеет другой тег → возвращает 0.
 
 #define ALIGN4(n) (((unsigned int)(n) + 3u) & ~3u)
 
@@ -42,7 +55,7 @@ struct block {
     struct block* next;
     unsigned int  free;
     unsigned int  magic;
-    unsigned int  tag;    // 8-битный тег поколения (1-255)
+    unsigned int  tag;    // 32-битный тег поколения (1..2^32-1)
 };
 
 #define HDR sizeof(struct block)
@@ -190,7 +203,8 @@ static void quarantine_push(struct block* b) {
 void* ax_malloc(unsigned int size) {
     if (size == 0) return 0;
     size = ALIGN4(size);
-    unsigned int total = RZONE_SIZE + size + CANARY_SIZE;
+    // Макет: [lzone:RZONE_SIZE][user:size][rzone:RZONE_SIZE][canary:CANARY_SIZE]
+    unsigned int total = RZONE_SIZE + size + RZONE_SIZE + CANARY_SIZE;
 
     struct block* b = 0;
     struct block* prev = 0, *cur = free_list;
@@ -211,7 +225,8 @@ void* ax_malloc(unsigned int size) {
         b->size = total;
     }
 
-    unsigned int user_size = b->size - RZONE_SIZE - CANARY_SIZE;
+    // user_size = байты полезных данных (без обеих rzone и canary)
+    unsigned int user_size = b->size - 2u * RZONE_SIZE - CANARY_SIZE;
     unsigned int tag       = next_tag();
 
     b->free  = 0;
@@ -219,14 +234,23 @@ void* ax_malloc(unsigned int size) {
     b->magic = MAGIC_ALLOC;
     b->tag   = tag;
 
+    // Левая redzone
     unsigned char* lzone = (unsigned char*)b + HDR;
     for (unsigned int i = 0; i < RZONE_SIZE; i++) lzone[i] = RZONE_BYTE;
     shadow_fill(lzone, RZONE_SIZE, SHADOW_STATE_RZONE, 0);
 
+    // Пользовательские данные: zero-on-alloc + shadow OK
     void* ptr = (void*)(lzone + RZONE_SIZE);
-    shadow_fill(ptr, user_size, SHADOW_STATE_OK, (unsigned char)tag);
+    for (unsigned int i = 0; i < user_size; i++) ((unsigned char*)ptr)[i] = 0;
+    shadow_fill(ptr, user_size, SHADOW_STATE_OK, tag);
 
-    *(unsigned int*)((char*)ptr + user_size) = tagged_canary(tag);
+    // Правая redzone
+    unsigned char* rzone = (unsigned char*)ptr + user_size;
+    for (unsigned int i = 0; i < RZONE_SIZE; i++) rzone[i] = RZONE_BYTE;
+    shadow_fill(rzone, RZONE_SIZE, SHADOW_STATE_RZONE, 0);
+
+    // Канарейка после правой rzone
+    *(unsigned int*)(rzone + RZONE_SIZE) = tagged_canary(tag);
 
     return ptr;
 }
@@ -244,8 +268,14 @@ void ax_free(void* ptr) {
     for (unsigned int i = 0; i < RZONE_SIZE; i++)
         if (lzone[i] != RZONE_BYTE) heap_corrupted("left redzone underflow");
 
-    unsigned int user_size = b->size - RZONE_SIZE - CANARY_SIZE;
-    if (*(unsigned int*)((char*)ptr + user_size) != tagged_canary(b->tag))
+    unsigned int user_size = b->size - 2u * RZONE_SIZE - CANARY_SIZE;
+
+    // Правая redzone: overflow между концом данных и канарейкой
+    unsigned char* rzone = (unsigned char*)ptr + user_size;
+    for (unsigned int i = 0; i < RZONE_SIZE; i++)
+        if (rzone[i] != RZONE_BYTE) heap_corrupted("right redzone overflow");
+
+    if (*(unsigned int*)(rzone + RZONE_SIZE) != tagged_canary(b->tag))
         heap_corrupted("buffer overflow (canary)");
 
     b->magic = MAGIC_QUARANTINE;

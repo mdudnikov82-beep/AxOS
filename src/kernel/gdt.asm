@@ -1,5 +1,5 @@
 ; Физический адрес и размер TSS (см. src/kernel/tss.c)
-TSS_BASE  equ 0x9E000
+TSS_BASE  equ 0x9B000
 TSS_LIMIT equ 0x67 ; 104 байта - 1
 
 ; RELOC_DELTA - поправка для gdt_descriptor ниже, если этот файл

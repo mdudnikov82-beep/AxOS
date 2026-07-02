@@ -37,6 +37,10 @@ echo Compiling Paging (C)...
 gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/paging.c -o build/paging.o
 if %errorlevel% neq 0 goto :error
 
+echo Compiling Kernel CFI...
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -c src/kernel/kcfi.c -o build/kcfi.o
+if %errorlevel% neq 0 goto :error
+
 echo Compiling TSS (C)...
 gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/tss.c -o build/tss.o
 if %errorlevel% neq 0 goto :error
@@ -85,9 +89,13 @@ echo Compiling Usermode (ring3 entry)...
 .\tools\nasm.exe -f elf32 src\kernel\usermode.asm -o build\usermode.o
 if %errorlevel% neq 0 goto :error
 
+echo Compiling KCFI (Forward-edge CFI for syscall_table)...
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/kernel -c src/kernel/kcfi.c -o build/kcfi.o
+if %errorlevel% neq 0 goto :error
+
 echo Linking to PE...
 :: ??????? ? ??????, ??????? ?? ???????? (i386pe)
-ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\elf.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\pci.o build\syscalls.o build\usermode.o -o build\kernel.exe
+ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\kcfi.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\elf.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\pci.o build\syscalls.o build\usermode.o -o build\kernel.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping to Binary...
@@ -650,6 +658,38 @@ if %errorlevel% neq 0 goto :error
 
 echo Copying user program into fs/ for FAT12 image...
 copy /b build\cfidemo.elf fs\CFI.BIN
+if %errorlevel% neq 0 goto :error
+
+echo Compiling user program (wxdemo.c)...
+gcc -m32 -ffreestanding -fstack-protector -finstrument-functions -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\wxdemo.c -o build\wxdemo.o
+if %errorlevel% neq 0 goto :error
+
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\wxdemo.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o build\libaxiom\stack_chk.o build\libaxiom\cfi.o -o build\wxdemo.exe
+if %errorlevel% neq 0 goto :error
+
+objcopy -O binary build\wxdemo.exe build\wxdemo.bin
+if %errorlevel% neq 0 goto :error
+
+python tools\make_elf.py build\wxdemo.bin build\wxdemo.elf
+if %errorlevel% neq 0 goto :error
+
+copy /b build\wxdemo.elf fs\WXDEMO.BIN
+if %errorlevel% neq 0 goto :error
+
+echo Compiling user program (scdemo.c)...
+gcc -m32 -ffreestanding -fstack-protector -finstrument-functions -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\scdemo.c -o build\scdemo.o
+if %errorlevel% neq 0 goto :error
+
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\scdemo.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o build\libaxiom\stack_chk.o build\libaxiom\cfi.o -o build\scdemo.exe
+if %errorlevel% neq 0 goto :error
+
+objcopy -O binary build\scdemo.exe build\scdemo.bin
+if %errorlevel% neq 0 goto :error
+
+python tools\make_elf.py build\scdemo.bin build\scdemo.elf
+if %errorlevel% neq 0 goto :error
+
+copy /b build\scdemo.elf fs\SCDEMO.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Building FAT12 RAM-disk image from fs/...

@@ -6,6 +6,7 @@
 #include "pci.h" // сканирование шины PCI (mechanism #1), см. lspci.c
 #include "speaker.h" // системный динамик (PC speaker)
 #include "paging.h" // Защита памяти: paging + read-only код ядра
+#include "kcfi.h"  // Forward-edge CFI: shadow table + cookie auth
 #include "tss.h" // TSS: переключение стека ring3 -> ring0
 #include "heap.h" // kmalloc/kfree - простой кучевой аллокатор
 #include "tasking.h" // простой preemptive round-robin планировщик
@@ -857,6 +858,11 @@ static int do_exec(char* cmdline) {
         print_hex(elf_res.aslr_delta);
         print_string("\n");
     }
+    if (elf_res.wx_data_offset > 0) {
+        print_string("[W^X] boundary=0x");
+        print_hex(elf_res.wx_data_offset + elf_res.aslr_delta);
+        print_string("\n");
+    }
 
     char** argv_phys = (char**)(addr + USER_ARGS_OFFSET);
     char*  sp        = (char*)(addr + USER_ARGS_OFFSET + USER_ARGS_STR_OFF);
@@ -894,7 +900,8 @@ static int do_exec(char* cmdline) {
         slot_tty[slot] = (caller_slot >= 0 && caller_slot < USER_PROGRAM_SLOTS)
             ? slot_tty[caller_slot] : tty_active();
     }
-    task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR, elf_res.entry);
+    task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR, elf_res.entry,
+                               elf_res.aslr_delta, elf_res.wx_data_offset);
     return slot;
 }
 
@@ -1203,6 +1210,21 @@ void sys_set_level(char* arg) {
     task_set_current_mls_level(a->level);
 }
 
+// SYS_SECCOMP (0x23): задача устанавливает/сужает свою маску разрешённых syscall'ов.
+// Маска — 64 бита (два uint32: lo + hi). Бит N = syscall 0x00+N разрешён.
+// После установки маска только сужается (AND); расширить нельзя.
+// SYS_SECCOMP (0x23) всегда проходит проверку в syscall_dispatch — иначе
+// программа не смогла бы установить первый фильтр, если маска уже есть.
+struct seccomp_args { unsigned int mask_lo; unsigned int mask_hi; };
+
+void sys_seccomp(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct seccomp_args))) return;
+    struct seccomp_args* a = (struct seccomp_args*)arg;
+    unsigned long long mask = (unsigned long long)a->mask_lo
+                            | ((unsigned long long)a->mask_hi << 32);
+    task_set_syscall_mask(mask);
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01
@@ -1239,13 +1261,34 @@ syscall_fn syscall_table[] = {
     sys_clipboard_get,     // 0x20
     sys_set_level,         // 0x21
     sys_pci_get_device,    // 0x22
+    sys_seccomp,           // 0x23
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))
+#define SYS_SECCOMP 0x23
 
-// Вызывается из syscalls.asm: ищет обработчик по коду функции и выполняет его
+// Вызывается из syscalls.asm: проверяет seccomp-маску, затем диспетчирует.
+// SYS_SECCOMP (0x23) всегда пропускается: он может только сужать маску,
+// поэтому не даёт атакующему новых прав.
 void syscall_dispatch(unsigned char func, char* arg) {
+    // Задача уже помечена на смерть (seccomp или sys_exit): все syscall'ы —
+    // no-op. Это блокирует ax_print/ax_exec/etc. после запрещённого вызова,
+    // не давая задаче сделать что-либо до следующего тика планировщика.
+    if (task_current_is_exiting()) return;
+
+    if (func != SYS_SECCOMP && !task_syscall_allowed(func)) {
+        if (task_current_is_isolated()) {
+            print_string("\n\033[33m[seccomp] forbidden syscall 0x");
+            print_hex_byte(func);
+            print_string(" in '");
+            print_string(task_current_name());
+            print_string("' - killed\033[0m\n");
+            task_mark_current_exiting();
+        }
+        return;
+    }
     if (func < SYSCALL_TABLE_SIZE && syscall_table[func]) {
+        kcfi_check(func, syscall_table[func]);
         syscall_table[func](arg);
     }
 }
@@ -1506,7 +1549,8 @@ void execute_command(char* cmd) {
                     // на консоль) привязывается к консоли, с которой эта команда
                     // пришла - см. KERNEL_TTY_COUNT/slot_tty выше.
                     slot_tty[slot] = tty_active();
-                    task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR, elf_res.entry);
+                    task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR, elf_res.entry,
+                                               elf_res.aslr_delta, elf_res.wx_data_offset);
                     print_string("Started.\n");
                 }
             }
@@ -1679,6 +1723,7 @@ void kernel_main() {
     init_idt();
     init_mouse(); // нужен размаскированный IRQ12 (см. init_idt) перед включением потоковой отправки пакетов
     init_paging();
+    kcfi_init((void**)syscall_table, SYSCALL_TABLE_SIZE);
     VGA_MARK(71, 'B', 0x4F); /* post-paging VGA write */
 
     init_tss();

@@ -33,6 +33,55 @@ PF_W = 2
 PF_X = 1
 
 PT_AXOS_RELOC = 0x6A584953
+PT_AXOS_WX    = 0x6A584955  # W^X boundary: один uint32 = flat offset первого writable байта
+
+IMAGE_SCN_MEM_EXECUTE = 0x20000000
+IMAGE_SCN_MEM_WRITE   = 0x80000000
+
+
+def find_wx_boundary(pe_bytes, flat_size):
+    """Возвращает flat offset первой записываемой секции (.bss), 0 если не найдено.
+    Определяется по флагу IMAGE_SCN_MEM_WRITE без IMAGE_SCN_MEM_EXECUTE."""
+    if len(pe_bytes) < 20:
+        return 0
+    machine = struct.unpack_from('<H', pe_bytes, 0)[0]
+    if machine != 0x014C:
+        return 0
+    num_sections  = struct.unpack_from('<H', pe_bytes, 2)[0]
+    optional_size = struct.unpack_from('<H', pe_bytes, 16)[0]
+    opt_offset = 20
+    if optional_size < 2 or opt_offset + optional_size > len(pe_bytes):
+        return 0
+    magic = struct.unpack_from('<H', pe_bytes, opt_offset)[0]
+    if magic != 0x010B:
+        return 0
+    section_table_off = opt_offset + optional_size
+
+    # Первый проход: минимальный VA (база плоского бинарника).
+    lowest_va = 0xFFFFFFFF
+    for i in range(num_sections):
+        off = section_table_off + i * 40
+        if off + 40 > len(pe_bytes):
+            break
+        sec_va = struct.unpack_from('<I', pe_bytes, off + 12)[0]
+        if sec_va < lowest_va:
+            lowest_va = sec_va
+
+    # Второй проход: найти наименьший flat offset секции с W (без X).
+    boundary = None
+    for i in range(num_sections):
+        off = section_table_off + i * 40
+        if off + 40 > len(pe_bytes):
+            break
+        sec_va    = struct.unpack_from('<I', pe_bytes, off + 12)[0]
+        sec_chars = struct.unpack_from('<I', pe_bytes, off + 36)[0]
+        if (sec_chars & IMAGE_SCN_MEM_WRITE) and not (sec_chars & IMAGE_SCN_MEM_EXECUTE):
+            flat_off = (sec_va - lowest_va) & 0xFFFFFFFF
+            if flat_off < flat_size:
+                if boundary is None or flat_off < boundary:
+                    boundary = flat_off
+
+    return boundary if boundary is not None else 0
 
 
 def parse_pe_relocations(pe_bytes, flat_size):
@@ -111,60 +160,46 @@ def parse_pe_relocations(pe_bytes, flat_size):
     return offsets
 
 
-def build_elf(flat_bin, reloc_offsets):
+def build_elf(flat_bin, reloc_offsets, wx_boundary=0):
     reloc_count = len(reloc_offsets)
     has_reloc   = reloc_count > 0
-    e_phnum     = 2 if has_reloc else 1
+    has_wx      = wx_boundary > 0
+    e_phnum     = 1 + (1 if has_reloc else 0) + (1 if has_wx else 0)
 
     reloc_table  = struct.pack('<I', reloc_count)
     reloc_table += b''.join(struct.pack('<I', o) for o in reloc_offsets)
+    wx_table     = struct.pack('<I', wx_boundary) if has_wx else b''
 
+    # Компоновка файла: [ELF header] [PHDRs] [reloc data] [wx data] [flat binary]
     headers_size = EHDR_SIZE + PHDR_SIZE * e_phnum
     reloc_foff   = headers_size
-    code_foff    = headers_size + (len(reloc_table) if has_reloc else 0)
+    wx_foff      = reloc_foff + (len(reloc_table) if has_reloc else 0)
+    code_foff    = wx_foff + len(wx_table)
 
     filesz = memsz = len(flat_bin)
 
     ehdr = bytearray(EHDR_SIZE)
     ehdr[0:4] = b'\x7fELF'
-    ehdr[4] = 1
-    ehdr[5] = 1
-    ehdr[6] = 1
+    ehdr[4] = 1; ehdr[5] = 1; ehdr[6] = 1
     struct.pack_into('<HHIIIIIHHHHHH', ehdr, 16,
-        ET_EXEC, EM_386, 1,
-        LOAD_ADDR,
-        EHDR_SIZE,
-        0, 0,
-        EHDR_SIZE, PHDR_SIZE, e_phnum,
-        0, 0, 0,
-    )
+        ET_EXEC, EM_386, 1, LOAD_ADDR, EHDR_SIZE, 0, 0,
+        EHDR_SIZE, PHDR_SIZE, e_phnum, 0, 0, 0)
 
-    ph0 = bytearray(PHDR_SIZE)
-    struct.pack_into('<IIIIIIII', ph0, 0,
-        PT_LOAD,
-        code_foff,
-        LOAD_ADDR,
-        LOAD_ADDR,
-        filesz, memsz,
-        PF_R | PF_W | PF_X,
-        0x1000,
-    )
+    def make_phdr(p_type, p_offset, p_vaddr, p_filesz, p_flags, p_align):
+        ph = bytearray(PHDR_SIZE)
+        struct.pack_into('<IIIIIIII', ph, 0,
+            p_type, p_offset, p_vaddr, p_vaddr, p_filesz, p_filesz, p_flags, p_align)
+        return bytes(ph)
 
-    result = bytes(ehdr) + bytes(ph0)
-
+    result = bytes(ehdr)
+    result += make_phdr(PT_LOAD,       code_foff, LOAD_ADDR, filesz, PF_R|PF_W|PF_X, 0x1000)
     if has_reloc:
-        ph1 = bytearray(PHDR_SIZE)
-        struct.pack_into('<IIIIIIII', ph1, 0,
-            PT_AXOS_RELOC,
-            reloc_foff,
-            0, 0,
-            len(reloc_table), len(reloc_table),
-            0,
-            4,
-        )
-        result += bytes(ph1)
+        result += make_phdr(PT_AXOS_RELOC, reloc_foff, 0, len(reloc_table), 0, 4)
+    if has_wx:
+        result += make_phdr(PT_AXOS_WX,    wx_foff,    0, 4,                0, 4)
+    if has_reloc:
         result += reloc_table
-
+    result += wx_table
     result += flat_bin
     return result
 
@@ -181,17 +216,21 @@ def main():
 
     pe_path = os.path.splitext(bin_path)[0] + '.exe'
     reloc_offsets = []
+    wx_boundary   = 0
     if os.path.exists(pe_path):
         with open(pe_path, 'rb') as f:
             pe_bytes = f.read()
         reloc_offsets = parse_pe_relocations(pe_bytes, len(flat_bin))
+        wx_boundary   = find_wx_boundary(pe_bytes, len(flat_bin))
         if reloc_offsets:
             print(f"  code ASLR: {len(reloc_offsets)} relocations from {os.path.basename(pe_path)}")
         else:
             print(f"  code ASLR: no relocations found in {os.path.basename(pe_path)}")
+        if wx_boundary:
+            print(f"  W^X boundary: flat offset 0x{wx_boundary:X} (data starts at page {wx_boundary // 0x1000})")
 
     with open(out_path, 'wb') as f:
-        f.write(build_elf(flat_bin, reloc_offsets))
+        f.write(build_elf(flat_bin, reloc_offsets, wx_boundary))
 
 
 if __name__ == '__main__':

@@ -105,4 +105,85 @@ void ax_print_uint(unsigned int n);
 int  ax_readline(char* buf, int max);  // блокирующее чтение строки с клавиатуры
 void ax_printf(const char* fmt, ...);  // %s %d %u %x %c %%
 
+// =================================================================
+//  Seccomp: фильтрация syscall'ов (SYS_SECCOMP 0x23)
+// =================================================================
+//
+// ax_seccomp(mask) — установить/сузить маску разрешённых syscall'ов.
+// Бит N в mask = syscall 0x00+N разрешён.
+// После первого вызова маска только сужается (AND); расширить нельзя.
+// SYS_SECCOMP (бит 0x23) всегда разрешён ядром — это позволяет
+// программе сузить маску несколько раз подряд.
+//
+// Готовые профили (можно комбинировать через |):
+//   AX_SC_PRINT   — только вывод на экран (print, clear)
+//   AX_SC_STDIO   — ввод/вывод + выход + память
+//   AX_SC_FILES   — + файловые операции
+//   AX_SC_EXEC    — + запуск программ
+//   AX_SC_ALL     — все syscall'ы (отключить фильтр нельзя)
+//
+// Пример использования в начале main():
+//   ax_seccomp(AX_SC_STDIO);   // разрешить только ввод/вывод/exit/sbrk
+//   ax_seccomp(AX_SC_STDIO | AX_SC_FILES);  // + файлы
+
+// Бит для одного syscall'а по номеру:
+#define AX_SC_BIT(n) (1ULL << (unsigned)(n))
+
+// Индивидуальные биты (совпадают с SYS_* номерами из syscalls.asm):
+#define AX_SC_PRINT        AX_SC_BIT(0x01)  // ax_print
+#define AX_SC_CLEAR        AX_SC_BIT(0x02)  // ax_clear
+#define AX_SC_READKEY      AX_SC_BIT(0x03)  // ax_readkey
+#define AX_SC_WRITEFILE    AX_SC_BIT(0x04)  // ax_writefile
+#define AX_SC_READFILE     AX_SC_BIT(0x05)  // ax_readfile
+#define AX_SC_EXIT         AX_SC_BIT(0x06)  // ax_exit
+#define AX_SC_OPEN         AX_SC_BIT(0x07)  // ax_open
+#define AX_SC_FREAD        AX_SC_BIT(0x08)  // ax_fread
+#define AX_SC_FWRITE       AX_SC_BIT(0x09)  // ax_fwrite
+#define AX_SC_CLOSE        AX_SC_BIT(0x0A)  // ax_close
+#define AX_SC_EXEC         AX_SC_BIT(0x0B)  // ax_exec
+#define AX_SC_TASK_ALIVE   AX_SC_BIT(0x0C)  // ax_task_alive
+#define AX_SC_SHELL_CLAIM  AX_SC_BIT(0x0D)  // ax_shell_claim
+#define AX_SC_FOREGROUND   AX_SC_BIT(0x0E)  // ax_set_foreground
+#define AX_SC_GET_TICKS    AX_SC_BIT(0x0F)  // ax_get_ticks
+#define AX_SC_SLEEP        AX_SC_BIT(0x10)  // ax_sleep_ms
+#define AX_SC_READDIR      AX_SC_BIT(0x11)  // ax_readdir
+#define AX_SC_SBRK         AX_SC_BIT(0x12)  // ax_sbrk (нужен malloc)
+#define AX_SC_PS           AX_SC_BIT(0x13)  // ax_ps
+#define AX_SC_EXEC_REDIR   AX_SC_BIT(0x14)  // ax_exec_redir
+#define AX_SC_UNLINK       AX_SC_BIT(0x15)  // ax_unlink
+#define AX_SC_MKDIR        AX_SC_BIT(0x16)  // ax_mkdir
+#define AX_SC_FS_LOCK      AX_SC_BIT(0x17)  // ax_disk_lock
+#define AX_SC_DISK_ID      AX_SC_BIT(0x18)  // ax_disk_identify
+#define AX_SC_DISK_READ    AX_SC_BIT(0x19)  // ax_disk_read_sector
+#define AX_SC_DISK_WRITE   AX_SC_BIT(0x1A)  // ax_disk_write_sector
+#define AX_SC_DATETIME     AX_SC_BIT(0x1B)  // ax_get_datetime
+#define AX_SC_REBOOT       AX_SC_BIT(0x1C)  // ax_reboot
+#define AX_SC_MOUSE        AX_SC_BIT(0x1D)  // ax_get_mouse
+#define AX_SC_BEEP         AX_SC_BIT(0x1E)  // ax_beep
+#define AX_SC_CLIP_SET     AX_SC_BIT(0x1F)  // ax_clipboard_set
+#define AX_SC_CLIP_GET     AX_SC_BIT(0x20)  // ax_clipboard_get
+#define AX_SC_SET_LEVEL    AX_SC_BIT(0x21)  // ax_set_level
+#define AX_SC_PCI          AX_SC_BIT(0x22)  // ax_pci_get_device
+// 0x23 = SYS_SECCOMP — всегда разрешён ядром, бит здесь для явного включения
+
+// Готовые профили:
+#define AX_SC_PRINT_ONLY  (AX_SC_PRINT | AX_SC_CLEAR | AX_SC_EXIT | AX_SC_SBRK)
+#define AX_SC_STDIO       (AX_SC_PRINT | AX_SC_CLEAR | AX_SC_READKEY | \
+                           AX_SC_EXIT  | AX_SC_SBRK  | AX_SC_GET_TICKS | AX_SC_SLEEP)
+#define AX_SC_FILES       (AX_SC_WRITEFILE | AX_SC_READFILE | AX_SC_OPEN | \
+                           AX_SC_FREAD     | AX_SC_FWRITE   | AX_SC_CLOSE | \
+                           AX_SC_READDIR   | AX_SC_UNLINK   | AX_SC_MKDIR)
+#define AX_SC_EXEC_MASK   (AX_SC_EXEC | AX_SC_EXEC_REDIR | AX_SC_TASK_ALIVE | \
+                           AX_SC_SHELL_CLAIM | AX_SC_FOREGROUND)
+#define AX_SC_ALL         (~0ULL)
+
+// Установить/сузить seccomp-маску (lo = биты 0-31, hi = биты 32-63).
+// Обычно вызывается через макрос ax_seccomp(mask).
+void ax_seccomp_raw(unsigned int mask_lo, unsigned int mask_hi);
+
+// Удобный макрос: принимает unsigned long long напрямую.
+#define ax_seccomp(mask) \
+    ax_seccomp_raw((unsigned int)((unsigned long long)(mask)), \
+                   (unsigned int)((unsigned long long)(mask) >> 32))
+
 #endif

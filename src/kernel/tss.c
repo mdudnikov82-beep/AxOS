@@ -9,7 +9,7 @@
 // (см. TSS_BASE в gdt.asm), как и таблицы страниц — чтобы не раздувать
 // kernel.bin статическими массивами.
 
-#define TSS_BASE 0x9E000
+#define TSS_BASE 0x9B000
 #define TSS_SEG  0x28 // gdt_tss - gdt_start (5-я запись GDT)
 
 // Стек ядра для обработчиков, попадающих в ring0 из ring3.
