@@ -40,11 +40,11 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
                                int argc, unsigned int argv_vaddr, unsigned int entry_vaddr,
                                unsigned int wx_delta, unsigned int wx_data_off);
 
-// Вызывается из idt.asm при каждом IRQ0: сохраняет esp текущей задачи,
-// переключается на следующую по кольцу и возвращает её esp. Если
+// Вызывается из idt.asm при каждом IRQ0: сохраняет rsp текущей задачи,
+// переключается на следующую по кольцу и возвращает её rsp. Если
 // текущая задача помечена exiting (task_mark_current_exiting) - убирает
 // её из кольца и освобождает её ресурсы (см. tasking.c).
-unsigned int schedule(unsigned int current_esp);
+unsigned long long schedule(unsigned long long current_rsp);
 
 // Печатает список задач (id, имя, число тиков) - используется командой `ps`.
 void print_task_list();

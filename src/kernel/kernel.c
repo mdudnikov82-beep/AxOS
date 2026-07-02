@@ -58,7 +58,7 @@
 // фиксированный физический адрес в свободной зоне сразу после пула
 // PD/PT (0x124000+0x4000=0x128000), а не часть кучи ядра.
 #define ELF_STAGING_SIZE (USER_ARGS_OFFSET + 0x200)
-#define ELF_STAGING_BASE 0x148000
+#define ELF_STAGING_BASE 0x150000
 #define elf_staging_buf ((unsigned char*)ELF_STAGING_BASE)
 
 // slot_free[i] == 1, если слот i свободен. "run" занимает первый свободный
@@ -175,23 +175,27 @@ static int tty_foreground_slot[KERNEL_TTY_COUNT] = {-1, -1};
 // Счётчик тиков таймера (PIT, IRQ0). При частоте 100 Гц растёт на 1 каждые 10 мс.
 volatile unsigned long timer_ticks = 0;
 
-// Структуры для IDT
+// IDT для 64-бит long mode: 16 байт на гейт.
 struct IDT_entry {
-    unsigned short offset_lower;
-    unsigned short selector;
-    unsigned char zero;
-    unsigned char type_attr;
-    unsigned short offset_upper;
+    unsigned short offset_low;   // handler[15:0]
+    unsigned short selector;     // CODE64_SEG = 0x18
+    unsigned char  ist;          // IST = 0 (нет IST)
+    unsigned char  type_attr;    // 0x8E = present, DPL=0, 64-bit interrupt gate
+    unsigned short offset_mid;   // handler[31:16]
+    unsigned int   offset_high;  // handler[63:32]
+    unsigned int   reserved;     // должно быть 0
 } __attribute__((packed));
 
 struct IDT_entry IDT[256];
 
-void set_idt_gate(int n, unsigned long handler) {
-    IDT[n].offset_lower = handler & 0xFFFF;
-    IDT[n].selector = 0x08;
-    IDT[n].zero = 0;
-    IDT[n].type_attr = 0x8E;
-    IDT[n].offset_upper = (handler >> 16) & 0xFFFF;
+void set_idt_gate(int n, unsigned long long handler) {
+    IDT[n].offset_low  = (unsigned short)(handler & 0xFFFF);
+    IDT[n].selector    = 0x18;          // CODE64_SEG
+    IDT[n].ist         = 0;
+    IDT[n].type_attr   = 0x8E;          // P=1, DPL=0, 64-bit interrupt gate
+    IDT[n].offset_mid  = (unsigned short)((handler >> 16) & 0xFFFF);
+    IDT[n].offset_high = (unsigned int)((handler >> 32) & 0xFFFFFFFFu);
+    IDT[n].reserved    = 0;
 }
 
 // Программирует PIT (8253/8254), канал 0, на частоту ~100 Гц (тик каждые 10 мс)
@@ -204,17 +208,19 @@ void init_pit() {
 }
 
 void init_idt() {
-    set_idt_gate(14, (unsigned long)page_fault_handler); // #PF — для отладки paging
-    set_idt_gate(32, (unsigned long)timer_interrupt_handler);
-    set_idt_gate(33, (unsigned long)keyboard_interrupt_handler);
-    set_idt_gate(0x2E, (unsigned long)ide_interrupt_handler); // IRQ14 (slave PIC) — см. ide.c
-    set_idt_gate(0x2C, (unsigned long)mouse_interrupt_handler); // IRQ12 (slave PIC) — см. mouse.c
-    set_idt_gate(0x80, (unsigned long)syscall_handler); // int 0x80 — системные вызовы AxOS
-    IDT[0x80].type_attr = 0xEE; // DPL=3 — int 0x80 разрешён из ring3
-    // type_attr у 0x80 (как и у 32/33 выше) оканчивается на E - interrupt
-    // gate, CPU сам обнуляет IF на входе. heap.c (malloc/free) рассчитывает
-    // именно на это - см. ENTER_CRITICAL/LEAVE_CRITICAL и комментарий там.
-    struct { unsigned short limit; unsigned long base; } __attribute__((packed)) idtr = { 256 * 8 - 1, (unsigned long)IDT };
+    set_idt_gate(14, (unsigned long long)page_fault_handler);
+    set_idt_gate(32, (unsigned long long)timer_interrupt_handler);
+    set_idt_gate(33, (unsigned long long)keyboard_interrupt_handler);
+    set_idt_gate(0x2E, (unsigned long long)ide_interrupt_handler);
+    set_idt_gate(0x2C, (unsigned long long)mouse_interrupt_handler);
+    set_idt_gate(0x80, (unsigned long long)syscall_handler);
+    IDT[0x80].type_attr = 0xEE; // DPL=3: int 0x80 из ring3 разрешён
+    // Interrupt gate (тип E) — CPU автоматически сбрасывает IF при входе.
+    // heap.c::ENTER_CRITICAL/LEAVE_CRITICAL рассчитывает именно на это.
+    struct {
+        unsigned short limit;
+        unsigned long long base;
+    } __attribute__((packed)) idtr = { 256 * 16 - 1, (unsigned long long)IDT };
     __asm__("lidt %0" : : "m"(idtr));
 
     init_pit();
@@ -1304,9 +1310,9 @@ void usermode_demo() {
 
     __asm__ volatile(
         "mov $0x01, %%ah\n" // 0x01 — sys_print_string
-        "mov %0, %%esi\n"
+        "mov %0, %%rsi\n"   // 64-бит регистр: RSI (ESI в 32-бит compat = нижние 32 бита)
         "int $0x80\n"
-        :: "r"(msg) : "eax", "esi"
+        :: "r"(msg) : "rax", "rsi"
     );
 
     while (1) {

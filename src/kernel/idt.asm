@@ -1,123 +1,183 @@
-[bits 32]
-extern _keyboard_handler_main ; GCC на Windows добавляет подчёркивание к C-функциям
-extern _timer_handler_main
-extern _page_fault_handler_main
-extern _ide_irq_handler_main ; ide.c - просто ставит флаг, см. комментарий там
-extern _mouse_irq_handler_main ; mouse.c - копит байты пакета, см. комментарий там
-extern _schedule ; tasking.c - переключение задач (round-robin)
+; =================================================================
+;  Обработчики прерываний для x86-64 long mode
+; =================================================================
+;
+; В 64-бит режиме:
+;  - CPU всегда кладёт SS, RSP, RFLAGS, CS, RIP (5 × 8Б = 40Б)
+;    даже при same-privilege (ring0→ring0) прерывании.
+;  - pusha/popa НЕТ — сохраняем 15 регистров вручную (RAX..R15, без RSP).
+;  - iret → iretq.
+;  - schedule(): первый аргумент в RCX (Windows x64 ABI), возврат в RAX.
+;  - Имена C-функций без подчёркивания (64-bit PE не добавляет _prefix).
 
-global _keyboard_interrupt_handler
+[bits 64]
+
+extern keyboard_handler_main
+extern timer_handler_main
+extern page_fault_handler_main
+extern ide_irq_handler_main
+extern mouse_irq_handler_main
+extern schedule
+
 global keyboard_interrupt_handler
-global _timer_interrupt_handler
 global timer_interrupt_handler
-global _page_fault_handler
 global page_fault_handler
-global _ide_interrupt_handler
 global ide_interrupt_handler
-global _mouse_interrupt_handler
 global mouse_interrupt_handler
 
-_keyboard_interrupt_handler:
-keyboard_interrupt_handler:
-    cld             ; <--- Очищаем флаг направления (важно для работы Си!)
-    pusha           ; Сохраняем все регистры
+; -----------------------------------------------------------------
+;  Макрос: сохранить/восстановить 15 GPR (порядок pop = обратный push).
+;  После SAVE_REGS RSP указывает на RAX (нижний адрес).
+;  После RESTORE_REGS RSP восстанавливается на уровень до SAVE_REGS.
+; -----------------------------------------------------------------
+%macro SAVE_REGS 0
+    push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
+    push r9
+    push r8
+    push rbp
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push rbx
+    push rax
+%endmacro
 
-    ; EOI отправляем ДО вызова обработчика: keyboard_handler_main может
-    ; выполнить команду "usermode", которая уходит в ring3 через iretd
-    ; и сюда уже не возвращается. Если бы EOI отправлялся после call,
-    ; PIC считал бы IRQ1 "в обработке" навсегда, и клавиатура умирала
-    ; бы после первого "usermode".
-    mov al, 0x20    ; EOI
+%macro RESTORE_REGS 0
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+%endmacro
+
+; -----------------------------------------------------------------
+;  IRQ1: Клавиатура
+; -----------------------------------------------------------------
+keyboard_interrupt_handler:
+    cld
+    SAVE_REGS
+
+    ; EOI ПЕРЕД обработчиком: keyboard_handler_main может запустить
+    ; команду, которая уйдёт в ring3 через iretq и не вернётся сюда.
+    ; Если EOI после — PIC считает IRQ1 занятым навсегда → клавиатура умрёт.
+    mov al, 0x20
     out 0x20, al
 
-    call _keyboard_handler_main
+    ; Windows x64 ABI: нет аргументов, нужен shadow space (32Б).
+    sub rsp, 32
+    call keyboard_handler_main
+    add rsp, 32
 
-    popa            ; Восстанавливаем регистры
-    iret            ; Выход из прерывания
+    RESTORE_REGS
+    iretq
 
-; --- Обработчик IRQ0 (таймер PIT) ---
-_timer_interrupt_handler:
+; -----------------------------------------------------------------
+;  IRQ0: Таймер PIT — также точка переключения задач.
+; -----------------------------------------------------------------
 timer_interrupt_handler:
     cld
-    pusha
+    SAVE_REGS
 
-    call _timer_handler_main
+    ; Вызов основного обработчика таймера (обновляет счётчик тиков).
+    sub rsp, 32
+    call timer_handler_main
+    add rsp, 32
 
-    mov al, 0x20    ; EOI
+    ; EOI мастер-PIC.
+    mov al, 0x20
     out 0x20, al
 
-    ; Переключение задач: после pusha esp указывает на кадр текущей
-    ; задачи [pusha x8][EIP][CS][EFLAGS]. schedule(esp) сохраняет его
-    ; в текущей задаче, выбирает следующую по кольцу и возвращает её
-    ; esp (для task0 на первом тике, и до init_tasking(), schedule
-    ; возвращает тот же esp - переключения не происходит).
-    mov eax, esp
-    push eax
-    call _schedule
-    add esp, 4
-    mov esp, eax
+    ; schedule(current_rsp): текущий RSP — указатель на RAX в кадре GPR.
+    ; Windows x64 ABI: arg в RCX, возврат в RAX.
+    mov rcx, rsp
+    sub rsp, 32
+    call schedule
+    add rsp, 32
+    ; RAX = RSP следующей задачи (или того же, если переключения нет).
+    mov rsp, rax
 
-    popa
-    iret
+    RESTORE_REGS
+    iretq
 
-; --- Обработчик исключения #14 (Page Fault) ---
-; CPU кладёт в стек код ошибки перед EIP/CS/EFLAGS, и записывает
-; адрес, вызвавший сбой, в регистр CR2.
-_page_fault_handler:
+; -----------------------------------------------------------------
+;  #14: Page Fault — CPU кладёт код ошибки ПЕРЕД RIP в кадре.
+;
+;  Кадр (от низшего адреса = RSP после SAVE_REGS):
+;   [0..14]  = RAX..R15  (15 GPR, индексы 0..14)
+;   [15]     = Error code (CPU-pushed, перед RIP)
+;   [16]     = RIP
+;   [17]     = CS
+;   [18]     = RFLAGS
+;   [19]     = RSP_old
+;   [20]     = SS
+;
+;  page_fault_handler_main(faulting_addr, frame*):
+;    arg1 = CR2 (RCX), arg2 = RSP (RDX) — Windows x64 ABI.
+; -----------------------------------------------------------------
 page_fault_handler:
     cld
-    pusha
+    SAVE_REGS
 
-    ; page_fault_handler_main(faulting_address, frame): frame - указатель
-    ; на этот кадр pusha (нужен, чтобы переписать EIP/проверить CS при
-    ; killе изолированной задачи, см. paging.c). EBX используется как
-    ; скретч - его сохранённое здесь значение восстановит popa, текущее
-    ; содержимое регистра уже не важно.
-    mov ebx, esp
-    mov eax, cr2
-    push ebx
-    push eax
-    call _page_fault_handler_main
-    add esp, 8
-    ; page_fault_handler_main возвращается только для killed-задачи
-    ; (изменив EIP в кадре); иначе вешает систему сама.
+    mov rcx, cr2        ; arg1: адрес, вызвавший сбой
+    mov rdx, rsp        ; arg2: указатель на кадр (RAX в его начале)
+    sub rsp, 32
+    call page_fault_handler_main
+    add rsp, 32
+    ; page_fault_handler_main возвращается ТОЛЬКО при kill изолированной задачи
+    ; (она переписывает RIP в кадре на USER_SPIN_ADDR).
 
-    popa
-    add esp, 4      ; убираем код ошибки, который положил CPU
-    iret
+    RESTORE_REGS
+    add rsp, 8          ; убираем код ошибки, который CPU положил перед RIP
+    iretq
 
-; --- Обработчик IRQ14 (IDE, первичный канал) ---
-; IRQ14 идёт через slave PIC (он каскадирован в master через IRQ2), поэтому
-; EOI нужно отправить ОБОИМ контроллерам - сначала slave (0xA0), затем
-; master (0x20). Иначе master продолжит считать IRQ2 (= "слейв занят")
-; обрабатываемым и больше не пропустит ни один прерывание со slave PIC,
-; включая повторные IRQ14 - диск "зависнет" после первой операции.
-_ide_interrupt_handler:
+; -----------------------------------------------------------------
+;  IRQ14: IDE (первичный канал) — slave PIC, двойной EOI.
+; -----------------------------------------------------------------
 ide_interrupt_handler:
     cld
-    pusha
+    SAVE_REGS
 
     mov al, 0x20
-    out 0xA0, al    ; EOI слейву (сам IRQ14)
-    out 0x20, al    ; EOI мастеру (каскадная линия IRQ2)
+    out 0xA0, al        ; EOI slave PIC
+    out 0x20, al        ; EOI master PIC
 
-    call _ide_irq_handler_main
+    sub rsp, 32
+    call ide_irq_handler_main
+    add rsp, 32
 
-    popa
-    iret
+    RESTORE_REGS
+    iretq
 
-; --- Обработчик IRQ12 (PS/2-мышь) ---
-; Тоже на slave PIC (IRQ8+4) - тот же приём двойного EOI, что у IRQ14.
-_mouse_interrupt_handler:
+; -----------------------------------------------------------------
+;  IRQ12: PS/2-мышь — slave PIC, двойной EOI.
+; -----------------------------------------------------------------
 mouse_interrupt_handler:
     cld
-    pusha
+    SAVE_REGS
 
     mov al, 0x20
-    out 0xA0, al    ; EOI слейву (сам IRQ12)
-    out 0x20, al    ; EOI мастеру (каскадная линия IRQ2)
+    out 0xA0, al        ; EOI slave PIC
+    out 0x20, al        ; EOI master PIC
 
-    call _mouse_irq_handler_main
+    sub rsp, 32
+    call mouse_irq_handler_main
+    add rsp, 32
 
-    popa
-    iret
+    RESTORE_REGS
+    iretq

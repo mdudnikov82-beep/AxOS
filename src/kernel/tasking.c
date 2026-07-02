@@ -25,13 +25,19 @@
 #define MAX_NAME_LEN 16
 
 // Селекторы из gdt.asm (ring3 = младшие 2 бита селектора = 11b).
-#define USER_CODE_SEG 0x18
-#define USER_DATA_SEG 0x20
+// USER_CODE32_SEG = 0x20 (gdt_user_code, L=0 D=1 → 32-бит compat)
+// USER_DATA_SEG   = 0x28 (gdt_user_data)
+// CODE64_SEG      = 0x18 (gdt_code64, L=1 D=0 → ядро 64-бит)
+// DATA_SEG        = 0x10 (gdt_data)
+#define CODE64_SEG      0x18
+#define DATA_SEG        0x10
+#define USER_CODE32_SEG 0x20
+#define USER_DATA_SEG   0x28
 
 typedef struct task {
-    unsigned int esp;
-    unsigned int kernel_stack_top; // ESP0 этой задачи (для ring3->ring0)
-    unsigned int page_directory;   // CR3 этой задачи (PAGE_DIRECTORY или приватный PD)
+    unsigned long long rsp;             // сохранённый RSP (указывает на GPR-кадр)
+    unsigned long long kernel_stack_top; // RSP0 этой задачи (для ring3->ring0)
+    unsigned long long page_directory;   // CR3 этой задачи (PML4)
     int id;
     char name[MAX_NAME_LEN];
     unsigned long ticks;
@@ -89,23 +95,20 @@ static void copy_name(char* dst, char* src) {
 }
 
 void init_tasking() {
-    task0.esp = 0;
+    task0.rsp = 0;
     task0.id = next_id++;
     copy_name(task0.name, "shell");
     task0.ticks = 0;
-    task0.page_directory = (unsigned int)PAGE_DIRECTORY;
+    task0.page_directory = PAGE_DIRECTORY;
     task0.user_slot_index = -1;
     task0.exiting = 0;
     task0.mls_level = 0;
     task0.syscall_mask = 0;
     task0.next = &task0;
 
-    // Отдельный стек ядра для task0: НЕ совпадает с её "живым" стеком
-    // (растущим вниз от 0x90000), поэтому ring3->ring0 переходы (когда
-    // task0 уходит в ring3 через usermode) не затирают его.
     unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
-    task0.kernel_stack_top = (unsigned int)(kstack + KSTACK_SIZE);
-    tss_set_esp0(task0.kernel_stack_top);
+    task0.kernel_stack_top = (unsigned long long)(kstack + KSTACK_SIZE);
+    tss_set_rsp0(task0.kernel_stack_top);
 
     current_task = &task0;
 }
@@ -117,37 +120,46 @@ void task_create(char* name, void (*entry)(void)) {
     task_t* new_task = (task_t*)malloc(sizeof(task_t));
     if (!new_task) return;
 
-    // Фабрикуем кадр [EFLAGS][CS][EIP] + 8 "регистров" pusha (все 0),
-    // считая от верхушки стека вниз - см. комментарий в начале файла.
-    unsigned int* sp = (unsigned int*)(stack_mem + TASK_STACK_SIZE);
-    *(--sp) = 0x202;            // EFLAGS: IF=1
-    *(--sp) = 0x08;             // CS: сегмент кода ядра (CODE_SEG в gdt.asm)
-    *(--sp) = (unsigned int)entry; // EIP
-    *(--sp) = 0; // EAX
-    *(--sp) = 0; // ECX
-    *(--sp) = 0; // EDX
-    *(--sp) = 0; // EBX
-    *(--sp) = 0; // ESP - игнорируется popa
-    *(--sp) = 0; // EBP
-    *(--sp) = 0; // ESI
-    *(--sp) = 0; // EDI
+    // Строим 64-битный iretq-кадр на стеке задачи.
+    // В 64-бит режиме CPU всегда кладёт SS, RSP, RFLAGS, CS, RIP (5×8=40Б),
+    // idt.asm добавляет 15 GPR (15×8=120Б). Итого 20 слотов = 160Б.
+    // Порядок push (высокий→низкий адрес): SS, RSP, RFLAGS, CS, RIP,
+    //   R15, R14..R8, RBP, RDI, RSI, RDX, RCX, RBX, RAX.
+    unsigned long long* sp = (unsigned long long*)(stack_mem + TASK_STACK_SIZE);
+    *(--sp) = DATA_SEG;                          // SS
+    *(--sp) = (unsigned long long)(stack_mem + TASK_STACK_SIZE); // RSP (execution stack)
+    *(--sp) = 0x202ULL;                          // RFLAGS: IF=1
+    *(--sp) = CODE64_SEG;                        // CS
+    *(--sp) = (unsigned long long)entry;         // RIP
+    *(--sp) = 0; // R15
+    *(--sp) = 0; // R14
+    *(--sp) = 0; // R13
+    *(--sp) = 0; // R12
+    *(--sp) = 0; // R11
+    *(--sp) = 0; // R10
+    *(--sp) = 0; // R9
+    *(--sp) = 0; // R8
+    *(--sp) = 0; // RBP
+    *(--sp) = 0; // RDI
+    *(--sp) = 0; // RSI
+    *(--sp) = 0; // RDX
+    *(--sp) = 0; // RCX
+    *(--sp) = 0; // RBX
+    *(--sp) = 0; // RAX
 
-    new_task->esp = (unsigned int)sp;
+    new_task->rsp = (unsigned long long)sp;
     new_task->id = next_id++;
     copy_name(new_task->name, name);
     new_task->ticks = 0;
-    new_task->page_directory = (unsigned int)PAGE_DIRECTORY;
+    new_task->page_directory = PAGE_DIRECTORY;
     new_task->user_slot_index = -1;
     new_task->exiting = 0;
     new_task->mls_level = 0;
     new_task->syscall_mask = 0;
 
-    // Свой стек ядра (ESP0) для единообразия - schedule() обновляет
-    // TSS.ESP0 для каждой задачи, даже если она остаётся в ring0.
     unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
-    new_task->kernel_stack_top = (unsigned int)(kstack + KSTACK_SIZE);
+    new_task->kernel_stack_top = (unsigned long long)(kstack + KSTACK_SIZE);
 
-    // Вставляем новую задачу сразу после текущей в кольце
     new_task->next = current_task->next;
     current_task->next = new_task;
 }
@@ -160,33 +172,32 @@ void task_create_user(char* name, void (*entry)(void)) {
     task_t* new_task = (task_t*)malloc(sizeof(task_t));
     if (!new_task) return;
 
-    unsigned int user_stack_top = (unsigned int)(user_stack + TASK_STACK_SIZE);
+    unsigned long long user_stack_top = (unsigned long long)(user_stack + TASK_STACK_SIZE);
 
-    // Фабрикуем кадр ring3->ring0 на стеке ядра задачи: [pusha x8 (0)]
-    // [EIP=entry][CS=USER_CODE_SEG|3][EFLAGS=0x202][ESP=user_stack_top]
-    // [SS=USER_DATA_SEG|3] - popa+iret в idt.asm "запустит" задачу прямо
-    // в ring3 (5-словный iret из-за CS с CPL=3).
-    unsigned int* sp = (unsigned int*)(kstack + KSTACK_SIZE);
-    *(--sp) = USER_DATA_SEG | 3;   // SS
-    *(--sp) = user_stack_top;      // ESP
-    *(--sp) = 0x202;               // EFLAGS: IF=1
-    *(--sp) = USER_CODE_SEG | 3;   // CS
-    *(--sp) = (unsigned int)entry; // EIP
-    *(--sp) = 0; // EAX
-    *(--sp) = 0; // ECX
-    *(--sp) = 0; // EDX
-    *(--sp) = 0; // EBX
-    *(--sp) = 0; // ESP - игнорируется popa
-    *(--sp) = 0; // EBP
-    *(--sp) = 0; // ESI
-    *(--sp) = 0; // EDI
+    // Кадр ring3→ring0 на kstack: iretq переключит в 32-бит compat.
+    unsigned long long* sp = (unsigned long long*)(kstack + KSTACK_SIZE);
+    *(--sp) = (unsigned long long)(USER_DATA_SEG | 3);    // SS
+    *(--sp) = user_stack_top;                              // RSP (user stack)
+    *(--sp) = 0x202ULL;                                   // RFLAGS
+    *(--sp) = (unsigned long long)(USER_CODE32_SEG | 3);  // CS (compat)
+    *(--sp) = (unsigned long long)entry;                   // RIP
+    *(--sp) = 0; // R15
+    *(--sp) = 0; *(--sp) = 0; *(--sp) = 0; *(--sp) = 0;
+    *(--sp) = 0; *(--sp) = 0; *(--sp) = 0; *(--sp) = 0;
+    *(--sp) = 0; // RBP
+    *(--sp) = 0; // RDI
+    *(--sp) = 0; // RSI
+    *(--sp) = 0; // RDX
+    *(--sp) = 0; // RCX
+    *(--sp) = 0; // RBX
+    *(--sp) = 0; // RAX
 
-    new_task->esp = (unsigned int)sp;
-    new_task->kernel_stack_top = (unsigned int)(kstack + KSTACK_SIZE);
+    new_task->rsp = (unsigned long long)sp;
+    new_task->kernel_stack_top = (unsigned long long)(kstack + KSTACK_SIZE);
     new_task->id = next_id++;
     copy_name(new_task->name, name);
     new_task->ticks = 0;
-    new_task->page_directory = (unsigned int)PAGE_DIRECTORY;
+    new_task->page_directory = PAGE_DIRECTORY;
     new_task->user_slot_index = -1;
     new_task->exiting = 0;
     new_task->mls_level = 0;
@@ -229,33 +240,38 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     unsigned int stack_shift = (aslr_next_random() % (STACK_ASLR_MAX_SHIFT / 16 + 1)) * 16;
     unsigned int stack_top = USER_STACK_TOP - stack_shift;
 
-    // Кадр ring3->ring0, как в task_create_user, но EIP/ESP - виртуальные
-    // адреса окна 0x100000-0x108000. ESP всегда у верха окна (одинаков
-    // для любой задачи, с ASLR-сдвигом); EIP - точка входа из ELF
-    // (entry_vaddr, обычно == USER_WINDOW_BASE, но не предполагается
-    // равным ей навечно - см. elf.h/elf_load).
-    unsigned int* sp = (unsigned int*)(kstack + KSTACK_SIZE);
-    *(--sp) = USER_DATA_SEG | 3;     // SS
-    *(--sp) = stack_top;             // ESP: ниже верха окна, со случайным сдвигом (STACK_ASLR_MAX_SHIFT)
-    *(--sp) = 0x202;                 // EFLAGS: IF=1
-    *(--sp) = USER_CODE_SEG | 3;     // CS
-    *(--sp) = entry_vaddr;             // EIP: точка входа (ELF e_entry)
-    *(--sp) = 0;                       // EAX
-    *(--sp) = argv_vaddr;              // ECX = virtual ptr to argv[] array (0x107C00)
-    *(--sp) = 0;                       // EDX
-    *(--sp) = (unsigned int)argc;      // EBX = argc
-    *(--sp) = 0; // ESP - игнорируется popa
-    *(--sp) = 0; // EBP
-    *(--sp) = 0; // ESI
-    *(--sp) = 0; // EDI
+    // Кадр ring3→ring0 на kstack: iretq переключит в 32-бит compat mode.
+    // RSP будет восстановлен из поля RSP_old кадра → user stack.
+    // В 32-бит compat: EBX = argc (нижние 32 бит RBX), ECX = argv_vaddr.
+    unsigned long long* sp = (unsigned long long*)(kstack + KSTACK_SIZE);
+    *(--sp) = (unsigned long long)(USER_DATA_SEG | 3);    // SS
+    *(--sp) = (unsigned long long)stack_top;               // RSP (user stack, 32-бит)
+    *(--sp) = 0x202ULL;                                   // RFLAGS: IF=1
+    *(--sp) = (unsigned long long)(USER_CODE32_SEG | 3);  // CS (32-бит compat, DPL=3)
+    *(--sp) = (unsigned long long)entry_vaddr;             // RIP (32-бит точка входа)
+    *(--sp) = 0; // R15
+    *(--sp) = 0; // R14
+    *(--sp) = 0; // R13
+    *(--sp) = 0; // R12
+    *(--sp) = 0; // R11
+    *(--sp) = 0; // R10
+    *(--sp) = 0; // R9
+    *(--sp) = 0; // R8
+    *(--sp) = 0; // RBP
+    *(--sp) = 0; // RDI
+    *(--sp) = 0; // RSI
+    *(--sp) = 0; // RDX
+    *(--sp) = (unsigned long long)argv_vaddr;              // RCX → ECX = argv_vaddr
+    *(--sp) = (unsigned long long)(unsigned int)argc;      // RBX → EBX = argc
+    *(--sp) = 0; // RAX
 
-    new_task->esp = (unsigned int)sp;
-    new_task->kernel_stack_top = (unsigned int)(kstack + KSTACK_SIZE);
+    new_task->rsp = (unsigned long long)sp;
+    new_task->kernel_stack_top = (unsigned long long)(kstack + KSTACK_SIZE);
     new_task->id = next_id++;
     copy_name(new_task->name, name);
     new_task->ticks = 0;
-    new_task->page_directory = paging_create_user_directory(user_slot_index, phys_slot_base,
-                                                              wx_delta, wx_data_off);
+    new_task->page_directory = paging_create_user_directory(
+        user_slot_index, phys_slot_base, wx_delta, wx_data_off);
     new_task->user_slot_index = user_slot_index;
     new_task->exiting = 0;
     new_task->mls_level = 0; // s0 по умолчанию - поднимается самой задачей через SYS_SET_LEVEL
@@ -277,49 +293,37 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     current_task->next = new_task;
 }
 
-unsigned int schedule(unsigned int current_esp) {
-    if (!current_task) return current_esp; // tasking ещё не инициализирован
+unsigned long long schedule(unsigned long long current_rsp) {
+    if (!current_task) return current_rsp;
 
-    current_task->esp = current_esp;
+    current_task->rsp = current_rsp;
     current_task->ticks++;
 
     task_t* dying = current_task;
-    unsigned int prev_page_directory = dying->page_directory;
+    unsigned long long prev_page_directory = dying->page_directory;
     task_t* next = dying->next;
 
-    // Задача помечена на завершение (SYS_EXIT - kernel.c, или page fault
-    // в ring3 - paging.c) - убираем её из кольца и освобождаем ресурсы.
-    // exiting выставляется ТОЛЬКО у задач с user_slot_index >= 0 (run);
-    // task0/heartbeat/ring3demo никогда не завершаются, так что кольцо
-    // никогда не опустеет (pred ниже всегда найдётся).
     if (dying->exiting) {
         task_t* pred = next;
         while (pred->next != dying) pred = pred->next;
         pred->next = next;
 
-        if (dying->user_slot_index >= 0) {
+        if (dying->user_slot_index >= 0)
             on_task_exit(dying->user_slot_index);
-        }
 
-        free((void*)(dying->kernel_stack_top - KSTACK_SIZE));
+        free((void*)(unsigned long long)(dying->kernel_stack_top - KSTACK_SIZE));
         free(dying);
     }
 
     current_task = next;
 
-    // У каждой задачи свой стек для ring3->ring0 переходов (IRQ/syscall
-    // во время выполнения этой задачи) - без этого общий ESP0 пересекался
-    // бы с "живым" стеком задачи, которая ушла в ring3 (см. tss.c).
-    tss_set_esp0(current_task->kernel_stack_top);
+    tss_set_rsp0(current_task->kernel_stack_top);
 
-    // Изолированные задачи (task_create_user_isolated) имеют свой
-    // page_directory - переключаем CR3, только если он изменился
-    // (иначе лишний flush TLB на каждый тик для не-изолированных задач).
     if (current_task->page_directory != prev_page_directory) {
         __asm__ volatile("mov %0, %%cr3" :: "r"(current_task->page_directory));
     }
 
-    return current_task->esp;
+    return current_task->rsp;
 }
 
 // Помечает текущую задачу на завершение - см. tasking.h.

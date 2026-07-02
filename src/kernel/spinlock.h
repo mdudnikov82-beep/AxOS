@@ -34,8 +34,8 @@
 typedef volatile int spinlock_t;
 
 static inline int spin_save_and_disable_irq(void) {
-    unsigned int eflags;
-    __asm__ volatile("pushf\n\tpop %0\n\tcli" : "=r"(eflags));
+    unsigned long long eflags;
+    __asm__ volatile("pushfq\n\tpopq %0\n\tcli" : "=r"(eflags));
     return (eflags & 0x200) != 0; // бит IF
 }
 

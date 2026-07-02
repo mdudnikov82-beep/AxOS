@@ -24,7 +24,7 @@ static int buf_eq(unsigned char* a, unsigned char* b, unsigned int len) {
 }
 
 static int test_paging() {
-    unsigned int cr0, cr4;
+    unsigned long long cr0, cr4;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
 

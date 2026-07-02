@@ -179,9 +179,9 @@ static void heap_corrupted(char* why) {
 // (до его iret, idt.asm:50-55), мог бы включить прерывания раньше
 // времени и впустить вложенное прерывание в недопереключённый планировщик.
 #define ENTER_CRITICAL(flags) \
-    __asm__ volatile("pushfl\n\tpopl %0\n\tcli" : "=r"(flags) :: "memory")
+    __asm__ volatile("pushfq\n\tpopq %0\n\tcli" : "=r"(flags) :: "memory")
 #define LEAVE_CRITICAL(flags) \
-    __asm__ volatile("pushl %0\n\tpopfl" :: "r"(flags) : "memory", "cc")
+    __asm__ volatile("pushq %0\n\tpopfq" :: "r"(flags) : "memory", "cc")
 
 void init_heap() {
     heap_head = (block_header_t*)HEAP_START;
@@ -203,7 +203,7 @@ void* malloc(unsigned int size) {
     // канарейка сразу после них (см. комментарий в начале файла).
     unsigned int reserved = size + CANARY_SIZE;
 
-    unsigned long flags;
+    unsigned long long flags;
     ENTER_CRITICAL(flags);
 
     void* result = 0;
@@ -294,7 +294,7 @@ static void quarantine_push(block_header_t* block) {
 void free(void* ptr) {
     if (!ptr) return;
 
-    unsigned long flags;
+    unsigned long long flags;
     ENTER_CRITICAL(flags);
 
     block_header_t* block = (block_header_t*)((unsigned char*)ptr - HEADER_SIZE);

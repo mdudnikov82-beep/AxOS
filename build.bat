@@ -13,89 +13,89 @@ echo Compiling boot...
 .\tools\nasm.exe -f bin src\boot\boot.asm -o build\boot.bin
 if %errorlevel% neq 0 goto :error
 
+:: Флаги компилятора для 64-бит ядра.
+:: -mno-red-zone: обязательно для ядра — прерывания используют 128Б "red zone" ниже RSP,
+::   что затирало бы локальные переменные GCC. В ядре это ВСЕГДА баг.
+set "KFLAGS=-m64 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -mno-red-zone"
+
 echo Compiling kernel entry...
-.\tools\nasm.exe -f elf32 src\kernel\kernel_entry.asm -o build\kernel_entry.o
+.\tools\nasm.exe -f elf64 src\kernel\kernel_entry.asm -o build\kernel_entry.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling IDT...
-.\tools\nasm.exe -f elf32 src\kernel\idt.asm -o build\idt.o
+.\tools\nasm.exe -f elf64 src\kernel\idt.asm -o build\idt.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Kernel (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/kernel.c -o build/kernel.o
+gcc %KFLAGS% -I src/drivers -c src/kernel/kernel.c -o build/kernel.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Screen (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/screen.c -o build/screen.o
+gcc %KFLAGS% -I src/drivers -c src/kernel/screen.c -o build/screen.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling FAT12 driver (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/fs/fat12.c -o build/fat12.o
+gcc %KFLAGS% -I src/drivers -c src/fs/fat12.c -o build/fat12.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Paging (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/paging.c -o build/paging.o
-if %errorlevel% neq 0 goto :error
-
-echo Compiling Kernel CFI...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -c src/kernel/kcfi.c -o build/kcfi.o
+gcc %KFLAGS% -I src/drivers -c src/kernel/paging.c -o build/paging.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling TSS (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/tss.c -o build/tss.o
+gcc %KFLAGS% -I src/drivers -c src/kernel/tss.c -o build/tss.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Heap allocator (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/heap.c -o build/heap.o
+gcc %KFLAGS% -I src/drivers -c src/kernel/heap.c -o build/heap.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Tasking (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/tasking.c -o build/tasking.o
+gcc %KFLAGS% -I src/drivers -c src/kernel/tasking.c -o build/tasking.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling Self-test (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/selftest.c -o build/selftest.o
+gcc %KFLAGS% -I src/drivers -c src/kernel/selftest.c -o build/selftest.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling ELF loader (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/elf.c -o build/elf.o
+gcc %KFLAGS% -I src/drivers -c src/kernel/elf.c -o build/elf.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling VFS (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/kernel/vfs.c -o build/vfs.o
+gcc %KFLAGS% -I src/drivers -c src/kernel/vfs.c -o build/vfs.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling IDE driver (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/drivers/ide.c -o build/ide.o
+gcc %KFLAGS% -I src/drivers -c src/drivers/ide.c -o build/ide.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling mouse driver (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/drivers/mouse.c -o build/mouse.o
+gcc %KFLAGS% -I src/drivers -c src/drivers/mouse.c -o build/mouse.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling speaker driver (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/drivers/speaker.c -o build/speaker.o
+gcc %KFLAGS% -I src/drivers -c src/drivers/speaker.c -o build/speaker.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling PCI driver (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src/drivers/pci.c -o build/pci.o
-if %errorlevel% neq 0 goto :error
-
-echo Compiling Syscalls...
-.\tools\nasm.exe -f elf32 src\kernel\syscalls.asm -o build\syscalls.o
-if %errorlevel% neq 0 goto :error
-
-echo Compiling Usermode (ring3 entry)...
-.\tools\nasm.exe -f elf32 src\kernel\usermode.asm -o build\usermode.o
+gcc %KFLAGS% -I src/drivers -c src/drivers/pci.c -o build/pci.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling KCFI (Forward-edge CFI for syscall_table)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/kernel -c src/kernel/kcfi.c -o build/kcfi.o
+gcc %KFLAGS% -I src/kernel -c src/kernel/kcfi.c -o build/kcfi.o
 if %errorlevel% neq 0 goto :error
 
-echo Linking to PE...
-:: ??????? ? ??????, ??????? ?? ???????? (i386pe)
-ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\kcfi.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\elf.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\pci.o build\syscalls.o build\usermode.o -o build\kernel.exe
+echo Compiling Syscalls...
+.\tools\nasm.exe -f elf64 src\kernel\syscalls.asm -o build\syscalls.o
+if %errorlevel% neq 0 goto :error
+
+echo Compiling Usermode (ring3 entry)...
+.\tools\nasm.exe -f elf64 src\kernel\usermode.asm -o build\usermode.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking to PE (64-bit)...
+ld -T kernel.ld -m i386pep --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\kcfi.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\elf.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\pci.o build\syscalls.o build\usermode.o -o build\kernel.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping to Binary...
@@ -728,8 +728,8 @@ echo Compiling mouse driver for graphics demo (C)...
 gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src\drivers\mouse.c -o build\mouse_gfx.o
 if %errorlevel% neq 0 goto :error
 
-echo Linking graphics kernel...
-ld -T kernel.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_gfx_entry.o build\idt_gfx.o build\gfx_demo.o build\mouse_gfx.o -o build\kernel_gfx.exe
+echo Linking graphics kernel (32-бит, отдельный kernel_gfx.ld)...
+ld -T kernel_gfx.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_gfx_entry.o build\idt_gfx.o build\gfx_demo.o build\mouse_gfx.o -o build\kernel_gfx.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping graphics kernel to flat binary...
