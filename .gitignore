@@ -9,6 +9,15 @@
 /log.txt
 *.bin
 
+# QEMU screenshots (debug)
+screen*.png
+screen*.ppm
+axos*.png
+axos*.ppm
+
+# Build log captures
+build_*.txt
+
 # Backups and scratch folders
 *.bak
 
