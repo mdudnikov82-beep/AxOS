@@ -268,8 +268,10 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     // физическому адресу - ядро сейчас работает на текущем (не приватном)
     // PD, где этот адрес identity-mapped.
     unsigned char* spin = (unsigned char*)(phys_slot_base + USER_WINDOW_SIZE - 2);
+    smap_allow();
     spin[0] = 0xEB; // jmp
     spin[1] = 0xFE; // -2 (на себя)
+    smap_deny();
 
     new_task->next = current_task->next;
     current_task->next = new_task;

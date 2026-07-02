@@ -1289,7 +1289,9 @@ void syscall_dispatch(unsigned char func, char* arg) {
     }
     if (func < SYSCALL_TABLE_SIZE && syscall_table[func]) {
         kcfi_check(func, syscall_table[func]);
+        smap_allow();
         syscall_table[func](arg);
+        smap_deny();
     }
 }
 
@@ -1521,6 +1523,10 @@ void execute_command(char* cmd) {
                     unsigned int sv = USER_ARGS_VADDR + USER_ARGS_STR_OFF;
                     int argc = 0;
 
+                    // argv-блок находится в user window (slot 0 = USER_WINDOW_BASE+0xF800).
+                    // SMAP: stac перед записью, clac после.
+                    smap_allow();
+
                     // argv[0] = имя файла
                     argv_phys[argc++] = (char*)sv;
                     for (int i = 0; filename[i]; i++) { *sp++ = filename[i]; sv++; }
@@ -1536,6 +1542,8 @@ void execute_command(char* cmd) {
                         while (*p == ' ') p++;
                     }
                     argv_phys[argc] = 0;  // argv[argc] = NULL (POSIX)
+
+                    smap_deny();
 
                     slot_heap_brk[slot] = USER_WINDOW_BASE + elf_res.max_vaddr_end;
                     {

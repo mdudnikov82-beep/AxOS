@@ -19,6 +19,7 @@
 
 #include "elf.h"
 #include "tasking.h"  // aslr_next_random()
+#include "paging.h"   // smap_allow / smap_deny
 
 #define ELF_MAX_PHNUM 5
 
@@ -161,8 +162,10 @@ int elf_load(unsigned char* staging_buf, unsigned int staging_size,
 
         unsigned char* dst = phys_slot_base + seg_off_d;
         unsigned char* src = staging_buf + p_offset;
+        smap_allow();
         for (unsigned int b = 0; b < p_filesz; b++) dst[b] = src[b];
         for (unsigned int b = p_filesz; b < p_memsz; b++) dst[b] = 0;
+        smap_deny();
 
         unsigned int seg_end = seg_off_d + p_memsz;
         if (seg_end > max_end) max_end = seg_end;
@@ -174,6 +177,7 @@ int elf_load(unsigned char* staging_buf, unsigned int staging_size,
     // ---------------------------------------------------------------
     if (delta > 0 && reloc_count > 0) {
         unsigned char* offsets_ptr = reloc_data + 4;
+        smap_allow();
         for (unsigned int i = 0; i < reloc_count; i++) {
             unsigned int off = read_u32(offsets_ptr + i * 4u);
             if (off + 4u <= code_max_end) {
@@ -181,6 +185,7 @@ int elf_load(unsigned char* staging_buf, unsigned int staging_size,
                 *patch += delta;
             }
         }
+        smap_deny();
     }
 
     unsigned int entry_d = e_entry + delta;

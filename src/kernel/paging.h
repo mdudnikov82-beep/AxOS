@@ -41,9 +41,17 @@
 
 // Включает PAE-страничную адресацию (3-уровневые таблицы, 8Б PTE).
 // При поддержке ЦП (CPUID.80000001H:EDX[20]) включает NX/XD.
+// При поддержке SMEP/SMAP (CPUID.07H:EBX[7/20]) включает CR4[20/21].
 // Страницы .text ядра помечаются read-only (CR0.WP=1 блокирует запись
 // даже из ring0). Страницы данных ядра помечаются NX (не исполняемые).
 void init_paging();
+
+// SMAP: временно разрешить/запретить ring0 обращаться к user-страницам.
+// smap_allow() = stac (EFLAGS.AC=1), smap_deny() = clac (EFLAGS.AC=0).
+// Вызывать попарно вокруг каждого копирования в/из user-пространства.
+// Если SMAP не поддерживается ЦП — no-op.
+void smap_allow(void);
+void smap_deny(void);
 
 // Обработчик исключения #14 (Page Fault), см. idt.asm
 extern void page_fault_handler();

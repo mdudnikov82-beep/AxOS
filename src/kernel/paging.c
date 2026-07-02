@@ -35,6 +35,8 @@ extern char _text_end[];
 static int g_nx = 0;
 // 1 если ЦП поддерживает SMEP (CR4[20]), определяется в init_paging()
 static int g_smep = 0;
+// 1 если ЦП поддерживает SMAP (CR4[21]), определяется в init_paging()
+static int g_smap = 0;
 
 void init_paging() {
     pae_t* pdpt = GLOBAL_PDPT;
@@ -58,6 +60,7 @@ void init_paging() {
             : "=a"(eax7), "=b"(ebx7), "=c"(ecx7), "=d"(edx7)
             : "a"(7u), "c"(0u));
         g_smep = (ebx7 >> 7) & 1;
+        g_smap = (ebx7 >> 20) & 1;
     }
 
     unsigned int text_end = (unsigned int)_text_end & ~(PAGE_SIZE - 1u);
@@ -112,13 +115,16 @@ void init_paging() {
     //      бит 20 = SMEP: запрещает ring0 исполнять страницы с PAE_USER=1
     //      (= страницы пользователя). Защита от jump-to-user атак на ядро.
     unsigned int cr4_set = 0x20u;
-    if (g_smep) cr4_set |= 0x100000u;
+    if (g_smep) cr4_set |= 0x100000u; // SMEP: CR4[20]
+    if (g_smap) cr4_set |= 0x200000u; // SMAP: CR4[21]
     __asm__ volatile(
         "mov %%cr4, %%eax\n"
         "or %0, %%eax\n"
         "mov %%eax, %%cr4\n"
         :: "r"(cr4_set) : "eax"
     );
+    // После включения SMAP сбрасываем AC, чтобы защита была активна с нуля.
+    if (g_smap) __asm__ volatile(".byte 0x0F,0x01,0xCA"); // clac
 
     // Если NX поддерживается: EFER.NXE = 1 (MSR 0xC0000080, бит 11).
     if (g_nx) {
@@ -144,7 +150,17 @@ void init_paging() {
     print_string(g_nx   ? "on" : "off");
     print_string(" SMEP=");
     print_string(g_smep ? "on" : "off");
+    print_string(" SMAP=");
+    print_string(g_smap ? "on" : "off");
     print_string("\n");
+}
+
+void smap_allow(void) {
+    if (g_smap) __asm__ volatile(".byte 0x0F,0x01,0xCB"); // stac: AC=1, ring0 может читать user-страницы
+}
+
+void smap_deny(void) {
+    if (g_smap) __asm__ volatile(".byte 0x0F,0x01,0xCA"); // clac: AC=0, SMAP снова активна
 }
 
 
@@ -249,12 +265,23 @@ void page_fault_handler_main(unsigned int faulting_address, unsigned int* frame)
     // Причина: NX на странице ядра (баг в paging) ИЛИ SMEP (ядро прыгнуло
     // на страницу юзера). Различить без walk-PT-таблицы невозможно.
     int is_kernel_exec_fault = (err2 & (1u << 4)) && !(err2 & (1u << 2));
+    // SMAP: P=1, U/S=0 (ring0), I/D=0 (data access), адрес в окне юзера.
+    // SMAP-фолт = ядро обратилось к user-странице без stac (AC=0).
+    int is_smap_fault = (err2 & 1u) && !(err2 & (1u << 2)) && !(err2 & (1u << 4))
+                     && (faulting_address >= USER_WINDOW_BASE)
+                     && (faulting_address <  USER_WINDOW_BASE + USER_WINDOW_SIZE);
     if (is_kernel_exec_fault) {
         print_string("\n\033[41;37m[SMEP/NX] kernel exec fault addr=0x");
         print_hex(faulting_address);
         print_string(" eip=0x");
         print_hex(eip);
         print_string("\033[0m\n");
+    } else if (is_smap_fault) {
+        print_string("\n\033[41;37m[SMAP] kernel data access to user page addr=0x");
+        print_hex(faulting_address);
+        print_string(" eip=0x");
+        print_hex(eip);
+        print_string(" (missing stac?)\033[0m\n");
     } else {
         print_string("\n\033[31m*** PAGE FAULT at 0x");
         print_hex(faulting_address);
