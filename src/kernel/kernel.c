@@ -25,7 +25,7 @@
 // одновременно в изоляции друг от друга.
 #define USER_PROGRAM_SLOTS     4
 #define USER_PROGRAM_SLOT_SIZE 0x10000
-#define USER_PROGRAM_BASE      0x100000
+#define USER_PROGRAM_BASE      0x200000  // физ. слоты в PD[1] (supervisor huge page, без SMAP-конфликта)
 
 // Аргументы командной строки для run-программ.
 // Блок sizeof(char*)*8 + строки живёт в конце каждого слота:
@@ -640,9 +640,9 @@ void sys_read_key(char* arg) {
 void sys_write_file(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct write_file_args))) return;
     struct write_file_args* a = (struct write_file_args*)arg;
-    if (!validate_user_str(a->filename) || !validate_user_ptr(a->data, a->size)) { a->result = 0; return; }
+    if (!validate_user_str((char*)a->filename) || !validate_user_ptr((void*)a->data, a->size)) { a->result = 0; return; }
     if (!ax_mac_check(AX_CLASS_FILE_WRITE)) { a->result = 0; return; }
-    a->result = vfs_write(a->filename, a->data, a->size);
+    a->result = vfs_write((char*)a->filename, (unsigned char*)a->data, a->size);
 }
 
 // SYS_READ_FILE: ESI -> struct read_file_args. Фактический размер
@@ -650,11 +650,11 @@ void sys_write_file(char* arg) {
 void sys_read_file(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct read_file_args))) return;
     struct read_file_args* a = (struct read_file_args*)arg;
-    if (!validate_user_str(a->filename) || !validate_user_ptr(a->buffer, a->max_size)) {
+    if (!validate_user_str((char*)a->filename) || !validate_user_ptr((void*)a->buffer, a->max_size)) {
         a->out_size = 0;
         return;
     }
-    a->out_size = vfs_read(a->filename, a->buffer, a->max_size);
+    a->out_size = vfs_read((char*)a->filename, (unsigned char*)a->buffer, a->max_size);
 }
 
 // SYS_EXIT: текущая задача завершилась - schedule() уберёт её из кольца
@@ -723,7 +723,7 @@ void sys_open(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct open_args))) return;
     struct open_args* a = (struct open_args*)arg;
     a->result = -1;
-    if (!validate_user_str(a->filename)) return;
+    if (!validate_user_str((char*)a->filename)) return;
     // Проверяем на ОТКРЫТИИ, не на каждом sys_fwrite - запись определяется
     // флагом O_WRONLY здесь, дальнейшие sys_fwrite на этом fd уже доверяют
     // праву, выданному при open() (та же модель, что у permission check
@@ -737,7 +737,7 @@ void sys_open(char* arg) {
     }
     if (slot < 0) return;
 
-    char* name = a->filename;
+    char* name = (char*)a->filename;
     int ni = 0;
     while (name[ni] && ni < 12) { fd_table[slot].name[ni] = name[ni]; ni++; }
     fd_table[slot].name[ni] = '\0';
@@ -770,13 +770,13 @@ void sys_fread(char* arg) {
     int fd = a->fd;
     if (!fd_owned_by_caller(fd)) return;
     if (fd_table[fd].flags != O_RDONLY) return;
-    if (!validate_user_ptr(a->buf, a->count)) return;
+    if (!validate_user_ptr((void*)a->buf, a->count)) return;
 
     unsigned int remaining = fd_table[fd].size - fd_table[fd].pos;
     unsigned int to_copy   = a->count < remaining ? a->count : remaining;
 
     unsigned char* src = fd_table[fd].buf + fd_table[fd].pos;
-    unsigned char* dst = a->buf;
+    unsigned char* dst = (unsigned char*)a->buf;
     for (unsigned int i = 0; i < to_copy; i++) dst[i] = src[i];
     fd_table[fd].pos += to_copy;
     a->result = (int)to_copy;
@@ -791,12 +791,12 @@ void sys_fwrite(char* arg) {
     int fd = a->fd;
     if (!fd_owned_by_caller(fd)) return;
     if (fd_table[fd].flags == O_RDONLY) return;
-    if (!validate_user_ptr(a->buf, a->count)) return;
+    if (!validate_user_ptr((void*)a->buf, a->count)) return;
 
     unsigned int space    = MAX_FILE_BUF - fd_table[fd].pos;
     unsigned int to_copy  = a->count < space ? a->count : space;
 
-    unsigned char* src = a->buf;
+    unsigned char* src = (unsigned char*)a->buf;
     unsigned char* dst = fd_table[fd].buf + fd_table[fd].pos;
     for (unsigned int i = 0; i < to_copy; i++) dst[i] = src[i];
     fd_table[fd].pos += to_copy;
@@ -914,9 +914,9 @@ static int do_exec(char* cmdline) {
 void sys_exec(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct exec_args))) return;
     struct exec_args* a = (struct exec_args*)arg;
-    if (!validate_user_str(a->cmdline)) { a->result = -1; return; }
+    if (!validate_user_str((char*)a->cmdline)) { a->result = -1; return; }
     if (!ax_mac_check(AX_CLASS_EXEC)) { a->result = -1; return; }
-    a->result = do_exec(a->cmdline);
+    a->result = do_exec((char*)a->cmdline);
 }
 
 // SYS_EXEC_REDIR: запустить программу, перенаправив её stdout в файл.
@@ -928,21 +928,21 @@ void sys_exec_redir(char* arg) {
     // убедится, что адрес в окне - проверяем ЕЁ раньше, чем a->redir_out[0]
     // (redir_out=NULL - валидный "без перенаправления", поэтому не сам
     // факт указателя, а его обращение нужно защищать).
-    if (!validate_user_str(a->cmdline) ||
-        (a->redir_out && !validate_user_str(a->redir_out))) {
+    if (!validate_user_str((char*)a->cmdline) ||
+        (a->redir_out && !validate_user_str((char*)a->redir_out))) {
         a->result = -1;
         return;
     }
     if (!ax_mac_check(AX_CLASS_EXEC)) { a->result = -1; return; }
-    a->result = do_exec(a->cmdline);
-    if (a->result >= 0 && a->redir_out && a->redir_out[0]) {
+    a->result = do_exec((char*)a->cmdline);
+    if (a->result >= 0 && a->redir_out && ((char*)a->redir_out)[0]) {
         int slot = a->result;
         unsigned char* buf = (unsigned char*)malloc(REDIR_BUF_SIZE);
         if (buf) {
             slot_redir_buf[slot] = buf;
             slot_redir_len[slot] = 0;
             int fi = 0;
-            char* fn = a->redir_out;
+            char* fn = (char*)a->redir_out;
             while (*fn && fi < 12) slot_redir_file[slot][fi++] = *fn++;
             slot_redir_file[slot][fi] = '\0';
         }
@@ -1008,9 +1008,9 @@ void sys_readdir(char* arg) {
 void sys_mkdir(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct mkdir_args))) return;
     struct mkdir_args* a = (struct mkdir_args*)arg;
-    if (!validate_user_str(a->dirname)) { a->result = 0; return; }
+    if (!validate_user_str((char*)a->dirname)) { a->result = 0; return; }
     if (!ax_mac_check(AX_CLASS_FILE_WRITE)) { a->result = 0; return; }
-    a->result = vfs_mkdir(a->dirname);
+    a->result = vfs_mkdir((char*)a->dirname);
 }
 
 void sys_fs_lock(char* arg) {
@@ -1024,25 +1024,25 @@ void sys_fs_lock(char* arg) {
 void sys_disk_identify(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct disk_identify_args))) return;
     struct disk_identify_args* a = (struct disk_identify_args*)arg;
-    if (!validate_user_ptr(a->model, 41)) { a->result = 0; return; }
+    if (!validate_user_ptr((void*)a->model, 41)) { a->result = 0; return; }
     if (!ax_mac_check(AX_CLASS_DISK_RAW)) { a->result = 0; return; }
-    a->result = ide_identify(a->model);
+    a->result = ide_identify((char*)a->model);
 }
 
 void sys_disk_read_sector(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct disk_sector_args))) return;
     struct disk_sector_args* a = (struct disk_sector_args*)arg;
-    if (!validate_user_ptr(a->buf, IDE_SECTOR_SIZE)) { a->result = 0; return; }
+    if (!validate_user_ptr((void*)a->buf, IDE_SECTOR_SIZE)) { a->result = 0; return; }
     if (!ax_mac_check(AX_CLASS_DISK_RAW)) { a->result = 0; return; }
-    a->result = ide_read_sector(a->lba, a->buf);
+    a->result = ide_read_sector(a->lba, (unsigned char*)a->buf);
 }
 
 void sys_disk_write_sector(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct disk_sector_args))) return;
     struct disk_sector_args* a = (struct disk_sector_args*)arg;
-    if (!validate_user_ptr(a->buf, IDE_SECTOR_SIZE)) { a->result = 0; return; }
+    if (!validate_user_ptr((void*)a->buf, IDE_SECTOR_SIZE)) { a->result = 0; return; }
     if (!ax_mac_check(AX_CLASS_DISK_RAW)) { a->result = 0; return; }
-    a->result = ide_write_sector(a->lba, a->buf);
+    a->result = ide_write_sector(a->lba, (unsigned char*)a->buf);
 }
 
 void sys_ps(char* arg) {
@@ -1131,9 +1131,9 @@ void sys_sbrk(char* arg) {
 void sys_unlink(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct unlink_args))) return;
     struct unlink_args* a = (struct unlink_args*)arg;
-    if (!validate_user_str(a->filename)) { a->result = 0; return; }
+    if (!validate_user_str((char*)a->filename)) { a->result = 0; return; }
     if (!ax_mac_check(AX_CLASS_FILE_UNLINK)) { a->result = 0; return; }
-    a->result = vfs_delete(a->filename);
+    a->result = vfs_delete((char*)a->filename);
 }
 
 // SYS_GET_DATETIME: текущее время RTC - userspace-версия print_datetime()
@@ -1181,9 +1181,10 @@ void sys_clipboard_set(char* arg) {
     struct clipboard_set_args* a = (struct clipboard_set_args*)arg;
     unsigned int size = a->size;
     if (size > CLIPBOARD_MAX_SIZE) size = CLIPBOARD_MAX_SIZE;
-    if (!validate_user_ptr(a->data, size)) return;
+    if (!validate_user_ptr((void*)a->data, size)) return;
     if (!ax_mac_check(AX_CLASS_CLIPBOARD)) return;
-    for (unsigned int i = 0; i < size; i++) clipboard_buf[i] = a->data[i];
+    { unsigned char* data_ptr = (unsigned char*)a->data;
+      for (unsigned int i = 0; i < size; i++) clipboard_buf[i] = data_ptr[i]; }
     clipboard_len = size;
     // Буфер "окрашивается" уровнем писателя - см. ax_mls_dominates() и
     // комментарий у clipboard_level. Неизолированные (kernel_t) задачи не
@@ -1203,8 +1204,9 @@ void sys_clipboard_get(char* arg) {
     if (!ax_mls_dominates(clipboard_level, "clipboard")) { a->out_size = 0; return; }
     unsigned int size = clipboard_len;
     if (size > a->max_size) size = a->max_size;
-    if (!validate_user_ptr(a->buffer, size)) { a->out_size = 0; return; }
-    for (unsigned int i = 0; i < size; i++) a->buffer[i] = clipboard_buf[i];
+    if (!validate_user_ptr((void*)a->buffer, size)) { a->out_size = 0; return; }
+    { unsigned char* buf_ptr = (unsigned char*)a->buffer;
+      for (unsigned int i = 0; i < size; i++) buf_ptr[i] = clipboard_buf[i]; }
     a->out_size = size;
 }
 

@@ -125,14 +125,24 @@ int elf_load(unsigned char* staging_buf, unsigned int staging_size,
     if (!found_load) return ELF_ERR_NOT_LOAD;
 
     // ---------------------------------------------------------------
-    // Вычисляем ASLR delta (кратна 16; ограничена свободным местом).
+    // Вычисляем ASLR delta (кратна странице; ограничена свободным местом).
+    // delta выбирается так, чтобы (delta + wx_data_off) % PAGE_SIZE == 0 —
+    // тогда граница code/data всегда совпадает с границей страницы.
     // ---------------------------------------------------------------
     unsigned int delta = 0;
     if (reloc_count > 0 && code_max_end < max_segment_end_offset) {
+        const unsigned int PAGE = 0x1000u;
+        // Сколько нужно добавить к delta, чтобы (delta+wx_data_off) % PAGE == 0
+        unsigned int align_fix = 0;
+        if (wx_data_off > 0) {
+            unsigned int mod = wx_data_off & (PAGE - 1u);
+            if (mod != 0) align_fix = PAGE - mod;
+        }
         unsigned int available = max_segment_end_offset - code_max_end;
-        unsigned int positions = available / 16u;
-        if (positions > 0)
-            delta = (aslr_next_random() % positions) * 16u;
+        if (available > align_fix) {
+            unsigned int slots = (available - align_fix) / PAGE;
+            delta = align_fix + (slots > 0 ? (aslr_next_random() % slots) * PAGE : 0u);
+        }
     }
 
     // ---------------------------------------------------------------
@@ -162,10 +172,8 @@ int elf_load(unsigned char* staging_buf, unsigned int staging_size,
 
         unsigned char* dst = phys_slot_base + seg_off_d;
         unsigned char* src = staging_buf + p_offset;
-        smap_allow();
         for (unsigned int b = 0; b < p_filesz; b++) dst[b] = src[b];
         for (unsigned int b = p_filesz; b < p_memsz; b++) dst[b] = 0;
-        smap_deny();
 
         unsigned int seg_end = seg_off_d + p_memsz;
         if (seg_end > max_end) max_end = seg_end;
@@ -177,7 +185,6 @@ int elf_load(unsigned char* staging_buf, unsigned int staging_size,
     // ---------------------------------------------------------------
     if (delta > 0 && reloc_count > 0) {
         unsigned char* offsets_ptr = reloc_data + 4;
-        smap_allow();
         for (unsigned int i = 0; i < reloc_count; i++) {
             unsigned int off = read_u32(offsets_ptr + i * 4u);
             if (off + 4u <= code_max_end) {
@@ -185,7 +192,6 @@ int elf_load(unsigned char* staging_buf, unsigned int staging_size,
                 *patch += delta;
             }
         }
-        smap_deny();
     }
 
     unsigned int entry_d = e_entry + delta;

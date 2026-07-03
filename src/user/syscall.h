@@ -20,8 +20,8 @@
 // содержимым data (size байт). result: 1 - записан, 0 - диск не
 // готов/заблокирован или нет места (ядро пишет результат сюда же).
 struct write_file_args {
-    char* filename;
-    unsigned char* data;
+    unsigned int filename;   // 32-bit user char* (fixed width: user=32-bit, kernel=64-bit)
+    unsigned int data;       // 32-bit user unsigned char*
     unsigned int size;
     int result;
 };
@@ -29,8 +29,8 @@ struct write_file_args {
 // Аргумент SYS_READ_FILE: загружает файл filename в buffer (макс.
 // max_size байт). Ядро записывает фактический размер в out_size.
 struct read_file_args {
-    char* filename;
-    unsigned char* buffer;
+    unsigned int filename;   // 32-bit user char*
+    unsigned int buffer;     // 32-bit user unsigned char*
     unsigned int max_size;
     unsigned int out_size;
 };
@@ -47,25 +47,25 @@ struct read_file_args {
 
 // SYS_OPEN: открыть файл; result = fd (>= 0) или -1 при ошибке.
 struct open_args {
-    char* filename;
-    int   flags;
-    int   result;
+    unsigned int  filename;  // 32-bit user char*
+    int           flags;
+    int           result;
 };
 
 // SYS_FREAD: прочитать count байт из fd в buf; result = фактически прочитано (-1 при ошибке).
 struct fread_args {
-    int            fd;
-    unsigned char* buf;
-    unsigned int   count;
-    int            result;
+    int          fd;
+    unsigned int buf;    // 32-bit user unsigned char*
+    unsigned int count;
+    int          result;
 };
 
 // SYS_FWRITE: записать count байт из buf в fd; result = фактически записано (-1 при ошибке).
 struct fwrite_args {
-    int            fd;
-    unsigned char* buf;
-    unsigned int   count;
-    int            result;
+    int          fd;
+    unsigned int buf;    // 32-bit user unsigned char*
+    unsigned int count;
+    int          result;
 };
 
 // SYS_CLOSE: закрыть fd (при O_WRONLY сбрасывает данные на диск).
@@ -80,9 +80,9 @@ struct close_args {
 
 // SYS_EXEC: запустить бинарник из FAT12; result = slot (>= 0) или -1/-2/-3.
 struct exec_args {
-    char* cmdline;   // "filename arg1 arg2..."
-    int   result;    // >= 0: slot-индекс, -1: файл не найден, -2: нет слотов,
-                      // -3: файл не валидный ELF (см. elf.h)
+    unsigned int cmdline;  // 32-bit user char* ("filename arg1 arg2...")
+    int          result;   // >= 0: slot-индекс, -1: файл не найден, -2: нет слотов,
+                           // -3: файл не валидный ELF (см. elf.h)
 };
 
 // SYS_TASK_ALIVE: проверить, жива ли задача в слоте (без блокировки).
@@ -140,9 +140,9 @@ struct sbrk_args {
 // redir_out должен быть в FAT12-формате (uppercase, max 12 символов).
 // Диск должен быть разблокирован командой unlock.
 struct exec_redir_args {
-    char* cmdline;   // имя программы + аргументы
-    char* redir_out; // имя выходного файла (uppercase FAT12, e.g. "OUT.TXT")
-    int   result;    // >= 0: slot, -1: не найден, -2: нет слотов, -3: не валидный ELF
+    unsigned int cmdline;   // 32-bit user char*: имя программы + аргументы
+    unsigned int redir_out; // 32-bit user char*: имя выходного файла
+    int          result;    // >= 0: slot, -1: не найден, -2: нет слотов, -3: не валидный ELF
 };
 
 // --- Удаление файла (0x15) ---
@@ -154,8 +154,8 @@ struct exec_redir_args {
 #define AX_UNLINK_NOTFOUND -1
 
 struct unlink_args {
-    char* filename;  // имя файла (uppercase FAT12, e.g. "OUT.TXT")
-    int   result;
+    unsigned int filename;  // 32-bit user char*
+    int          result;
 };
 
 // --- Создание директории (0x16) ---
@@ -169,8 +169,8 @@ struct unlink_args {
 #define AX_MKDIR_NOSPACE -2
 
 struct mkdir_args {
-    char* dirname;
-    int   result;
+    unsigned int dirname;  // 32-bit user char*
+    int          result;
 };
 
 // --- Блокировка файловой системы (0x17) ---
@@ -188,16 +188,16 @@ struct mkdir_args {
 // SYS_DISK_IDENTIFY: model - буфер не менее 41 байта (заполняется строкой
 // модели). result=1: успех, result=0: диск не отвечает.
 struct disk_identify_args {
-    char* model;
-    int   result;
+    unsigned int model;   // 32-bit user char*
+    int          result;
 };
 
 // SYS_DISK_READ_SECTOR / SYS_DISK_WRITE_SECTOR: buf - буфер ровно
 // IDE_SECTOR_SIZE (512) байт. result=1: успех, result=0: ошибка/нет диска.
 struct disk_sector_args {
-    unsigned int   lba;
-    unsigned char* buf;
-    int            result;
+    unsigned int lba;
+    unsigned int buf;    // 32-bit user unsigned char*
+    int          result;
 };
 
 // --- Дата/время и перезагрузка (0x1B-0x1C) ---
@@ -245,16 +245,16 @@ struct beep_args {
 // SYS_CLIPBOARD_SET: копирует data (size байт, максимум CLIPBOARD_MAX_SIZE)
 // в общий буфер обмена ядра, заменяя его прежнее содержимое.
 struct clipboard_set_args {
-    unsigned char* data;
-    unsigned int   size;
+    unsigned int data;   // 32-bit user unsigned char*
+    unsigned int size;
 };
 
 // SYS_CLIPBOARD_GET: копирует содержимое буфера обмена в buffer (максимум
 // max_size байт). Ядро записывает фактический размер в out_size.
 struct clipboard_get_args {
-    unsigned char* buffer;
-    unsigned int   max_size;
-    unsigned int   out_size;
+    unsigned int buffer;   // 32-bit user unsigned char*
+    unsigned int max_size;
+    unsigned int out_size;
 };
 
 // 1 КБ - не от щедрости: .bss ядра физически близко к загрузочному сектору

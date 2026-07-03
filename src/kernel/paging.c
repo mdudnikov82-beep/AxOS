@@ -142,11 +142,11 @@ void init_paging() {
 }
 
 void smap_allow(void) {
-    if (g_smap) __asm__ volatile(".byte 0x0F,0x01,0xCB"); // stac
+    if (g_smap) __asm__ volatile(".byte 0x0F,0x01,0xCB" ::: "memory"); // stac
 }
 
 void smap_deny(void) {
-    if (g_smap) __asm__ volatile(".byte 0x0F,0x01,0xCA"); // clac
+    if (g_smap) __asm__ volatile(".byte 0x0F,0x01,0xCA" ::: "memory"); // clac
 }
 
 
