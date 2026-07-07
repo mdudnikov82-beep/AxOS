@@ -73,6 +73,7 @@ int main(int argc, char** argv) {
             ax_print("  clear                     clear the screen\n");
             ax_print("  unlock / lock             unlock/lock the disk for writing\n");
             ax_print("  paste                     print the clipboard (clip get)\n");
+            ax_print("  nice <pid> <1-10>         set a task's scheduler priority\n");
             ax_print("  help                      show this message\n");
             ax_print("  exit                      quit AxSH\n");
             ax_print("\n");
@@ -96,6 +97,20 @@ int main(int argc, char** argv) {
             clip_buf[got] = '\0';
             ax_print((char*)clip_buf);
             ax_putchar('\n');
+            continue;
+        }
+
+        // "nice <pid> <priority>" - см. ax_set_priority (SYS_SET_PRIORITY).
+        // pid - как в колонке "ID" вывода `ps`, не user_slot ("user:N").
+        if (sh_strncmp(line, "nice ", 5) == 0) {
+            const char* p = line + 5;
+            int pid = 0, prio = 0;
+            while (*p == ' ') p++;
+            while (*p >= '0' && *p <= '9') pid = pid*10 + (*p++ - '0');
+            while (*p == ' ') p++;
+            while (*p >= '0' && *p <= '9') prio = prio*10 + (*p++ - '0');
+            ax_set_priority(pid, prio);
+            ax_printf("\033[32mnice: pid %d -> priority %d\033[0m\n", pid, prio);
             continue;
         }
 

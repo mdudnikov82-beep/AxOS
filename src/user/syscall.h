@@ -314,4 +314,18 @@ struct pci_device_args {
     int          result;
 };
 
+// --- Приоритет задачи (0x24) ---
+#define SYS_SET_PRIORITY 0x24  // ESI -> struct set_priority_args
+
+// SYS_SET_PRIORITY: меняет приоритет (1..10, см. PRIORITY_MIN/MAX,
+// tasking.h) задачи по pid - сколько последовательных таймерных тиков она
+// держит CPU за один заход планировщика (weighted round-robin). Не строгие
+// уровни: низкий приоритет не голодает, просто реже получает ход. Любая
+// задача может задать приоритет ЛЮБОЙ другой (включая себя) - как nice/
+// renice без привилегий root, тут привилегий вообще нет.
+struct set_priority_args {
+    int pid;
+    int priority;
+};
+
 #endif

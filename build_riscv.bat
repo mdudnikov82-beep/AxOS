@@ -299,6 +299,14 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\kptrtest_rv64.elf) do echo   kptrtest_rv64.elf: %%~zF bytes
 
+echo [U40] spin.c (TEMP diagnostic)...
+"%CC%" %UFLAGS% -c %USRC%\spin.c -o %OUT%\uspin.o
+if %errorlevel% neq 0 goto :error
+
+echo [U41] Linking spin...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\spin_rv64.elf %OUT%\ucrt0.o %OUT%\uspin.o
+if %errorlevel% neq 0 goto :error
+
 echo.
 echo ===== Disk image =====
 
@@ -322,6 +330,7 @@ copy /b %OUT%\gfxtext_rv64.elf    rv64build\fs\rv64\GFXTEXT.ELF
 copy /b %OUT%\axpaint_rv64.elf    rv64build\fs\rv64\AXPAINT.ELF
 copy /b %OUT%\axdesk_rv64.elf     rv64build\fs\rv64\AXDESK.ELF
 copy /b %OUT%\kptrtest_rv64.elf   rv64build\fs\rv64\KPTRTEST.ELF
+copy /b %OUT%\spin_rv64.elf       rv64build\fs\rv64\SPIN.ELF
 if %errorlevel% neq 0 goto :error
 
 python tools\make_fat12_rv64.py

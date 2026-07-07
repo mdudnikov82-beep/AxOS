@@ -81,6 +81,12 @@ int ax_readdir(struct readdir_args* a);
 // Заполняет *e и возвращает e->result (1 = запись найдена, 0 = конец)
 int ax_ps(struct ps_entry* e);
 
+// Меняет приоритет (1..10, зажимается ядром) задачи по pid - сколько
+// последовательных таймерных тиков она держит CPU за один заход
+// планировщика (weighted round-robin, см. task_set_priority в tasking.c).
+// Любая задача может менять приоритет любой другой (включая себя).
+void ax_set_priority(int pid, int priority);
+
 // Список PCI-устройств (обёртка над SYS_PCI_GET_DEVICE), см. lspci.c.
 // d->index - вход (0-based); заполняет остальные поля *d, возвращает
 // d->result (1 = запись найдена, 0 = конец списка).
@@ -165,6 +171,7 @@ void ax_printf(const char* fmt, ...);  // %s %d %u %x %c %%
 #define AX_SC_SET_LEVEL    AX_SC_BIT(0x21)  // ax_set_level
 #define AX_SC_PCI          AX_SC_BIT(0x22)  // ax_pci_get_device
 // 0x23 = SYS_SECCOMP — всегда разрешён ядром, бит здесь для явного включения
+#define AX_SC_SET_PRIORITY AX_SC_BIT(0x24)  // ax_set_priority
 
 // Готовые профили:
 #define AX_SC_PRINT_ONLY  (AX_SC_PRINT | AX_SC_CLEAR | AX_SC_EXIT | AX_SC_SBRK)

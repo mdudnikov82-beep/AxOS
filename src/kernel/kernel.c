@@ -1234,6 +1234,14 @@ void sys_seccomp(char* arg) {
     task_set_syscall_mask(mask);
 }
 
+// SYS_SET_PRIORITY (0x24): см. struct set_priority_args (src/user/syscall.h)
+// и task_set_priority (tasking.c) для семантики.
+void sys_set_priority(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct set_priority_args))) return;
+    struct set_priority_args* a = (struct set_priority_args*)arg;
+    task_set_priority(a->pid, a->priority);
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01
@@ -1271,6 +1279,7 @@ syscall_fn syscall_table[] = {
     sys_set_level,         // 0x21
     sys_pci_get_device,    // 0x22
     sys_seccomp,           // 0x23
+    sys_set_priority,      // 0x24
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))

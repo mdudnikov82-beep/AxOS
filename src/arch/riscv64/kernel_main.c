@@ -292,6 +292,21 @@ void kernel_main(unsigned long hart_id, unsigned long dtb) {
      * display, not just the boot log (which stays UART-only). */
     console_init();
 
+    /* MUST happen before jump_to_umode() below: that call never returns
+     * (sret straight into the first process), so anything placed after it
+     * in this function is dead code that never runs on the normal boot
+     * path. Timer interrupts (and therefore ALL timer-tick preemption -
+     * see schedule() in proc.c) were silently never enabled at all until
+     * this was moved here, because timer_init() used to sit AFTER
+     * jump_to_umode(). Every process, forever, only ever got the CPU via
+     * voluntary yield()/blocking-read retries (both synchronous ecalls,
+     * which trap regardless of sie/sstatus.SIE) - a process that never
+     * calls either (e.g. a pure compute loop) could never be preempted at
+     * all and would hang the whole system. */
+    timer_init();
+    uart_puts("[kernel] timer armed (100ms interval)\r\n");
+    csr_set(sstatus, 1 << 1);   // sstatus.SIE=1 - enable interrupts globally
+
     /* Init process table and load the first user process. */
     if (vfs_is_ready()) {
         proc_init();
@@ -361,12 +376,10 @@ void kernel_main(unsigned long hart_id, unsigned long dtb) {
         uart_puts("\r\n");
     }
 
-    timer_init();
-    uart_puts("[kernel] timer armed (1s interval)\r\n");
-    uart_puts("[kernel] entering idle loop — watch for timer ticks:\r\n");
-
-    // Включаем прерывания в sstatus.SIE
-    csr_set(sstatus, 1 << 1);
-
+    /* Only reached if no process could be loaded above (timer_init()
+     * and the sstatus.SIE enable already happened earlier in this
+     * function, before jump_to_umode()). Nothing left to schedule -
+     * just idle. */
+    uart_puts("[kernel] no process running — idling.\r\n");
     while (1) __asm__ volatile("wfi");
 }

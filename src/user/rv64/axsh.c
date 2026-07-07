@@ -65,6 +65,7 @@ static void cmd_help(void) {
     print("  run <FILE>      run program (foreground, waits for exit)\r\n");
     print("  run <FILE> &    run program in background\r\n");
     print("  kill <PID>      terminate a background process\r\n");
+    print("  nice <PID> <N>  set a task's scheduler priority (1-10)\r\n");
     print("  ps              list all processes\r\n");
     print("  echo [text]     print text\r\n");
     print("  write <F> <t>   create/overwrite file F with text t\r\n");
@@ -253,6 +254,21 @@ static void cmd_kill(const char *arg) {
     print(" terminated\r\n");
 }
 
+static void cmd_nice(const char *arg) {
+    if (!arg || !*arg) { print("Usage: nice <PID> <1-10>\r\n"); return; }
+    const char *p = arg;
+    int pid = 0, prio = 0;
+    while (*p >= '0' && *p <= '9') pid = pid * 10 + (*p++ - '0');
+    while (*p == ' ') p++;
+    while (*p >= '0' && *p <= '9') prio = prio * 10 + (*p++ - '0');
+    set_priority(pid, prio);
+    print("nice: pid=");
+    print_udec((unsigned long)pid);
+    print(" -> priority=");
+    print_udec((unsigned long)prio);
+    print("\r\n");
+}
+
 static void cmd_ps(void) {
     print("\r\n");
     ps();
@@ -307,6 +323,12 @@ int main(void) {
             continue;
         }
         if (seq(line, "kill")) { cmd_kill(0); continue; }
+
+        if (sncmp(line, "nice ", 5) == 0) {
+            cmd_nice(skip_spaces(line + 5));
+            continue;
+        }
+        if (seq(line, "nice")) { cmd_nice(0); continue; }
 
         if (sncmp(line, "echo ", 5) == 0) {
             cmd_echo(skip_spaces(line + 5));

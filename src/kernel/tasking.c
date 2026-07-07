@@ -34,6 +34,16 @@
 #define USER_CODE32_SEG 0x20
 #define USER_DATA_SEG   0x28
 
+// Приоритет = сколько ПОСЛЕДОВАТЕЛЬНЫХ таймерных тиков задача держит CPU
+// за один заход в кольцо, прежде чем schedule() перейдёт к следующей -
+// weighted round-robin, не строгие уровни (низкий приоритет не голодает
+// вечно, просто получает управление реже/на более короткое время). Раньше
+// это было жёстко "1 тик на задачу всегда"; PRIORITY_DEFAULT=3 - более
+// крупная гранулярность по умолчанию, а не полный возврат к "1".
+#define PRIORITY_MIN     1
+#define PRIORITY_MAX     10
+#define PRIORITY_DEFAULT 3
+
 typedef struct task {
     unsigned long long rsp;             // сохранённый RSP (указывает на GPR-кадр)
     unsigned long long kernel_stack_top; // RSP0 этой задачи (для ring3->ring0)
@@ -45,6 +55,8 @@ typedef struct task {
     int exiting;         // 1 - schedule() уберёт задачу из кольца на следующем тике
     unsigned int mls_level;          // MLS-уровень чувствительности (s0..s15)
     unsigned long long syscall_mask; // seccomp: бит N = syscall N разрешён; 0 = нет фильтра
+    int priority;         // 1..10, см. PRIORITY_* выше
+    int slice_left;       // сколько тиков ещё осталось в текущем заходе
     struct task* next;
 } task_t;
 
@@ -104,6 +116,8 @@ void init_tasking() {
     task0.exiting = 0;
     task0.mls_level = 0;
     task0.syscall_mask = 0;
+    task0.priority = PRIORITY_DEFAULT;
+    task0.slice_left = PRIORITY_DEFAULT;
     task0.next = &task0;
 
     unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
@@ -156,6 +170,8 @@ void task_create(char* name, void (*entry)(void)) {
     new_task->exiting = 0;
     new_task->mls_level = 0;
     new_task->syscall_mask = 0;
+    new_task->priority = PRIORITY_DEFAULT;
+    new_task->slice_left = PRIORITY_DEFAULT;
 
     unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
     new_task->kernel_stack_top = (unsigned long long)(kstack + KSTACK_SIZE);
@@ -202,6 +218,8 @@ void task_create_user(char* name, void (*entry)(void)) {
     new_task->exiting = 0;
     new_task->mls_level = 0;
     new_task->syscall_mask = 0;
+    new_task->priority = PRIORITY_DEFAULT;
+    new_task->slice_left = PRIORITY_DEFAULT;
 
     new_task->next = current_task->next;
     current_task->next = new_task;
@@ -276,6 +294,8 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     new_task->exiting = 0;
     new_task->mls_level = 0; // s0 по умолчанию - поднимается самой задачей через SYS_SET_LEVEL
     new_task->syscall_mask = 0; // нет фильтра - задача устанавливает свой через SYS_SECCOMP
+    new_task->priority = PRIORITY_DEFAULT;
+    new_task->slice_left = PRIORITY_DEFAULT;
 
     // "jmp $" (EB FE) в последние 2 байта окна задачи - см. USER_SPIN_ADDR
     // (paging.h). Сюда page_fault_handler_main перенаправляет EIP этой
@@ -298,6 +318,15 @@ unsigned long long schedule(unsigned long long current_rsp) {
     current_task->ticks++;
 
     task_t* dying = current_task;
+
+    // Приоритет = тайм-слайс: если задача не выходит И у неё ещё остались
+    // тики в текущем заходе - просто отдаём ей следующий тик без
+    // переключения (без смены CR3/TSS.ESP0 - дёшево). Переключение
+    // происходит только когда слайс исчерпан ИЛИ задача завершается.
+    if (!dying->exiting && --dying->slice_left > 0) {
+        return dying->rsp;
+    }
+
     unsigned long long prev_page_directory = dying->page_directory;
     task_t* next = dying->next;
 
@@ -313,6 +342,7 @@ unsigned long long schedule(unsigned long long current_rsp) {
         free(dying);
     }
 
+    next->slice_left = next->priority; // новой текущей задаче - полный тайм-слайс
     current_task = next;
 
     tss_set_rsp0(current_task->kernel_stack_top);
@@ -322,6 +352,22 @@ unsigned long long schedule(unsigned long long current_rsp) {
     }
 
     return current_task->rsp;
+}
+
+// Устанавливает приоритет (1..10, см. PRIORITY_MIN/MAX) задачи по id.
+// Не меняет slice_left задачи "на лету", если это уже текущая задача -
+// новое значение начнёт применяться с её СЛЕДУЮЩЕГО захода (иначе можно
+// было бы удлинить уже начатый слайс задним числом).
+void task_set_priority(int pid, int priority) {
+    if (!current_task) return;
+    if (priority < PRIORITY_MIN) priority = PRIORITY_MIN;
+    if (priority > PRIORITY_MAX) priority = PRIORITY_MAX;
+
+    task_t* t = current_task;
+    do {
+        if (t->id == pid) { t->priority = priority; return; }
+        t = t->next;
+    } while (t != current_task);
 }
 
 // Помечает текущую задачу на завершение - см. tasking.h.

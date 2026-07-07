@@ -25,6 +25,7 @@
 #define SYS_GFX_DRAWTEXT  22  /* gfx_draw_text(x, y, str, bgra) -> 0/-1 */
 #define SYS_MOUSE_STATE   23  /* mouse_state() -> packed x/y/buttons, or 0 if no device */
 #define SYS_GFX_GETPIXEL  24  /* gfx_getpixel(x, y) -> bgra, or 0 if out of bounds/no GPU */
+#define SYS_SET_PRIORITY  25  /* set_priority(pid, priority) -> 0 (priority clamped to [1,10]) */
 
 /* Kernel-side entry point.
  * frame[] = saved registers from trap_entry (sd xN, N*8(sp)):

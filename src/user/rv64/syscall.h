@@ -28,6 +28,7 @@
 #define SYS_GFX_DRAWTEXT  22
 #define SYS_MOUSE_STATE   23
 #define SYS_GFX_GETPIXEL  24
+#define SYS_SET_PRIORITY  25
 
 static inline long __syscall0(long nr) {
     register long _nr  __asm__("a7") = nr;
@@ -145,6 +146,13 @@ static inline void ps(void) {
 
 static inline int kill(int pid) {
     return (int)__syscall1(SYS_KILL, (long)pid);
+}
+
+/* set_priority(pid, priority) - priority clamped to [1,10] by the kernel;
+ * how many consecutive timer ticks that process keeps the CPU per turn
+ * through the round-robin ring (weighted round-robin, see proc.c). */
+static inline void set_priority(int pid, int priority) {
+    __syscall2(SYS_SET_PRIORITY, (long)pid, (long)priority);
 }
 
 /* writefile(path, buf, len) -> 1 ok / 0 err (creates or overwrites) */

@@ -102,4 +102,10 @@ void task_set_syscall_mask(unsigned long long mask);
 unsigned long long task_get_syscall_mask(void);
 int task_syscall_allowed(unsigned char num);
 
+// Приоритет = сколько последовательных таймерных тиков задача держит CPU
+// за один заход в кольцо планировщика (weighted round-robin, 1..10,
+// по умолчанию 3 - см. PRIORITY_DEFAULT в tasking.c). Не строгие уровни:
+// низкоприоритетная задача не голодает вечно, просто реже получает ход.
+void task_set_priority(int pid, int priority);
+
 #endif

@@ -438,7 +438,16 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
     }
 
     case SYS_YIELD:
-        /* Voluntarily give up the CPU.  schedule() saves state. */
+        /* Voluntarily give up the CPU.  schedule() saves state.
+         *
+         * Force slice_left to 0 first: schedule() sees state==RUNNING
+         * here (we haven't touched it) and would normally treat that as
+         * ordinary timer-tick preemption, which - now that priority gives
+         * a process multiple consecutive ticks per turn (see proc.c) -
+         * could otherwise just decrement the remaining slice and resume
+         * THIS SAME process instead of actually switching. An explicit
+         * yield() must always hand off the CPU, priority or not. */
+        procs[current_pid].slice_left = 0;
         frame[REG_A0] = 0;  /* yield() returns 0 */
         schedule(frame, sepc + 4);
         user_access_disable();
@@ -464,7 +473,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
     case SYS_PS: {
         static const char *stnames[] =
             {"unused", "runnable", "running", "waiting", "zombie"};
-        uart_puts("PID  STATE     NAME\r\n");
+        uart_puts("PID  STATE     NAME          PRIO  TICKS\r\n");
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_UNUSED) continue;
             uart_putc('0' + i);
@@ -476,11 +485,20 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
             for (int p = 0; stnames[procs[i].state][p]; p++);
             uart_puts("   ");
             uart_puts(procs[i].name);
+            uart_puts("  ");
+            put_udec((unsigned long)procs[i].priority);
+            uart_puts("     ");
+            put_udec(procs[i].ticks);
             uart_puts("\r\n");
         }
         ret = 0;
         break;
     }
+
+    case SYS_SET_PRIORITY:
+        proc_set_priority((int)arg0, (int)arg1);
+        ret = 0;
+        break;
 
     default:
         uart_puts("[syscall] ENOSYS nr=");

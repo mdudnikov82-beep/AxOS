@@ -43,6 +43,7 @@ global _ax_clipboard_get
 global _ax_set_level
 global _ax_pci_get_device
 global _ax_seccomp_raw
+global _ax_set_priority
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -617,6 +618,25 @@ _ax_seccomp_raw:
     push eax                ; struct.mask_lo (offset 0 = esp)
     mov esi, esp
     mov ah, 0x23            ; SYS_SECCOMP
+    int 0x80
+    add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; void ax_set_priority(int pid, int priority)
+; Строит struct set_priority_args { pid, priority } на стеке.
+; priority зажимается в [1,10] на стороне ядра (см. task_set_priority).
+_ax_set_priority:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=pid, [esp+16]=priority
+    mov eax, [esp+12]       ; pid
+    mov ecx, [esp+16]       ; priority
+    push ecx                ; struct.priority (offset 4)
+    push eax                ; struct.pid      (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x24            ; SYS_SET_PRIORITY
     int 0x80
     add esp, 8
     pop ebx

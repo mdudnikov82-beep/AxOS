@@ -18,10 +18,13 @@ int proc_create(const char *name, unsigned long entry,
     for (int i = 0; i < MAX_PROCS; i++) {
         if (procs[i].state != PROC_UNUSED) continue;
 
-        procs[i].state     = PROC_RUNNABLE;
-        procs[i].exit_code = 0;
-        procs[i].wait_pid  = -1;
-        procs[i].pagetable = pt;
+        procs[i].state       = PROC_RUNNABLE;
+        procs[i].exit_code   = 0;
+        procs[i].wait_pid    = -1;
+        procs[i].pagetable   = pt;
+        procs[i].priority    = PRIORITY_DEFAULT;
+        procs[i].slice_left  = PRIORITY_DEFAULT;
+        procs[i].ticks       = 0;
 
         int k = 0;
         while (name[k] && k < 12) { procs[i].name[k] = name[k]; k++; }
@@ -36,7 +39,7 @@ int proc_create(const char *name, unsigned long entry,
     return -1;
 }
 
-/* Round-robin scheduler.
+/* Round-robin scheduler, weighted by priority.
  *
  * Called with:
  *   frame  – pointer to the current trap frame on the kernel stack
@@ -47,12 +50,28 @@ int proc_create(const char *name, unsigned long entry,
  * and mark it RUNNABLE before searching for the next slot.  Callers that
  * already transitioned the process to WAITING/ZOMBIE should save state
  * themselves *before* calling schedule().
+ *
+ * Priority = how many consecutive timer ticks a process keeps the CPU per
+ * turn (see PRIORITY_* in proc.h). Only genuine timer-tick preemption
+ * (state still RUNNING when we get here) is subject to slice counting -
+ * every other caller (SYS_EXIT, page-fault kill, the non-blocking-stdin
+ * yield-and-retry in syscall.c) already transitioned the state away from
+ * RUNNING *before* calling schedule(), specifically to hand the CPU to
+ * someone else right now - so they always fall through to the rotation
+ * below instead of being eligible for "keep running the same one" below.
  */
 void schedule(unsigned long *frame, unsigned long sepc) {
     int start = (current_pid >= 0) ? current_pid : 0;
 
-    /* Save state only for preemption (state == RUNNING). */
     if (current_pid >= 0 && procs[current_pid].state == PROC_RUNNING) {
+        /* Only genuine timer-tick preemption reaches here (see comment
+         * above) - counts as one more tick of CPU time for this process. */
+        procs[current_pid].ticks++;
+
+        /* Still has time left in this turn - just resume it, no switch. */
+        if (--procs[current_pid].slice_left > 0) {
+            return;
+        }
         procs[current_pid].state = PROC_RUNNABLE;
         for (int r = 1; r < 32; r++)
             procs[current_pid].regs[r] = frame[r];
@@ -73,8 +92,9 @@ void schedule(unsigned long *frame, unsigned long sepc) {
         return;
     }
 
-    current_pid       = next;
-    procs[next].state = PROC_RUNNING;
+    current_pid          = next;
+    procs[next].state    = PROC_RUNNING;
+    procs[next].slice_left = procs[next].priority; /* fresh turn for the new task */
 
     /* Restore next process's registers into the trap frame.
      * entry.S will lw/ld them on the return path and do sret. */
@@ -90,4 +110,15 @@ void schedule(unsigned long *frame, unsigned long sepc) {
         "sfence.vma\n"
         :: "r"(satp_val), "r"(procs[next].sepc) : "memory"
     );
+}
+
+/* Sets a process's scheduler priority (clamped). No-op for an unused slot
+ * or an out-of-range pid. Takes effect on that process's NEXT turn - we
+ * don't retroactively extend/shrink a turn already in progress. */
+void proc_set_priority(int pid, int priority) {
+    if (pid < 0 || pid >= MAX_PROCS) return;
+    if (procs[pid].state == PROC_UNUSED) return;
+    if (priority < PRIORITY_MIN) priority = PRIORITY_MIN;
+    if (priority > PRIORITY_MAX) priority = PRIORITY_MAX;
+    procs[pid].priority = priority;
 }
