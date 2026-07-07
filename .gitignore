@@ -1,19 +1,27 @@
 # Vendored dev toolkit (large, fetched separately)
 /w64devkit/
+/riscv-gcc/
+riscv-gcc.zip
 
 # Build output
 /build/
+/rv64build/
 
 # Debug/QEMU logs and memory dumps
 *.log
 /log.txt
 *.bin
 
+# Generated test binaries baked into fs/ at build time (not hand-authored)
+*.rv
+
 # QEMU screenshots (debug)
 screen*.png
 screen*.ppm
 axos*.png
 axos*.ppm
+shot*.png
+shot*.ppm
 
 # Build log captures
 build_*.txt
