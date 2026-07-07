@@ -130,9 +130,14 @@ void trap_handler(unsigned long cause, unsigned long epc,
     while (1) __asm__ volatile("wfi");
 }
 
+extern void kernel_init_stack_guard(void); // stack_chk.c - см. комментарий там
+
 // ---- Точка входа ядра ----
 void kernel_main(unsigned long hart_id, unsigned long dtb) {
     (void)dtb;
+
+    // Первым делом, до вообще любого другого кода - см. stack_chk.c.
+    kernel_init_stack_guard();
 
     uart_init();
     uart_puts("\r\n");

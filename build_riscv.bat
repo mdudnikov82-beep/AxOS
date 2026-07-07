@@ -18,7 +18,7 @@ if not exist "%CC%" (
 
 if not exist %OUT% mkdir %OUT%
 
-set "KFLAGS=-march=rv64imac_zicsr -mabi=lp64 -mcmodel=medany -ffreestanding -fno-stack-protector -Os -Wall -I%SRC%"
+set "KFLAGS=-march=rv64imac_zicsr -mabi=lp64 -mcmodel=medany -ffreestanding -fstack-protector-strong -Os -Wall -I%SRC%"
 set "UFLAGS=-march=rv64imac_zicsr -mabi=lp64 -mcmodel=medany -ffreestanding -fno-stack-protector -Os -nostdlib -I%USRC%"
 
 echo ===== Kernel =====
@@ -79,6 +79,10 @@ echo [10] kernel_main.c...
 "%CC%" %KFLAGS% -c %SRC%\kernel_main.c -o %OUT%\kernel_main.o
 if %errorlevel% neq 0 goto :error
 
+echo [10b] stack_chk.c...
+"%CC%" %KFLAGS% -c %SRC%\stack_chk.c -o %OUT%\stack_chk.o
+if %errorlevel% neq 0 goto :error
+
 echo [11] Linking kernel...
 "%LD%" -m elf64lriscv -T %SRC%\kernel.ld -o %OUT%\kernel.elf ^
     %OUT%\entry.o ^
@@ -94,7 +98,8 @@ echo [11] Linking kernel...
     %OUT%\syscall.o ^
     %OUT%\proc.o ^
     %OUT%\elf_loader.o ^
-    %OUT%\kernel_main.o
+    %OUT%\kernel_main.o ^
+    %OUT%\stack_chk.o
 if %errorlevel% neq 0 goto :error
 
 "%OBJCOPY%" -O binary %OUT%\kernel.elf %OUT%\kernel.bin
