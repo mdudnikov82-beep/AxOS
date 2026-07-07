@@ -16,7 +16,9 @@ if %errorlevel% neq 0 goto :error
 :: Флаги компилятора для 64-бит ядра.
 :: -mno-red-zone: обязательно для ядра — прерывания используют 128Б "red zone" ниже RSP,
 ::   что затирало бы локальные переменные GCC. В ядре это ВСЕГДА баг.
-set "KFLAGS=-m64 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -mno-red-zone"
+:: -fstack-protector-strong: канарейка локальных буферов (см. stack_chk.c) -
+::   раньше стояла только у userspace (libaxiom), у самого ядра не было вообще.
+set "KFLAGS=-m64 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -mno-red-zone -fstack-protector-strong"
 
 echo Compiling kernel entry...
 .\tools\nasm.exe -f elf64 src\kernel\kernel_entry.asm -o build\kernel_entry.o
@@ -86,6 +88,10 @@ echo Compiling KCFI (Forward-edge CFI for syscall_table)...
 gcc %KFLAGS% -I src/kernel -c src/kernel/kcfi.c -o build/kcfi.o
 if %errorlevel% neq 0 goto :error
 
+echo Compiling stack canary (kernel -fstack-protector-strong support)...
+gcc %KFLAGS% -I src/kernel -c src/kernel/stack_chk.c -o build/stack_chk.o
+if %errorlevel% neq 0 goto :error
+
 echo Compiling Syscalls...
 .\tools\nasm.exe -f elf64 src\kernel\syscalls.asm -o build\syscalls.o
 if %errorlevel% neq 0 goto :error
@@ -95,7 +101,7 @@ echo Compiling Usermode (ring3 entry)...
 if %errorlevel% neq 0 goto :error
 
 echo Linking to PE (64-bit)...
-ld -T kernel.ld -m i386pep --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\kcfi.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\elf.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\pci.o build\syscalls.o build\usermode.o -o build\kernel.exe
+ld -T kernel.ld -m i386pep --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\kcfi.o build\stack_chk.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\elf.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\pci.o build\syscalls.o build\usermode.o -o build\kernel.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping to Binary...

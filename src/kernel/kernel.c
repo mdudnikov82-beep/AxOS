@@ -1439,6 +1439,38 @@ void heap_underflow_demo() {
     print_string("\033[31m  FAIL: underflow was NOT detected!\033[0m\n");
 }
 
+// --- Демо: деструктивный тест стековой канарейки (-fstack-protector-strong) ---
+// Аналогично heap_underflow_demo(), но бьёт канарейку НА СТЕКЕ, а не в
+// куче: переполняет локальный буфер так, что затирает __stack_chk_guard,
+// сохранённый GCC в кадре stack_smash_inner() при входе (см. stack_chk.c).
+// В эпилоге GCC должен обнаружить расхождение и вызвать __stack_chk_fail()
+// (красный текст + halt) - функция специально не возвращается при успехе.
+static void stack_smash_inner(void) {
+    volatile char buf[8];
+    // Фиксированные точечные записи, НЕ цикл: цикл вида
+    // "for (i = 0; i < n; i++) buf[i] = ..." с n, известным на этапе
+    // компиляции, GCC/-Os посчитал недостижимым UB (запись за пределы
+    // 8-байтного buf) и СХЛОПНУЛ проверку границы, получив бесконечный
+    // цикл вместо ограниченного переполнения (объезд диза́ссемблером
+    // подтвердил: ни одного cmp/jcc, чистый jmp назад) - именно так первая
+    // версия этого теста устроила triple fault вместо аккуратного
+    // __stack_chk_fail(). Фиксированные индексы такой пере-оптимизации не
+    // подвержены. По факту, разобранный код показал канарейку РОВНО на
+    // rsp+0x28, buf - на rsp+0x20: buf[8..15] попадают ровно в неё.
+    buf[8]  = 0x41; buf[9]  = 0x41; buf[10] = 0x41; buf[11] = 0x41;
+    buf[12] = 0x41; buf[13] = 0x41; buf[14] = 0x41; buf[15] = 0x41;
+    // Ничего больше не делаем: всё после этого и до закрывающей скобки -
+    // сгенерированный GCC эпилог (проверка канарейки + ret). Любой ДРУГОЙ
+    // вызов функции здесь рисковал бы упасть на уже испорченном кадре ДО
+    // проверки канарейки.
+}
+
+void stack_protector_demo() {
+    print_string("\033[36mStack-protector test (destructive - expect HALT):\033[0m\n");
+    stack_smash_inner();
+    print_string("\033[31m  FAIL: stack smash was NOT detected!\033[0m\n");
+}
+
 // --- Фоновая задача-демо для планировщика (tasking.c) ---
 // Анимирует спиннер в правом верхнем углу экрана. Пишет напрямую в
 // видеопамять (не через print_string/cursor_x/y), чтобы не конфликтовать
@@ -1496,6 +1528,7 @@ void execute_command(char* cmd) {
         print_string("  usermode    - demo: jump to ring3, call syscall via int 0x80\n");
         print_string("  memtest     - test heap allocator (malloc/free)\n");
         print_string("  uftest      - DESTRUCTIVE: heap underflow test (expects halt)\n");
+        print_string("  sptest      - DESTRUCTIVE: stack-protector test (expects halt)\n");
         print_string("  selftest    - run heap/paging/FAT12 regression tests\n");
         print_string("  Ctrl+Alt+F1/F2 - switch virtual console (TTY)\n");
         print_string("  (echo/ls/cat/ps/uptime/write/diskinfo/diskread/diskwrite/date/reboot\n");
@@ -1613,6 +1646,8 @@ void execute_command(char* cmd) {
         memtest_demo();
     } else if (str_eq(cmd, "uftest")) {
         heap_underflow_demo();
+    } else if (str_eq(cmd, "sptest")) {
+        stack_protector_demo();
     } else if (str_eq(cmd, "selftest")) {
         run_self_tests();
     } else {
@@ -1755,7 +1790,16 @@ static int autoboot() {
     _v[(24*80+(col))*2+1] = (attr); \
 } while(0)
 
+extern void kernel_init_stack_guard(void); // stack_chk.c - см. комментарий там
+
 void kernel_main() {
+    // Первым делом: до init_idt()/init_ttys() и вообще любого другого
+    // вызова, иначе первые же -fstack-protector-strong функции получили
+    // бы нулевой (BSS) canary вместо случайного. Сам kernel_main() никогда
+    // не возвращается, так что собственный canary-слот в ЕГО прологе
+    // (снятый ДО этой строки) не имеет значения - его эпилог не выполнится.
+    kernel_init_stack_guard();
+
     char* video_memory = (char*) 0xB8000;
     video_memory[0] = 'M';
     video_memory[1] = 0x0F;
