@@ -51,12 +51,31 @@ typedef unsigned int color_t;
 #define C_YELLOW 0xFFFF55u
 #define C_WHITE  0xFFFFFFu
 
+/* Extra shades for gradients/cards - cheap to have now, plain palette
+ * indices couldn't afford in-between tones like these. */
+#define C_NAVY_LT  0x2A4E8Cu   /* lighter navy, gradient top          */
+#define C_NAVY_DK  0x0A1A33u   /* darker navy,  gradient bottom        */
+#define C_CARD_BG  0x0C1424u   /* near-black card body (terminal/about)*/
+#define C_CARD_BRD 0x2A3A55u   /* card border                          */
+#define C_GRAY_LT  0xC8C8C8u   /* taskbar gradient top                 */
+
 /* Layout */
 #define TBAR_H   24
 #define BBAR_Y   (SH - 24)
 #define BBAR_H   24
 #define AREA_Y   TBAR_H
 #define AREA_H   (BBAR_Y - TBAR_H)
+
+/* Floating "card" panel used by Terminal/About instead of a full-bleed
+ * flat-color screen - margin from the content area edges, corner radius,
+ * inner padding for whatever's drawn inside it. */
+#define CARD_M   14
+#define CARD_R   16
+#define CARD_PAD 16
+#define CARD_X   CARD_M
+#define CARD_Y   (AREA_Y + CARD_M)
+#define CARD_W   (SW - 2*CARD_M)
+#define CARD_H   (AREA_H - 2*CARD_M)
 
 /* ── I/O ─────────────────────────────────────────────────────────── */
 static unsigned char inb(unsigned short p) {
@@ -294,9 +313,56 @@ static void hline(int x, int y, int w, color_t c) {
 static void vline(int x, int y, int h, color_t c) {
     for (int i=0; i<h; i++) px(x,y+i,c);
 }
-static void border(int x, int y, int w, int h, color_t c) {
-    hline(x,y,w,c); hline(x,y+h-1,w,c);
-    vline(x,y,h,c); vline(x+w-1,y,h,c);
+/* ── Alpha blending + gradients (only possible now that we have real
+ * 32-bit RGB instead of an 8-bit palette) ──────────────────────────── */
+static color_t blend(color_t bg, color_t fg, unsigned char alpha) {
+    int br=(bg>>16)&0xFF, bg8=(bg>>8)&0xFF, bb=bg&0xFF;
+    int fr=(fg>>16)&0xFF, fg8=(fg>>8)&0xFF, fb=fg&0xFF;
+    int r = br + ((fr-br)*alpha)/255;
+    int g = bg8 + ((fg8-bg8)*alpha)/255;
+    int b = bb + ((fb-bb)*alpha)/255;
+    return ((color_t)r<<16)|((color_t)g<<8)|(color_t)b;
+}
+static void blend_px(int x, int y, color_t fg, unsigned char alpha) {
+    if ((unsigned)x>=SW || (unsigned)y>=SH) return;
+    BACKBUF[y*SW+x] = blend(BACKBUF[y*SW+x], fg, alpha);
+}
+static void blend_fill(int x, int y, int w, int h, color_t c, unsigned char alpha) {
+    for (int dy=0; dy<h; dy++) for (int dx=0; dx<w; dx++) blend_px(x+dx, y+dy, c, alpha);
+}
+/* Vertical gradient fill: c1 at the top row, c2 at the bottom row. */
+static void vgrad(int x, int y, int w, int h, color_t c1, color_t c2) {
+    for (int dy=0; dy<h; dy++) {
+        unsigned char a = (h<=1) ? 255 : (unsigned char)((dy*255)/(h-1));
+        hline(x, y+dy, w, blend(c1, c2, a));
+    }
+}
+
+/* ── Rounded rectangles (drop shadows/cards below need these to not
+ * look like plain 320x200-era boxes now that curves are affordable) ── */
+static int in_rounded(int dx, int dy, int w, int h, int r) {
+    if (dx >= r && dx < w-r) return 1;
+    if (dy >= r && dy < h-r) return 1;
+    int cx = (dx < r) ? r : w-r-1;
+    int cy = (dy < r) ? r : h-r-1;
+    int ddx = dx-cx, ddy = dy-cy;
+    return (ddx*ddx + ddy*ddy) <= r*r;
+}
+static void fill_round(int x, int y, int w, int h, int r, color_t c) {
+    for (int dy=0; dy<h; dy++) for (int dx=0; dx<w; dx++)
+        if (in_rounded(dx, dy, w, h, r)) px(x+dx, y+dy, c);
+}
+/* Soft drop shadow: offset, blurred-ish via low alpha, blended into
+ * whatever is already in the back buffer (desktop/gradient behind it). */
+static void shadow_round(int x, int y, int w, int h, int r, int off) {
+    for (int dy=0; dy<h; dy++) for (int dx=0; dx<w; dx++)
+        if (in_rounded(dx, dy, w, h, r)) blend_px(x+dx+off, y+dy+off, C_BLACK, 90);
+}
+/* Rounded card with a thin border: outer rounded fill in border color,
+ * inner rounded fill (inset 2px, radius-2) in the body color on top. */
+static void card_round(int x, int y, int w, int h, int r, color_t body, color_t brd) {
+    fill_round(x, y, w, h, r, brd);
+    fill_round(x+2, y+2, w-4, h-4, r>2?r-2:1, body);
 }
 
 /* Font rendered at 2x: each 1x1 source bit becomes a FONT_SCALE x
@@ -424,8 +490,7 @@ static void trun(void) {
 /* ── Rendering ─────────────────────────────────────────────────────── */
 
 static void draw_titlebar(const char *title) {
-    /* gradient-ish: draw two slightly different navy rows */
-    fill(0, 0, SW, TBAR_H, C_NAVY);
+    vgrad(0, 0, SW, TBAR_H, C_NAVY_LT, C_NAVY);
     hline(0, TBAR_H-1, SW, C_BLUE);  /* bright bottom line */
     /* AxOS logo (left) */
     text(8, 4, "AxOS", C_CYAN);
@@ -444,14 +509,16 @@ static void draw_titlebar(const char *title) {
 }
 
 static void draw_taskbar(const char *mode) {
-    fill(0, BBAR_Y, SW, BBAR_H, C_DGRAY);
-    hline(0, BBAR_Y, SW, C_GRAY);   /* top highlight */
+    vgrad(0, BBAR_Y, SW, BBAR_H, C_GRAY, C_DGRAY);
+    hline(0, BBAR_Y, SW, C_GRAY_LT);   /* bright top highlight */
     text(8, BBAR_Y+4, "AxOS", C_CYAN);
     glyph(72, BBAR_Y+4, '|', C_WHITE);
     text(88, BBAR_Y+4, mode, C_WHITE);
 }
 
 /* ── Desktop ─────────────────────────────────────────────────────── */
+
+#define ICON_R 14   /* corner radius */
 
 /* Draw one icon; highlight if mouse hovers over it */
 static void draw_icon(const struct icon *ic, int mx, int my) {
@@ -461,8 +528,11 @@ static void draw_icon(const struct icon *ic, int mx, int my) {
     color_t fg  = hover ? C_BLACK : C_WHITE;
     color_t brd = hover ? C_WHITE : C_BLUE;
 
-    fill(ic->x, ic->y, ic->w, ic->h, bg);
-    border(ic->x, ic->y, ic->w, ic->h, brd);
+    /* Soft drop shadow first (into the gradient behind), then the
+     * rounded card on top - hovering lifts the shadow further out to
+     * read as "this one's raised/active". */
+    shadow_round(ic->x, ic->y, ic->w, ic->h, ICON_R, hover ? 8 : 5);
+    card_round(ic->x, ic->y, ic->w, ic->h, ICON_R, bg, brd);
 
     /* Inner symbol: terminal = ">" arrow, about = "?" */
     int sy = ic->y + 20;
@@ -480,12 +550,14 @@ static void draw_icon(const struct icon *ic, int mx, int my) {
 }
 
 static void render_desktop(int mx, int my) {
-    /* Background: solid dark navy with a subtle dot pattern */
-    fill(0, AREA_Y, SW, AREA_H, C_NAVY);
-    /* Dot grid (decorative) */
+    /* Background: navy gradient (was flat - a palette couldn't afford
+     * in-between shades, truecolor can) with a subtle dot pattern */
+    vgrad(0, AREA_Y, SW, AREA_H, C_NAVY, C_NAVY_DK);
+    /* Dot grid (decorative), faded in via low-alpha blend instead of a
+     * flat opaque color - softer against the gradient than a hard dot */
     for (int y = AREA_Y+16; y < BBAR_Y-16; y += 32)
         for (int x = 16; x < SW-16; x += 32)
-            px(x, y, C_DGRAY);
+            blend_px(x, y, C_WHITE, 40);
 
     draw_titlebar("Desktop");
 
@@ -500,40 +572,51 @@ static void render_desktop(int mx, int my) {
 
 /* ── Terminal screen ─────────────────────────────────────────────── */
 static void render_terminal(void) {
-    fill(0, AREA_Y, SW, AREA_H, C_BLACK);
-
+    /* Page backdrop (gradient), then a floating rounded card holding the
+     * actual terminal - was a flat full-bleed black rectangle before. */
+    vgrad(0, AREA_Y, SW, AREA_H, C_NAVY_DK, C_BLACK);
     draw_titlebar("Terminal");
 
-    /* Text area: starts at AREA_Y+8, one row per CHAR_W*2 (font height) px */
+    shadow_round(CARD_X, CARD_Y, CARD_W, CARD_H, CARD_R, 6);
+    card_round(CARD_X, CARD_Y, CARD_W, CARD_H, CARD_R, C_CARD_BG, C_CARD_BRD);
+
+    int tx = CARD_X + CARD_PAD;
+    int ty = CARD_Y + CARD_PAD;
+
+    /* Text area: one row per CHAR_W*2 (font height) px */
     for (int r=0; r<TROWS; r++) {
         if (tlines[r][0])
-            text(8, AREA_Y+8 + r*CHAR_W, tlines[r], C_GREEN);
+            text(tx, ty + r*CHAR_W, tlines[r], C_GREEN);
     }
 
-    /* Input line (below the text block) */
-    int inpy = AREA_Y + 8 + TROWS*CHAR_W;
-    fill(0, inpy, SW, CHAR_W+2, C_DGRAY);
-    hline(0, inpy, SW, C_GRAY);
-    text(8, inpy+2, ">", C_YELLOW);
-    if (tinlen > 0) text(8+2*CHAR_W, inpy+2, tinput, C_WHITE);
+    /* Input line (below the text block), spans the card's own width */
+    int inpy = ty + TROWS*CHAR_W;
+    int inx0 = CARD_X + 3, inw = CARD_W - 6;
+    fill(inx0, inpy, inw, CHAR_W+2, C_DGRAY);
+    hline(inx0, inpy, inw, C_GRAY);
+    text(tx, inpy+2, ">", C_YELLOW);
+    if (tinlen > 0) text(tx+2*CHAR_W, inpy+2, tinput, C_WHITE);
 
     /* Blinking cursor */
     blink_timer++;
     if ((blink_timer >> 14) & 1)
-        fill(8+2*CHAR_W + tinlen*CHAR_W, inpy+2, CHAR_W-4, CHAR_W, C_WHITE);
+        fill(tx+2*CHAR_W + tinlen*CHAR_W, inpy+2, CHAR_W-4, CHAR_W, C_WHITE);
 
-    /* "[exit]" hint, right-aligned */
-    text(SW - 16 - 6*CHAR_W, inpy+2, "[exit]", C_DGRAY);
+    /* "[exit]" hint, right-aligned within the card */
+    text(CARD_X+CARD_W-CARD_PAD - 6*CHAR_W, inpy+2, "[exit]", C_DGRAY);
 
     draw_taskbar("Terminal");
 }
 
 /* ── About screen ─────────────────────────────────────────────────── */
 static void render_about(void) {
-    fill(0, AREA_Y, SW, AREA_H, C_BLACK);
+    vgrad(0, AREA_Y, SW, AREA_H, C_NAVY_DK, C_BLACK);
     draw_titlebar("About AxOS");
 
-    int y = AREA_Y + 16;
+    shadow_round(CARD_X, CARD_Y, CARD_W, CARD_H, CARD_R, 6);
+    card_round(CARD_X, CARD_Y, CARD_W, CARD_H, CARD_R, C_CARD_BG, C_CARD_BRD);
+
+    int y = CARD_Y + CARD_PAD;
 
     /* ASCII art logo */
     text_center(SW/2, y,    " _  _ ", C_CYAN);   y += CHAR_W;
@@ -551,10 +634,11 @@ static void render_about(void) {
     text_center(SW/2, y, "Age 11", C_YELLOW); y += CHAR_W+10;
 
     /* Feature list */
-    text(40, y, "+ Preemptive multitasking",  C_GREEN);  y += CHAR_W+2;
-    text(40, y, "+ ELF32 loader + FAT12 FS",  C_GREEN);  y += CHAR_W+2;
-    text(40, y, "+ SMEP / SMAP / W^X / CFI",  C_GREEN);  y += CHAR_W+2;
-    text(40, y, "+ User shell (sh.c) + GUI",   C_GREEN);  y += CHAR_W+2;
+    int fx = CARD_X + CARD_PAD + 26;
+    text(fx, y, "+ Preemptive multitasking",  C_GREEN);  y += CHAR_W+2;
+    text(fx, y, "+ ELF32 loader + FAT12 FS",  C_GREEN);  y += CHAR_W+2;
+    text(fx, y, "+ SMEP / SMAP / W^X / CFI",  C_GREEN);  y += CHAR_W+2;
+    text(fx, y, "+ User shell (sh.c) + GUI",   C_GREEN);  y += CHAR_W+2;
 
     draw_taskbar("About AxOS");
 }
