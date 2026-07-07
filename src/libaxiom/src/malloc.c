@@ -1,19 +1,27 @@
 #include "../include/axiom.h"
 
-// Hardened heap: shadow memory + 32-bit generation tags + redzones + quarantine.
+// Hardened heap: shadow memory + 64-bit generation tags + redzones + quarantine.
+//
+// Изначально тег был 32-бит; расширен до 64 (см. тот же приём в
+// src/kernel/heap.c и src/user/rv64/malloc.h) - "long long" гарантированно
+// 64-бит даже в -m32 коде (компилятор сам генерирует парную 32-битную
+// арифметику), так что расширение не требует перехода на -m64.
 //
 // Макет каждого блока:
 //   [struct block : HDR]
 //   [левая redzone : RZONE_SIZE байт, 0xBE]   ← shadow RZONE
-//   [пользовательские данные : N байт, 0x00]  ← shadow OK + 32-bit тег
+//   [пользовательские данные : N байт, 0x00]  ← shadow OK + 64-bit тег
 //   [правая redzone : RZONE_SIZE байт, 0xBE]  ← shadow RZONE
 //   [канарейка : CANARY_SIZE байт, BASE^tag]
 //
 // Shadow-массивы (гранула SHADOW_GRANULE = 8 байт):
 //   shadow_state[i]  — OK / RZONE / FREED
-//   shadow_tag[i]    — 32-бит тег поколения (1..2^32-1; 0 = rzone/freed)
+//   shadow_tag[i]    — 64-бит тег поколения (1..2^64-1; 0 = rzone/freed)
 //
-// 32 бит → вероятность угадать тег ≈ 2.3×10⁻¹⁰ (практически невозможно).
+// 64 бита → коллизия поколений при переиспользовании адреса ≈ 1/2^64
+// (было 1/2^32) - не криптографическая гарантия (тег не секрет, если
+// атакующий уже читает память процесса), а снижение шанса случайного
+// совпадения при UAF на много порядков.
 //
 // Что ловится:
 //   heap underflow     → left redzone 0xBE испорчен при free()
@@ -29,7 +37,7 @@
 //   ax_check(ptr, size)            — доступен ли диапазон (state == OK).
 //   ax_check_tag(ptr, tag, size)   — доступен И тег совпадает.
 
-#define ALIGN4(n) (((unsigned int)(n) + 3u) & ~3u)
+#define ALIGN8(n) (((unsigned int)(n) + 7u) & ~7u)
 
 #define MAGIC_ALLOC      0x4C41434Bu
 #define MAGIC_QUARANTINE 0x51524E54u
@@ -37,14 +45,19 @@
 
 #define RZONE_SIZE   8u
 #define RZONE_BYTE   0xBEu
-#define CANARY_SIZE  4u
-#define CANARY_BASE  0xACACACACu
-#define TAG_MASK     0xFFFFFFFFu   // 32 бита: теги 1..2^32-1
+#define CANARY_SIZE  8u
+#define CANARY_BASE  (0xACACACACu | ((unsigned long long)0xACACACACu << 32))
 #define QUARANTINE_N 8u
 
+// COVER уменьшен вдвое (32КБ -> 16КБ) относительно 32-битной версии: тег
+// стал вдвое шире (8 байт вместо 4), и этот массив зашит статически в
+// КАЖДУЮ программу, слинкованную с libaxiom (~30 штук в fs/) - без этой
+// компенсации суммарный прирост не влезал в 1МБ FAT12-образ. Итоговый
+// футпринт shadow-массивов на бинарник (16КБ тегов + 2КБ состояний) даже
+// чуть меньше исходных 32-битных (16КБ + 4КБ).
 #define SHADOW_GRANULE     8u
-#define SHADOW_COVER       (32u * 1024u)
-#define SHADOW_SIZE        (SHADOW_COVER / SHADOW_GRANULE)  // 4096 байт
+#define SHADOW_COVER       (16u * 1024u)
+#define SHADOW_SIZE        (SHADOW_COVER / SHADOW_GRANULE)
 
 #define SHADOW_STATE_OK    0x00u
 #define SHADOW_STATE_RZONE 0xFAu
@@ -55,7 +68,7 @@ struct block {
     struct block* next;
     unsigned int  free;
     unsigned int  magic;
-    unsigned int  tag;    // 32-битный тег поколения (1..2^32-1)
+    unsigned long long tag;    // 64-битный тег поколения (1..2^64-1)
 };
 
 #define HDR sizeof(struct block)
@@ -64,10 +77,10 @@ static struct block*  free_list        = 0;
 static struct block*  quarantine[QUARANTINE_N];
 static unsigned int   quarantine_pos   = 0;
 static unsigned int   quarantine_count = 0;
-static unsigned int   prng_state       = 0;
+static unsigned long long prng_state   = 0;
 
 static unsigned char  shadow_state[SHADOW_SIZE];     // OK / RZONE / FREED  (4 KB)
-static unsigned int   shadow_tag[SHADOW_SIZE];       // 32-бит тег поколения (16 KB)
+static unsigned long long shadow_tag[SHADOW_SIZE];   // 64-бит тег поколения (32 KB)
 static unsigned char* heap_base = 0;
 
 // --- Shadow ---
@@ -80,7 +93,7 @@ static int shadow_idx(void* p) {
 }
 
 static void shadow_fill(void* start, unsigned int nbytes,
-                        unsigned char state, unsigned int tag) {
+                        unsigned char state, unsigned long long tag) {
     int i0 = shadow_idx(start);
     int i1 = shadow_idx((unsigned char*)start + nbytes - 1);
     if (i0 < 0 || i1 < 0 || i0 > i1) return;
@@ -102,7 +115,7 @@ int ax_check(void* ptr, unsigned int size) {
 }
 
 // Тег текущего поколения блока. 0 если freed или не выделен.
-unsigned int ax_alloc_tag(void* ptr) {
+unsigned long long ax_alloc_tag(void* ptr) {
     int idx = shadow_idx(ptr);
     if (idx < 0) return 0;
     if (shadow_state[idx] != SHADOW_STATE_OK) return 0;
@@ -110,7 +123,7 @@ unsigned int ax_alloc_tag(void* ptr) {
 }
 
 // 1 если OK И тег совпадает с expected_tag.
-int ax_check_tag(void* ptr, unsigned int expected_tag, unsigned int size) {
+int ax_check_tag(void* ptr, unsigned long long expected_tag, unsigned int size) {
     if (!ptr || size == 0 || expected_tag == 0) return 0;
     int i0 = shadow_idx(ptr);
     int i1 = shadow_idx((unsigned char*)ptr + size - 1);
@@ -120,23 +133,27 @@ int ax_check_tag(void* ptr, unsigned int expected_tag, unsigned int size) {
     return 1;
 }
 
-// --- PRNG: 32 бита, никогда не возвращает 0 ---
+// --- PRNG: xorshift64, никогда не возвращает 0 ---
+// Канонические сдвиги для 64-битного слова (13, 7, 17) - не та тройка
+// (13, 17, 5), что была тут для 32-битной версии: она подобрана под 32
+// бита и на 64 давала бы более слабую/короткую последовательность.
+// "long long" арифметика в -m32 коде компилируется в пару 32-битных
+// регистров - дороже одного regis­тра, но не требует -m64.
 
-static unsigned int next_tag(void) {
+static unsigned long long next_tag(void) {
     if (prng_state == 0) {
         unsigned int sp;
         __asm__("mov %%esp, %0" : "=r"(sp));
-        prng_state = sp ^ 0x2545F491u;
-        if (prng_state == 0) prng_state = 1u;
+        prng_state = (unsigned long long)sp ^ 0x9E3779B97F4A7C15ull;
+        if (prng_state == 0) prng_state = 1ull;
     }
     prng_state ^= prng_state << 13;
-    prng_state ^= prng_state >> 17;
-    prng_state ^= prng_state << 5;
-    unsigned int t = prng_state & TAG_MASK;
-    return t ? t : 1u;
+    prng_state ^= prng_state >> 7;
+    prng_state ^= prng_state << 17;
+    return prng_state ? prng_state : 1ull;
 }
 
-static unsigned int tagged_canary(unsigned int tag) {
+static unsigned long long tagged_canary(unsigned long long tag) {
     return CANARY_BASE ^ tag;
 }
 
@@ -202,7 +219,7 @@ static void quarantine_push(struct block* b) {
 
 void* ax_malloc(unsigned int size) {
     if (size == 0) return 0;
-    size = ALIGN4(size);
+    size = ALIGN8(size);
     // Макет: [lzone:RZONE_SIZE][user:size][rzone:RZONE_SIZE][canary:CANARY_SIZE]
     unsigned int total = RZONE_SIZE + size + RZONE_SIZE + CANARY_SIZE;
 
@@ -227,7 +244,7 @@ void* ax_malloc(unsigned int size) {
 
     // user_size = байты полезных данных (без обеих rzone и canary)
     unsigned int user_size = b->size - 2u * RZONE_SIZE - CANARY_SIZE;
-    unsigned int tag       = next_tag();
+    unsigned long long tag = next_tag();
 
     b->free  = 0;
     b->next  = 0;
@@ -250,7 +267,7 @@ void* ax_malloc(unsigned int size) {
     shadow_fill(rzone, RZONE_SIZE, SHADOW_STATE_RZONE, 0);
 
     // Канарейка после правой rzone
-    *(unsigned int*)(rzone + RZONE_SIZE) = tagged_canary(tag);
+    *(unsigned long long*)(rzone + RZONE_SIZE) = tagged_canary(tag);
 
     return ptr;
 }
@@ -275,7 +292,7 @@ void ax_free(void* ptr) {
     for (unsigned int i = 0; i < RZONE_SIZE; i++)
         if (rzone[i] != RZONE_BYTE) heap_corrupted("right redzone overflow");
 
-    if (*(unsigned int*)(rzone + RZONE_SIZE) != tagged_canary(b->tag))
+    if (*(unsigned long long*)(rzone + RZONE_SIZE) != tagged_canary(b->tag))
         heap_corrupted("buffer overflow (canary)");
 
     b->magic = MAGIC_QUARANTINE;

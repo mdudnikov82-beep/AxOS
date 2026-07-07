@@ -91,13 +91,13 @@ void* ax_sbrk(int increment);           // сдвинуть heap break; (void*)-
 void* ax_malloc(unsigned int size);     // выделить size байт или NULL
 void  ax_free(void* ptr);               // освободить блок
 
-// Shadow + Memory Tagging API:
+// Shadow + Memory Tagging API (64-битный тег поколения):
 // ax_check      — 1 если [ptr,ptr+size) в состоянии OK (любой тег).
 // ax_alloc_tag  — тег текущего поколения блока (0 = freed/не выделен).
 // ax_check_tag  — 1 если OK И тег совпадает; ловит UAF после переиспользования.
-int          ax_check(void* ptr, unsigned int size);
-unsigned int ax_alloc_tag(void* ptr);
-int          ax_check_tag(void* ptr, unsigned int expected_tag, unsigned int size);
+int                ax_check(void* ptr, unsigned int size);
+unsigned long long ax_alloc_tag(void* ptr);
+int                ax_check_tag(void* ptr, unsigned long long expected_tag, unsigned int size);
 
 // Уровень stdio (реализован в stdio.c)
 void ax_putchar(char c);

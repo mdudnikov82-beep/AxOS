@@ -11,7 +11,7 @@ int main(void) {
     if (!ax_check(p, 64)) { ax_print("FAIL: ax_check live\n"); return 1; }
 
     // 3. ax_alloc_tag возвращает ненулевой тег
-    unsigned int tag = ax_alloc_tag(p);
+    unsigned long long tag = ax_alloc_tag(p);
     if (tag == 0) { ax_print("FAIL: tag is 0\n"); return 1; }
 
     // 4. ax_check_tag подтверждает правильное поколение
@@ -38,12 +38,12 @@ int main(void) {
     char* p2 = ax_malloc(64);   // теперь старый блок вышел из карантина
     if (!p2) { ax_print("FAIL: malloc p2\n"); return 1; }
 
-    unsigned int tag2 = ax_alloc_tag(p2);
+    unsigned long long tag2 = ax_alloc_tag(p2);
     if (tag2 == 0) { ax_print("FAIL: tag2 is 0\n"); return 1; }
 
     // Если p2 == p (тот же адрес), старый тег должен НЕ совпадать
     if (p2 == p && tag2 == tag) {
-        ax_print("NOTE: same address, same tag (1/4294967295 probability)\n");
+        ax_print("NOTE: same address, same tag (1/2^64 probability)\n");
     }
     // ax_check_tag со СТАРЫМ тегом должен вернуть 0 (новое поколение)
     if (p2 == p && tag2 != tag) {
