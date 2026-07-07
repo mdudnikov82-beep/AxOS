@@ -2,15 +2,30 @@
 #define PAGING_H
 
 // 4-уровневая страничная адресация (PML4 → PDPT → PD → PT).
-// Глобальные таблицы (identity-map первых 4 МБ):
+// Глобальные таблицы (identity-map первых 4 МБ + 32 МБ кучи, см. ниже):
 //   0x9C000 - PML4 (512 × 8Б) — CR3 для ядровых задач
 //   0x9D000 - PDPT (512 × 8Б)
-//   0x9E000 - PD   (512 × 8Б): [0] → PT0, [1] = 2МБ huge page (2-4МБ)
+//   0x9E000 - PD   (512 × 8Б): [0] → PT0, [1] = 2МБ huge page (2-4МБ),
+//                              [2..2+KHEAP_PAGES-1] = 2МБ huge pages кучи
 //   0x9F000 - PT0  (512 × 8Б, VA 0x000000-0x1FFFFF)
 #define GLOBAL_PML4 ((unsigned long long*)0x9C000)
 #define GLOBAL_PDPT ((unsigned long long*)0x9D000)
 #define GLOBAL_PD   ((unsigned long long*)0x9E000)
 #define GLOBAL_PT0  ((unsigned long long*)0x9F000)
+
+// Куча ядра: раньше жила в 128КБ внутри тех же первых 4МБ (0x70000-0x90000,
+// зажатая между FAT12-образом и стеком). PDPT[0] уже покрывает 1ГБ (512
+// записей PD × 2МБ) - из них реально замаплены были только PD[0] и PD[1]
+// (первые 4МБ), а PD[2..511] стояли занулёнными (not present), хотя сама
+// 64-битная адресация (4-уровневые таблицы, 64-битные PTE) для этого
+// диапазона доступна с самого init_paging(). Задействуем её: добавляем ещё
+// KHEAP_PAGES × 2МБ huge pages сразу после первых 4МБ - ядро-only (без
+// PAE_USER), с NX (данные, не код, как и PD[1]). QEMU по умолчанию даёт
+// 128МБ RAM (see -m default) - 32МБ кучи оставляют солидный запас и не
+// требуют детектирования реального объёма RAM (BIOS E820 тут не читается).
+#define KHEAP_BASE   0x400000
+#define KHEAP_PAGES  16                       // 16 × 2МБ = 32МБ
+#define KHEAP_SIZE   (KHEAP_PAGES * 0x200000ULL)
 
 // CR3 для ядровых задач (task0 / heartbeat) = адрес GLOBAL_PML4.
 #define PAGE_DIRECTORY 0x9C000ULL

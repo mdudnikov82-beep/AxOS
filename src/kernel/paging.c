@@ -10,6 +10,9 @@
 //   CR3 → PML4 (0x9C000) → PDPT (0x9D000) → PD (0x9E000)
 //   PD[0] → PT0 (0x9F000): 4КБ-страницы VA 0..2МБ
 //   PD[1] = 2МБ huge page: VA 2..4МБ (ядро-only)
+//   PD[2..2+KHEAP_PAGES-1] = 2МБ huge pages: куча ядра, KHEAP_BASE.. (см.
+//   paging.h) - тот же PDPT[0]/PML4[0] уже покрывают этот диапазон,
+//   отдельных таблиц не нужно.
 //
 // W^X: бит 63 PTE = XD (Execute-Disable) при EFER.NXE=1.
 
@@ -87,7 +90,15 @@ void init_paging() {
     pae_t pd1_flags = PAE_P | PAE_RW | PAE_PS;
     if (g_nx) pd1_flags |= PAE_XD;
     pd[1] = 0x200000ULL | pd1_flags;
-    for (unsigned int i = 2; i < 512; i++) pd[i] = 0;
+
+    // PD[2..2+KHEAP_PAGES-1]: куча ядра (KHEAP_BASE.., см. paging.h) - те же
+    // флаги, что и PD[1] (ядро-only, NX): чистые данные, никогда не код.
+    pae_t kheap_flags = PAE_P | PAE_RW | PAE_PS;
+    if (g_nx) kheap_flags |= PAE_XD;
+    for (unsigned int i = 0; i < KHEAP_PAGES; i++)
+        pd[2 + i] = (pae_t)(KHEAP_BASE + i * 0x200000ULL) | kheap_flags;
+
+    for (unsigned int i = 2 + KHEAP_PAGES; i < 512; i++) pd[i] = 0;
 
     // PDPT и PML4 уже настроены boot.asm; проверяем/обновляем флаги.
     // boot ставил US=1 на оба, что нам и нужно.
@@ -139,6 +150,7 @@ void init_paging() {
     print_string(" SMAP=");
     print_string(g_smap ? "on" : "off");
     print_string("\n");
+    print_string("[paging] kheap: 32MB mapped (2MB huge pages, NX)\n");
 }
 
 void smap_allow(void) {
@@ -192,11 +204,20 @@ unsigned long long paging_create_user_directory(int user_slot_index,
         dst_pt[first_page + i] = entry;
     }
 
-    // dst_pd: [0] → dst_pt (0-2МБ с USER), [1] = 2МБ huge page ядра-only.
+    // dst_pd: [0] → dst_pt (0-2МБ с USER), [1] = 2МБ huge page ядра-only,
+    // [2..2+KHEAP_PAGES-1] = куча ядра (те же huge pages, что в GLOBAL_PD).
+    // Без этого: как только CR3 переключается на приватные таблицы этой
+    // задачи, ЛЮБОЙ код ядра (обработчики прерываний, syscall'ы), который
+    // исполняется, пока эта задача активна, и трогает kmalloc/kfree -
+    // получает #PF "not present" на первом же обращении к куче за
+    // пределами первых 4МБ (её там просто нет - см. комментарий у
+    // GLOBAL_PD в paging.h).
     pae_t pd1 = GLOBAL_PD[1] & ~PAE_USER;
     dst_pd[0] = (pae_t)dst_pt | PAE_P | PAE_RW | PAE_USER;
     dst_pd[1] = pd1;
-    for (unsigned int i = 2; i < 512; i++) dst_pd[i] = 0;
+    for (unsigned int i = 0; i < KHEAP_PAGES; i++)
+        dst_pd[2 + i] = GLOBAL_PD[2 + i] & ~PAE_USER;
+    for (unsigned int i = 2 + KHEAP_PAGES; i < 512; i++) dst_pd[i] = 0;
 
     // dst_pdpt: [0] → dst_pd.
     dst_pdpt[0] = (pae_t)dst_pd | PAE_P | PAE_RW | PAE_USER;

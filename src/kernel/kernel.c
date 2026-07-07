@@ -417,7 +417,7 @@ static int validate_user_ptr(void* ptr, unsigned int size);
 static int validate_user_str(char* s);
 
 void sys_print_string(char* arg) {
-    if (!validate_user_str(arg)) return;
+    if (!validate_user_str(arg)) { print_string("[V?]"); return; }
     int slot = task_current_slot_index();
     if (slot >= 0 && slot < USER_PROGRAM_SLOTS && slot_redir_buf[slot]) {
         char* s = arg;
@@ -870,18 +870,19 @@ static int do_exec(char* cmdline) {
         print_string("\n");
     }
 
-    char** argv_phys = (char**)(addr + USER_ARGS_OFFSET);
+    // 32-бит user ожидает 4-байтные указатели — используем unsigned int*, не char**
+    unsigned int* argv_phys = (unsigned int*)(addr + USER_ARGS_OFFSET);
     char*  sp        = (char*)(addr + USER_ARGS_OFFSET + USER_ARGS_STR_OFF);
     unsigned int sv  = USER_ARGS_VADDR + USER_ARGS_STR_OFF;
     int argc = 0;
 
-    argv_phys[argc++] = (char*)sv;
+    argv_phys[argc++] = sv;
     for (int i = 0; filename[i]; i++) { *sp++ = filename[i]; sv++; }
     *sp++ = '\0'; sv++;
 
     while (*p == ' ') p++;
     while (*p && argc <= USER_ARGS_MAX_ARGC) {
-        argv_phys[argc++] = (char*)sv;
+        argv_phys[argc++] = sv;
         while (*p && *p != ' ') { *sp++ = *p++; sv++; }
         *sp++ = '\0'; sv++;
         while (*p == ' ') p++;
@@ -1412,6 +1413,32 @@ int memtest_demo() {
     return 1;
 }
 
+// --- Демо: деструктивный тест left redzone (buffer underflow) ---
+// В отличие от memtest_demo() выше, это НЕ безопасный regression-тест -
+// он намеренно бьёт кучу и ожидает, что free() поймает это через
+// heap_corrupted() (красный текст + halt, см. heap.c). Функция специально
+// НЕ возвращается в успешном случае - как и src/user/rv64/mteoverfl.c для
+// правого redzone на RV64, только тут для левого на x86.
+void heap_underflow_demo() {
+    print_string("\033[36mHeap underflow test (destructive - expect HALT):\033[0m\n");
+
+    char* p = (char*)malloc(64);
+    if (!p) {
+        print_string("\033[31m  FAIL: malloc returned NULL\033[0m\n");
+        return;
+    }
+    print_string("  malloc(64) -> 0x");
+    print_hex((unsigned int)p);
+    print_string("\n  Writing p[-1] = 0xFF (into left redzone)...\n");
+    p[-1] = (char)0xFF;
+
+    print_string("  Calling free() - expecting 'buffer underflow' detection...\n");
+    free(p);  // должно вызвать heap_corrupted() и никогда не вернуться
+
+    // Если мы здесь - защита НЕ сработала.
+    print_string("\033[31m  FAIL: underflow was NOT detected!\033[0m\n");
+}
+
 // --- Фоновая задача-демо для планировщика (tasking.c) ---
 // Анимирует спиннер в правом верхнем углу экрана. Пишет напрямую в
 // видеопамять (не через print_string/cursor_x/y), чтобы не конфликтовать
@@ -1468,6 +1495,7 @@ void execute_command(char* cmd) {
         print_string("  run <file>  - load and run a program from FAT12 (ring3)\n");
         print_string("  usermode    - demo: jump to ring3, call syscall via int 0x80\n");
         print_string("  memtest     - test heap allocator (malloc/free)\n");
+        print_string("  uftest      - DESTRUCTIVE: heap underflow test (expects halt)\n");
         print_string("  selftest    - run heap/paging/FAT12 regression tests\n");
         print_string("  Ctrl+Alt+F1/F2 - switch virtual console (TTY)\n");
         print_string("  (echo/ls/cat/ps/uptime/write/diskinfo/diskread/diskwrite/date/reboot\n");
@@ -1526,7 +1554,8 @@ void execute_command(char* cmd) {
                 } else {
                     // Строим argv-блок по физическому адресу (identity-mapped ядром).
                     // USER_ARGS_VADDR — виртуальный адрес того же места для задачи.
-                    char** argv_phys = (char**)(addr + USER_ARGS_OFFSET);
+                    // 32-бит user ожидает 4-байтные указатели
+                    unsigned int* argv_phys = (unsigned int*)(addr + USER_ARGS_OFFSET);
                     char*  sp = (char*)(addr + USER_ARGS_OFFSET + USER_ARGS_STR_OFF);
                     unsigned int sv = USER_ARGS_VADDR + USER_ARGS_STR_OFF;
                     int argc = 0;
@@ -1536,7 +1565,7 @@ void execute_command(char* cmd) {
                     smap_allow();
 
                     // argv[0] = имя файла
-                    argv_phys[argc++] = (char*)sv;
+                    argv_phys[argc++] = sv;
                     for (int i = 0; filename[i]; i++) { *sp++ = filename[i]; sv++; }
                     *sp++ = '\0'; sv++;
 
@@ -1544,7 +1573,7 @@ void execute_command(char* cmd) {
                     char* p = rest + fi;
                     while (*p == ' ') p++;
                     while (*p && argc <= USER_ARGS_MAX_ARGC) {
-                        argv_phys[argc++] = (char*)sv;
+                        argv_phys[argc++] = sv;
                         while (*p && *p != ' ') { *sp++ = *p++; sv++; }
                         *sp++ = '\0'; sv++;
                         while (*p == ' ') p++;
@@ -1582,6 +1611,8 @@ void execute_command(char* cmd) {
         enter_usermode(usermode_demo);
     } else if (str_eq(cmd, "memtest")) {
         memtest_demo();
+    } else if (str_eq(cmd, "uftest")) {
+        heap_underflow_demo();
     } else if (str_eq(cmd, "selftest")) {
         run_self_tests();
     } else {

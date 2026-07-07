@@ -1,12 +1,18 @@
 // =================================================================
-//  Heap allocator: kmalloc/kfree поверх региона 0x70000-0x90000
+//  Heap allocator: kmalloc/kfree поверх KHEAP_BASE..+KHEAP_SIZE
 // =================================================================
 //
-// Регион 0x70000-0x90000 (128 КБ) свободен: выше FAT12-образа
-// (0x20000-0x70000, 320 КБ - см. FAT12_TOTAL_SECTORS, fat12.c) и ниже
-// стека ядра (растёт вниз от 0x90000). Он identity-mapped и доступен
-// на запись (init_paging помечает read-only только страницы внутри
-// .text).
+// Раньше куча жила в 128КБ (0x70000-0x90000), зажатых между FAT12-образом
+// и стеком ядра, внутри тех же первых 4МБ, которые init_paging()
+// identity-map'ит с самого начала. С 2026-07 куча переехала в отдельный
+// регион KHEAP_BASE (см. paging.h) размером KHEAP_SIZE (32МБ) сразу ПОСЛЕ
+// этих 4МБ - init_paging() добавляет туда ещё 2МБ huge pages (kernel-only,
+// NX), которые раньше стояли занулёнными (not present), хотя сама
+// 4-уровневая 64-битная адресация уже была на месте. 128КБ на практике
+// хватало впритык (task-структуры, ELF-стейджинг и т.п. постоянно жались
+// друг к другу); 32МБ - это фактическое использование того адресного
+// пространства, которое long-mode paging уже предоставлял, а не расширение
+// самой архитектуры.
 //
 // Структура данных - классический связный список блоков. Перед
 // каждым выделенным/свободным блоком лежит заголовок block_header_t.
@@ -22,7 +28,7 @@
 // через TBI - игнорирование верхних битов адреса при трансляции). x86
 // ничего подобного не имеет: закодировать тег в старших битах указателя,
 // как делает ARM, сломало бы КАЖДЫЙ вызов malloc() в kernel.c/tasking.c
-// (все они используют результат как обычный 32-битный адрес без "снятия"
+// (все они используют результат как обычный 64-битный адрес без "снятия"
 // тега, аппаратно это на ARM делает MMU, программно тут - никто).
 //
 // Поэтому "тег" и "карантин" ниже - software-only аналог, проверяемый
@@ -33,14 +39,25 @@
 //    чей заголовок не похож на "выделенный нами блок" (чужой/мусорный
 //    указатель), и явно детектирует double-free, вместо того чтобы
 //    тихо повторно влинковать уже свободный блок в список.
-// 2. tag (4 бита, "цвет" блока, по аналогии с MTE) - случайное число,
-//    назначаемое блоку при ВЫХОДЕ из карантина обратно в free-list.
-//    Канарейка вычисляется из тега (tagged_canary) - поэтому совпадает
-//    только пока тег в заголовке не менялся.
+// 2. tag (полные 64 бита, "цвет" блока, по аналогии с MTE, но шире - см.
+//    тот же приём в src/user/rv64/malloc.h) - случайное число, назначаемое
+//    блоку при ВЫХОДЕ из карантина обратно в free-list. Канарейка
+//    вычисляется из тега (tagged_canary) - поэтому совпадает только пока
+//    тег в заголовке не менялся. Изначально здесь было 4 бита (как
+//    настоящий ARM MTE); в long mode x86-64 родная ширина регистра/ALU -
+//    64 бита, так же как на RV64, так что расширение до полного machine
+//    word ничего не стоит (одно сравнение вместо одного сравнения) и
+//    делает коллизию поколений при use-after-free 1-в-2^64 вместо 1-в-16.
 // 3. canary сразу после пользовательских данных, завязанная на tag:
 //    linear-overflow, который раньше тихо переписывал заголовок
 //    СЛЕДУЮЩЕГО блока, теперь детектируется в free() ДО того, как
 //    испорченный заголовок успеет что-то сломать.
+// 3b. left redzone (RZONE_SIZE байт фиксированного паттерна МЕЖДУ
+//    заголовком и пользовательскими данными, по образцу src/user/rv64/
+//    malloc.h) - underflow (запись ДО начала блока, например отрицательный
+//    индекс) раньше тихо портил block_header_t ЭТОГО ЖЕ блока (size/next/
+//    magic/tag), теперь тоже детектируется в free(). Канарейка (п.3) этот
+//    случай не ловит - она стоит только с ПРАВОЙ стороны.
 // 4. Карантин: free() не отдаёт блок обратно в free-list немедленно, а
 //    кладёт его в маленькое кольцо (QUARANTINE_CAPACITY последних
 //    free()). malloc() не видит блок, пока он в карантине - случайный
@@ -63,17 +80,20 @@
 //    не может быть чьим-то активным стеком (в карантине, free()=0, его
 //    физически не мог получить malloc() для новой задачи).
 //
-// Это не криптографическая защита (тег - 4 бита, не секрет, угадывается
-// в 16 попыток) и не ловит все классы багов (например, чтение/запись ДО
-// начала блока), но даёт громкий, детерминированный отказ вместо тихой
-// порчи кучи, и не даёт типичному UAF "сразу" попасть в свежую запись.
+// Это не криптографическая защита (тег - не секрет, если атакующий уже
+// читает память ядра) и не ловит все классы багов (например, произвольное
+// чтение до/после блока, не задевающее redzone/canary), но даёт громкий,
+// детерминированный отказ вместо тихой порчи кучи, и не даёт типичному UAF
+// "сразу" попасть в свежую запись.
+
+#include "paging.h"   // KHEAP_BASE / KHEAP_SIZE
 
 extern void print_string(char* str);
 extern volatile unsigned long timer_ticks; // kernel.c, IRQ0 (100 Гц) - энтропия для тега
 
-#define HEAP_START 0x70000  /* must be > FAT12_BASE + FAT12_TOTAL_SECTORS*512 = 0x6FFFF */
-#define HEAP_END   0x90000
-#define HEAP_SIZE  (HEAP_END - HEAP_START)
+#define HEAP_START ((unsigned long long)KHEAP_BASE)
+#define HEAP_SIZE  KHEAP_SIZE
+#define HEAP_END   (HEAP_START + HEAP_SIZE)
 
 // Видны только тут, размер блока подбирался не под "осмысленное" слово -
 // случайный указатель/мусор с шансом 1/2^32 совпадёт, но это не криптография,
@@ -83,15 +103,19 @@ extern volatile unsigned long timer_ticks; // kernel.c, IRQ0 (100 Гц) - энт
 #define HEAP_MAGIC_QUARANTINE 0x51524E54u // "QRNT" - свободен, но ещё не виден malloc()
 #define HEAP_MAGIC_FREE       0x46524545u // "EERF" - свободен и виден malloc()
 
-#define CANARY_SIZE  4
-#define CANARY_BASE  0xACACACACu
+#define CANARY_SIZE  8
+#define CANARY_BASE  0xACACACACACACACACull
 
-// 4 бита - "цвет" блока (по аналогии с тегами ARM MTE, но без аппаратной
-// проверки - см. комментарий в начале файла). Канарейка строится из него,
-// так что подмена тега в заголовке (или просто другой блок того же
-// адреса, но другого "поколения") меняет ожидаемое значение канарейки.
-#define TAG_BITS 4
-#define TAG_MASK ((1u << TAG_BITS) - 1)
+// Левый redzone: фиксированный паттерн между заголовком и данными -
+// underflow затирает его раньше, чем добирается до самого заголовка.
+#define RZONE_SIZE  8
+#define RZONE_BYTE  0xBEu
+
+// Полный 64-битный "цвет" блока (по аналогии с тегами ARM MTE, но шире и
+// без аппаратной проверки - см. комментарий в начале файла). Канарейка
+// строится из него, так что подмена тега в заголовке (или просто другой
+// блок того же адреса, но другого "поколения") меняет ожидаемое значение
+// канарейки.
 
 // Карантин: последние QUARANTINE_CAPACITY освобождённых блоков, ещё не
 // видимые malloc() (magic == HEAP_MAGIC_QUARANTINE, free == 0). Кольцевой
@@ -104,7 +128,7 @@ typedef struct block_header {
     int free;                   // 1 - блок свободен И виден malloc() (не в карантине)
     struct block_header* next;  // следующий блок в списке (или NULL)
     unsigned int magic;         // HEAP_MAGIC_* - см. комментарий выше
-    unsigned int tag;           // 4-битный "цвет" текущего поколения блока
+    unsigned long long tag;     // 64-битный "цвет" текущего поколения блока
 } block_header_t;
 
 #define HEADER_SIZE (sizeof(block_header_t))
@@ -114,8 +138,10 @@ typedef struct block_header {
 // избегаем "блоков-крошек", в которые ничего не влезет.
 #define MIN_BLOCK_SIZE 16
 
-// Выравнивание размера запроса malloc() до кратного 4 байт.
-#define ALIGN4(x) (((x) + 3) & ~3)
+// Выравнивание размера запроса malloc() до кратного 8 байт - CANARY_SIZE
+// теперь тоже 8 (полный 64-битный тег), выравнивание держит канарейку на
+// естественной границе слова вместо произвольного 4-байтного смещения.
+#define ALIGN8(x) (((x) + 7) & ~7)
 
 static block_header_t* heap_head = (block_header_t*)HEAP_START;
 
@@ -123,32 +149,34 @@ static block_header_t* quarantine[QUARANTINE_CAPACITY];
 static unsigned int quarantine_count = 0;
 static unsigned int quarantine_pos = 0;
 
-static unsigned int tag_prng_state = 0;
+static unsigned long long tag_prng_state = 0;
 
-// xorshift32 - не криптографический ГПСЧ, нужен только разброс тегов
+// xorshift64 - не криптографический ГПСЧ, нужен только разброс тегов
 // между поколениями одного и того же адреса блока, не сопротивление
-// атакующему, который уже читает память ядра.
-static unsigned int next_tag() {
+// атакующему, который уже читает память ядра. Канонические сдвиги для
+// 64-битного слова (13, 7, 17) - не та тройка (13, 17, 5), что была тут
+// для 32-битной версии: она подобрана под 32 бита и на 64 давала бы
+// более слабую/короткую последовательность.
+static unsigned long long next_tag() {
     if (tag_prng_state == 0) {
-        tag_prng_state = (unsigned int)timer_ticks ^ 0x2545F491u;
-        if (tag_prng_state == 0) tag_prng_state = 0x2545F491u;
+        tag_prng_state = (unsigned long long)timer_ticks ^ 0x9E3779B97F4A7C15ull;
+        if (tag_prng_state == 0) tag_prng_state = 0x9E3779B97F4A7C15ull;
     }
-    tag_prng_state ^= (unsigned int)timer_ticks;
+    tag_prng_state ^= (unsigned long long)timer_ticks;
     tag_prng_state ^= tag_prng_state << 13;
-    tag_prng_state ^= tag_prng_state >> 17;
-    tag_prng_state ^= tag_prng_state << 5;
-    return tag_prng_state & TAG_MASK;
+    tag_prng_state ^= tag_prng_state >> 7;
+    tag_prng_state ^= tag_prng_state << 17;
+    return tag_prng_state ? tag_prng_state : 1ull;
 }
 
-// Канарейка зависит от tag блока - 4 бита "размножены" по всем 4 байтам и
-// смешаны (XOR) с базовым паттерном. Старый указатель, переживший free()
-// и повторную выдачу того же адреса с НОВЫМ тегом, при попытке write
-// затирает память по старому смещению, но не предъявляет верную
-// канарейку нового поколения при следующем легитимном free() этого блока.
-static unsigned int tagged_canary(unsigned int tag) {
-    unsigned int byte = (tag << 4) | tag;
-    unsigned int spread = (byte << 24) | (byte << 16) | (byte << 8) | byte;
-    return CANARY_BASE ^ spread;
+// Канарейка зависит от tag блока напрямую (XOR с базовым паттерном) -
+// больше не нужно "размножать" по байтам, как для 4-битного тега: тег уже
+// занимает все 64 бита. Старый указатель, переживший free() и повторную
+// выдачу того же адреса с НОВЫМ тегом, при попытке write затирает память
+// по старому смещению, но не предъявляет верную канарейку нового
+// поколения при следующем легитимном free() этого блока.
+static unsigned long long tagged_canary(unsigned long long tag) {
+    return CANARY_BASE ^ tag;
 }
 
 static void heap_corrupted(char* why) {
@@ -185,7 +213,7 @@ static void heap_corrupted(char* why) {
 
 void init_heap() {
     heap_head = (block_header_t*)HEAP_START;
-    heap_head->size = HEAP_SIZE - HEADER_SIZE;
+    heap_head->size = (unsigned int)(HEAP_SIZE - HEADER_SIZE);
     heap_head->free = 1;
     heap_head->next = 0;
     heap_head->magic = HEAP_MAGIC_FREE;
@@ -193,15 +221,18 @@ void init_heap() {
 
     quarantine_count = 0;
     quarantine_pos = 0;
+
+    print_string("[heap] kmalloc arena: 32MB at 0x400000\n");
 }
 
 void* malloc(unsigned int size) {
     if (size == 0) return 0;
-    size = ALIGN4(size);
+    size = ALIGN8(size);
 
-    // Сколько физически нужно отрезать от свободного блока: данные +
-    // канарейка сразу после них (см. комментарий в начале файла).
-    unsigned int reserved = size + CANARY_SIZE;
+    // Сколько физически нужно отрезать от свободного блока: левый
+    // redzone + данные + канарейка сразу после них (см. комментарий в
+    // начале файла).
+    unsigned int reserved = RZONE_SIZE + size + CANARY_SIZE;
 
     unsigned long long flags;
     ENTER_CRITICAL(flags);
@@ -236,8 +267,12 @@ void* malloc(unsigned int size) {
             current->free = 0;
             current->magic = HEAP_MAGIC_ALLOC;
             current->tag = next_tag();
-            result = (void*)((unsigned char*)current + HEADER_SIZE);
-            *(unsigned int*)((unsigned char*)result + (current->size - CANARY_SIZE)) =
+
+            unsigned char* lzone = (unsigned char*)current + HEADER_SIZE;
+            for (unsigned int i = 0; i < RZONE_SIZE; i++) lzone[i] = RZONE_BYTE;
+
+            result = (void*)(lzone + RZONE_SIZE);
+            *(unsigned long long*)((unsigned char*)result + (current->size - RZONE_SIZE - CANARY_SIZE)) =
                 tagged_canary(current->tag);
             break;
         }
@@ -254,8 +289,8 @@ void* malloc(unsigned int size) {
 // никогда напрямую из free() на свежеосвобождённом блоке (см. комментарий
 // в начале файла про активный стек задачи).
 static void release_from_quarantine(block_header_t* block) {
-    unsigned int user_size = block->size - CANARY_SIZE;
-    unsigned char* data = (unsigned char*)block + HEADER_SIZE;
+    unsigned int user_size = block->size - RZONE_SIZE - CANARY_SIZE;
+    unsigned char* data = (unsigned char*)block + HEADER_SIZE + RZONE_SIZE;
     for (unsigned int i = 0; i < user_size; i++) {
         data[i] = 0xDD; // "мёртвые" данные - явный, узнаваемый паттерн, не 0
     }
@@ -297,7 +332,7 @@ void free(void* ptr) {
     unsigned long long flags;
     ENTER_CRITICAL(flags);
 
-    block_header_t* block = (block_header_t*)((unsigned char*)ptr - HEADER_SIZE);
+    block_header_t* block = (block_header_t*)((unsigned char*)ptr - RZONE_SIZE - HEADER_SIZE);
 
     // Чужой/мусорный указатель или double-free (в т.ч. на блок, который
     // уже в карантине) - не трогаем список (тихая порча связного списка
@@ -310,8 +345,13 @@ void free(void* ptr) {
         heap_corrupted("free() on invalid/foreign pointer");
     }
 
-    unsigned int user_size = block->size - CANARY_SIZE;
-    unsigned int canary = *(unsigned int*)((unsigned char*)ptr + user_size);
+    unsigned char* lzone = (unsigned char*)block + HEADER_SIZE;
+    for (unsigned int i = 0; i < RZONE_SIZE; i++) {
+        if (lzone[i] != RZONE_BYTE) heap_corrupted("buffer underflow (left redzone)");
+    }
+
+    unsigned int user_size = block->size - RZONE_SIZE - CANARY_SIZE;
+    unsigned long long canary = *(unsigned long long*)((unsigned char*)ptr + user_size);
     if (canary != tagged_canary(block->tag)) {
         heap_corrupted("buffer overflow (canary)");
     }
