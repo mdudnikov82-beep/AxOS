@@ -1,39 +1,62 @@
 // gfx_shell.c — AxOS Graphical Desktop Shell
-// 32-bit protected mode, VGA Mode 13h (320x200, 256 colors, linear @ 0xA0000)
+// 32-bit protected mode, VBE linear framebuffer: 800x600, 32bpp truecolor
+// (see src/boot/boot_shell.asm for the real-mode VBE mode search/set).
 // No stdlib. Entry point: void gfx_main(void)   (via kernel_gfx_entry.asm)
+//
+// Was VGA Mode 13h (320x200, 256-color palette, fixed @ 0xA0000). Upgraded
+// to truecolor: boot_shell.asm finds an 800x600x32bpp VBE mode by walking
+// the controller's OWN mode list (not a guessed mode number - those vary
+// by BIOS), switches to it with the linear-framebuffer bit set, and drops
+// the physical framebuffer address + scanline pitch + resolution at a
+// fixed low address (0x0600) that this code reads directly (paging is off,
+// physical == linear here).
 
 #include "../drivers/mouse.h"
 
-/* ── VGA ─────────────────────────────────────────────────────────── */
-#define FB  ((unsigned char *)0xA0000)  /* real VGA framebuffer       */
-#define SW  320
-#define SH  200
+/* ── Framebuffer info, written by boot_shell.asm before the kernel loads ── */
+typedef struct {
+    unsigned int   phys_base;   /* LFB physical address (VBE PhysBasePtr) */
+    unsigned short xres;
+    unsigned short yres;
+    unsigned short pitch;       /* bytes per scanline - may exceed xres*4 */
+    unsigned char  bpp;
+} __attribute__((packed)) fb_info_t;
+#define FB_INFO ((const fb_info_t *)0x0600)
 
-/* Back buffer: draw here, blit atomically to avoid tearing/flicker */
-static unsigned char backbuf[SW * SH];
-#define VGA backbuf
+#define SW  800
+#define SH  600
 
-/* Standard 16-color VGA palette (always valid in mode 13h) */
-#define C_BLACK  0x00
-#define C_NAVY   0x01
-#define C_DGREEN 0x02
-#define C_TEAL   0x03
-#define C_MAROON 0x04
-#define C_GRAY   0x07
-#define C_DGRAY  0x08
-#define C_BLUE   0x09
-#define C_GREEN  0x0A
-#define C_CYAN   0x0B
-#define C_RED    0x0C
-#define C_YELLOW 0x0E
-#define C_WHITE  0x0F
+/* Back buffer: tightly packed (no pitch padding), draw here, blit to the
+ * real (possibly padded) LFB atomically to avoid tearing/flicker. Fixed
+ * physical address, NOT a .bss array: 800*600*4 = ~1.9MB is far more than
+ * this minimal boot environment's default ESP=0x90000 leaves room for
+ * below the stack, so it lives well up in extended memory instead, at an
+ * address nothing else in this standalone image ever touches. */
+#define BACKBUF ((unsigned int *)0x200000)
+
+typedef unsigned int color_t;
+
+/* Truecolor equivalents of the old fixed 16-color VGA palette (0x00RRGGBB) */
+#define C_BLACK  0x000000u
+#define C_NAVY   0x0000AAu
+#define C_DGREEN 0x00AA00u
+#define C_TEAL   0x00AAAAu
+#define C_MAROON 0xAA0000u
+#define C_GRAY   0xAAAAAAu
+#define C_DGRAY  0x555555u
+#define C_BLUE   0x5555FFu
+#define C_GREEN  0x55FF55u
+#define C_CYAN   0x55FFFFu
+#define C_RED    0xFF5555u
+#define C_YELLOW 0xFFFF55u
+#define C_WHITE  0xFFFFFFu
 
 /* Layout */
-#define TBAR_H   12
-#define BBAR_Y   (SH - 12)
-#define BBAR_H   12
+#define TBAR_H   24
+#define BBAR_Y   (SH - 24)
+#define BBAR_H   24
 #define AREA_Y   TBAR_H
-#define AREA_H   (BBAR_Y - TBAR_H)   /* 176 pixels of usable space */
+#define AREA_H   (BBAR_Y - TBAR_H)
 
 /* ── I/O ─────────────────────────────────────────────────────────── */
 static unsigned char inb(unsigned short p) {
@@ -45,14 +68,22 @@ static void outb(unsigned short p, unsigned char v) {
     __asm__ volatile("outb %%al,%%dx"::"a"(v),"d"(p));
 }
 
-/* Copy back buffer to real VGA memory in one shot — eliminates tearing */
+/* Copy back buffer to the real LFB in one shot — eliminates tearing.
+ * Row-by-row through `pitch`: the hardware scanline stride can exceed
+ * xres*4 (alignment padding), so we can't just memcpy the whole thing. */
 static void blit(void) {
-    unsigned char *src = backbuf;
-    unsigned char *dst = FB;
-    for (int i = 0; i < SW * SH; i++) dst[i] = src[i];
+    unsigned char *dst_base = (unsigned char *)(unsigned long)FB_INFO->phys_base;
+    unsigned short pitch    = FB_INFO->pitch;
+    for (int y = 0; y < SH; y++) {
+        unsigned int *src = BACKBUF + y * SW;
+        unsigned int *dst = (unsigned int *)(dst_base + (unsigned long)y * pitch);
+        for (int x = 0; x < SW; x++) dst[x] = src[x];
+    }
 }
 
-/* Wait for VGA vertical retrace — with timeout so QEMU doesn't hang */
+/* Wait for VGA vertical retrace — with timeout so QEMU doesn't hang.
+ * Port 0x3DA (input status 1) still reflects retrace on Bochs/QEMU VBE
+ * even once you're driving it through the DISPI/LFB interface. */
 static void wait_vsync(void) {
     int i;
     for (i = 65535; i && (inb(0x3DA) & 8); i--);    /* wait for retrace end   */
@@ -250,41 +281,49 @@ static const unsigned char F[96][8] = {
 };
 
 /* ── Drawing primitives ───────────────────────────────────────────── */
-static void px(int x, int y, unsigned char c) {
-    if ((unsigned)x < SW && (unsigned)y < SH) VGA[y*SW+x] = c;
+static void px(int x, int y, color_t c) {
+    if ((unsigned)x < SW && (unsigned)y < SH) BACKBUF[y*SW+x] = c;
 }
-static void fill(int x, int y, int w, int h, unsigned char c) {
+static void fill(int x, int y, int w, int h, color_t c) {
     for (int dy=0; dy<h; dy++)
         for (int dx=0; dx<w; dx++) px(x+dx, y+dy, c);
 }
-static void hline(int x, int y, int w, unsigned char c) {
+static void hline(int x, int y, int w, color_t c) {
     for (int i=0; i<w; i++) px(x+i,y,c);
 }
-static void vline(int x, int y, int h, unsigned char c) {
+static void vline(int x, int y, int h, color_t c) {
     for (int i=0; i<h; i++) px(x,y+i,c);
 }
-static void border(int x, int y, int w, int h, unsigned char c) {
+static void border(int x, int y, int w, int h, color_t c) {
     hline(x,y,w,c); hline(x,y+h-1,w,c);
     vline(x,y,h,c); vline(x+w-1,y,h,c);
 }
-static void glyph(int x, int y, char ch, unsigned char fg) {
+
+/* Font rendered at 2x: each 1x1 source bit becomes a FONT_SCALE x
+ * FONT_SCALE block. At native 8x8 pixels, text would be tiny/hard to
+ * read on an 800x600 canvas (previously 320x200 - 2.5x-3x smaller). */
+#define FONT_SCALE  2
+#define CHAR_W      (8*FONT_SCALE)
+
+static void glyph(int x, int y, char ch, color_t fg) {
     unsigned char u = (unsigned char)ch;
     if (u < 0x20 || u > 0x7F) return;
     const unsigned char *g = F[u - 0x20];
     for (int r=0; r<8; r++) {
         unsigned char b = g[r];
         for (int c=0; c<8; c++)
-            if (b & (1<<c)) px(x+c, y+r, fg);
+            if (b & (1<<c))
+                fill(x + c*FONT_SCALE, y + r*FONT_SCALE, FONT_SCALE, FONT_SCALE, fg);
     }
 }
-static void text(int x, int y, const char *s, unsigned char fg) {
-    while (*s) { glyph(x, y, *s++, fg); x += 8; }
+static void text(int x, int y, const char *s, color_t fg) {
+    while (*s) { glyph(x, y, *s++, fg); x += CHAR_W; }
 }
 static int slen(const char *s) { int n=0; while(s[n]) n++; return n; }
-static void text_center(int cx, int y, const char *s, unsigned char fg) {
-    text(cx - slen(s)*4, y, s, fg);
+static void text_center(int cx, int y, const char *s, color_t fg) {
+    text(cx - slen(s)*(CHAR_W/2), y, s, fg);
 }
-static void draw_num2(int x, int y, int v, unsigned char fg) {
+static void draw_num2(int x, int y, int v, color_t fg) {
     char b[3]; b[0]='0'+v/10; b[1]='0'+v%10; b[2]=0;
     text(x, y, b, fg);
 }
@@ -294,10 +333,10 @@ typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT } Screen;
 static Screen scr = SCR_DESKTOP;
 
 /* Icon hit-boxes (desktop) */
-struct icon { int x,y,w,h; Screen dst; const char *label; unsigned char color; };
+struct icon { int x,y,w,h; Screen dst; const char *label; color_t color; };
 static const struct icon icons[] = {
-    { 20, 30, 56, 48, SCR_TERMINAL, "TERM",  C_BLUE   },
-    { 96, 30, 56, 48, SCR_ABOUT,    "ABOUT", C_MAROON },
+    { 40, 60, 112, 96, SCR_TERMINAL, "TERM",  C_BLUE   },
+    { 192, 60, 112, 96, SCR_ABOUT,    "ABOUT", C_MAROON },
 };
 #define N_ICONS 2
 
@@ -367,8 +406,8 @@ static void trun(void) {
         tputs(tb);
     }
     else if (CMD("ver")) {
-        tputs("AxOS v0.1  x86-64 / Mode 13h");
-        tputs("Graphical Shell v1.0");
+        tputs("AxOS v0.1  x86 Protected Mode");
+        tputs("Graphical Shell v2.0 - VBE truecolor");
     }
     else if (CMD("exit")) {
         scr = SCR_DESKTOP;
@@ -389,26 +428,27 @@ static void draw_titlebar(const char *title) {
     fill(0, 0, SW, TBAR_H, C_NAVY);
     hline(0, TBAR_H-1, SW, C_BLUE);  /* bright bottom line */
     /* AxOS logo (left) */
-    text(4, 2, "AxOS", C_CYAN);
+    text(8, 4, "AxOS", C_CYAN);
     /* vertical separator */
-    glyph(36, 2, '|', C_DGRAY);
+    glyph(72, 4, '|', C_DGRAY);
     /* title (center) */
-    text_center(SW/2, 2, title, C_WHITE);
-    /* time (right): HH:MM:SS = 8 chars × 8px = 64px; start at SW-4-64=252 */
+    text_center(SW/2, 4, title, C_WHITE);
+    /* time (right): HH:MM:SS = 8 chars x CHAR_W px */
     int h,m,s; rtc_time(&h,&m,&s);
-    draw_num2(252, 2, h, C_YELLOW);
-    glyph(268, 2, ':', C_YELLOW);
-    draw_num2(276, 2, m, C_YELLOW);
-    glyph(292, 2, ':', C_YELLOW);
-    draw_num2(300, 2, s, C_YELLOW);
+    int cx = SW - 16 - 8*CHAR_W;
+    draw_num2(cx, 4, h, C_YELLOW);
+    glyph(cx+2*CHAR_W, 4, ':', C_YELLOW);
+    draw_num2(cx+3*CHAR_W, 4, m, C_YELLOW);
+    glyph(cx+5*CHAR_W, 4, ':', C_YELLOW);
+    draw_num2(cx+6*CHAR_W, 4, s, C_YELLOW);
 }
 
 static void draw_taskbar(const char *mode) {
     fill(0, BBAR_Y, SW, BBAR_H, C_DGRAY);
     hline(0, BBAR_Y, SW, C_GRAY);   /* top highlight */
-    text(4, BBAR_Y+2, "AxOS", C_CYAN);
-    glyph(36, BBAR_Y+2, '|', C_DGRAY+1);
-    text(44, BBAR_Y+2, mode, C_WHITE);
+    text(8, BBAR_Y+4, "AxOS", C_CYAN);
+    glyph(72, BBAR_Y+4, '|', C_WHITE);
+    text(88, BBAR_Y+4, mode, C_WHITE);
 }
 
 /* ── Desktop ─────────────────────────────────────────────────────── */
@@ -417,34 +457,34 @@ static void draw_taskbar(const char *mode) {
 static void draw_icon(const struct icon *ic, int mx, int my) {
     int hover = (mx >= ic->x && mx < ic->x+ic->w &&
                  my >= ic->y && my < ic->y+ic->h);
-    unsigned char bg  = hover ? C_CYAN  : ic->color;
-    unsigned char fg  = hover ? C_BLACK : C_WHITE;
-    unsigned char brd = hover ? C_WHITE : C_BLUE;
+    color_t bg  = hover ? C_CYAN  : ic->color;
+    color_t fg  = hover ? C_BLACK : C_WHITE;
+    color_t brd = hover ? C_WHITE : C_BLUE;
 
     fill(ic->x, ic->y, ic->w, ic->h, bg);
     border(ic->x, ic->y, ic->w, ic->h, brd);
 
     /* Inner symbol: terminal = ">" arrow, about = "?" */
-    int sy = ic->y + 10;
-    int sx = ic->x + ic->w/2 - 4;
+    int sy = ic->y + 20;
+    int sx = ic->x + ic->w/2 - CHAR_W/2;
     if (ic->dst == SCR_TERMINAL) {
-        glyph(sx-4, sy,   '>', fg);
-        glyph(sx+4, sy,   '_', fg);
-        glyph(sx-4, sy+10, '~', fg);
+        glyph(sx-CHAR_W, sy,   '>', fg);
+        glyph(sx+CHAR_W, sy,   '_', fg);
+        glyph(sx-CHAR_W, sy+2*CHAR_W, '~', fg);
     } else {
         glyph(sx, sy,    '?', fg);
-        glyph(sx, sy+10, 'i', fg);
+        glyph(sx, sy+2*CHAR_W, 'i', fg);
     }
     /* Label below icon */
-    text_center(ic->x + ic->w/2, ic->y + ic->h - 10, ic->label, fg);
+    text_center(ic->x + ic->w/2, ic->y + ic->h - 20, ic->label, fg);
 }
 
 static void render_desktop(int mx, int my) {
     /* Background: solid dark navy with a subtle dot pattern */
     fill(0, AREA_Y, SW, AREA_H, C_NAVY);
     /* Dot grid (decorative) */
-    for (int y = AREA_Y+8; y < BBAR_Y-8; y += 16)
-        for (int x = 8; x < SW-8; x += 16)
+    for (int y = AREA_Y+16; y < BBAR_Y-16; y += 32)
+        for (int x = 16; x < SW-16; x += 32)
             px(x, y, C_DGRAY);
 
     draw_titlebar("Desktop");
@@ -453,7 +493,7 @@ static void render_desktop(int mx, int my) {
         draw_icon(&icons[i], mx, my);
 
     /* Hint text */
-    text_center(SW/2, BBAR_Y-18, "Click an icon to open it", C_DGRAY);
+    text_center(SW/2, BBAR_Y-36, "Click an icon to open it", C_DGRAY);
 
     draw_taskbar("Desktop Mode");
 }
@@ -464,26 +504,26 @@ static void render_terminal(void) {
 
     draw_titlebar("Terminal");
 
-    /* Text area: starts at AREA_Y+4, 8px per row */
+    /* Text area: starts at AREA_Y+8, one row per CHAR_W*2 (font height) px */
     for (int r=0; r<TROWS; r++) {
         if (tlines[r][0])
-            text(4, AREA_Y+4 + r*8, tlines[r], C_GREEN);
+            text(8, AREA_Y+8 + r*CHAR_W, tlines[r], C_GREEN);
     }
 
-    /* Input line (at bottom of text area, above taskbar) */
-    int inpy = AREA_Y + 4 + TROWS*8;
-    fill(0, inpy, SW, 10, C_DGRAY);
+    /* Input line (below the text block) */
+    int inpy = AREA_Y + 8 + TROWS*CHAR_W;
+    fill(0, inpy, SW, CHAR_W+2, C_DGRAY);
     hline(0, inpy, SW, C_GRAY);
-    text(4, inpy+1, ">", C_YELLOW);
-    if (tinlen > 0) text(16, inpy+1, tinput, C_WHITE);
+    text(8, inpy+2, ">", C_YELLOW);
+    if (tinlen > 0) text(8+2*CHAR_W, inpy+2, tinput, C_WHITE);
 
     /* Blinking cursor */
     blink_timer++;
     if ((blink_timer >> 14) & 1)
-        fill(16 + tinlen*8, inpy+1, 6, 8, C_WHITE);
+        fill(8+2*CHAR_W + tinlen*CHAR_W, inpy+2, CHAR_W-4, CHAR_W, C_WHITE);
 
-    /* "Exit: type exit" hint */
-    text(SW-80, inpy+1, "[exit]", C_DGRAY);
+    /* "[exit]" hint, right-aligned */
+    text(SW - 16 - 6*CHAR_W, inpy+2, "[exit]", C_DGRAY);
 
     draw_taskbar("Terminal");
 }
@@ -493,34 +533,36 @@ static void render_about(void) {
     fill(0, AREA_Y, SW, AREA_H, C_BLACK);
     draw_titlebar("About AxOS");
 
-    int y = AREA_Y + 8;
+    int y = AREA_Y + 16;
 
     /* ASCII art logo */
-    text_center(SW/2, y,    " _  _ ", C_CYAN);   y += 8;
-    text_center(SW/2, y,    "/_\\\\\\  ___", C_CYAN); y += 8;
-    text_center(SW/2, y,    "/ _ \\\\/ __ \\\\", C_CYAN); y += 8;
-    text_center(SW/2, y,    "/_/ \\\\_\\\\____/", C_CYAN); y += 8;
-    y += 4;
+    text_center(SW/2, y,    " _  _ ", C_CYAN);   y += CHAR_W;
+    text_center(SW/2, y,    "/_\\\\\\  ___", C_CYAN); y += CHAR_W;
+    text_center(SW/2, y,    "/ _ \\\\/ __ \\\\", C_CYAN); y += CHAR_W;
+    text_center(SW/2, y,    "/_/ \\\\_\\\\____/", C_CYAN); y += CHAR_W;
+    y += CHAR_W/2;
 
-    text_center(SW/2, y, "AxOS  v0.1", C_WHITE);   y += 10;
-    text_center(SW/2, y, "x86-64 Protected Mode", C_GRAY); y += 10;
-    text_center(SW/2, y, "VGA Mode 13h  320x200", C_GRAY); y += 10;
-    text_center(SW/2, y, "Graphical Shell  v1.0", C_GRAY); y += 14;
+    text_center(SW/2, y, "AxOS  v0.1", C_WHITE);   y += CHAR_W+4;
+    text_center(SW/2, y, "x86 Protected Mode", C_GRAY); y += CHAR_W+4;
+    text_center(SW/2, y, "VBE LFB  800x600x32  truecolor", C_GRAY); y += CHAR_W+4;
+    text_center(SW/2, y, "Graphical Shell  v2.0", C_GRAY); y += CHAR_W+10;
 
-    text_center(SW/2, y, "Made by Maxim", C_YELLOW); y += 10;
-    text_center(SW/2, y, "Age 11", C_YELLOW); y += 14;
+    text_center(SW/2, y, "Made by Maxim", C_YELLOW); y += CHAR_W+4;
+    text_center(SW/2, y, "Age 11", C_YELLOW); y += CHAR_W+10;
 
     /* Feature list */
-    text(20, y, "+ Preemptive multitasking",  C_GREEN);  y += 9;
-    text(20, y, "+ ELF32 loader + FAT12 FS",  C_GREEN);  y += 9;
-    text(20, y, "+ SMEP / SMAP / W^X / CFI",  C_GREEN);  y += 9;
-    text(20, y, "+ User shell (sh.c) + GUI",   C_GREEN);  y += 9;
+    text(40, y, "+ Preemptive multitasking",  C_GREEN);  y += CHAR_W+2;
+    text(40, y, "+ ELF32 loader + FAT12 FS",  C_GREEN);  y += CHAR_W+2;
+    text(40, y, "+ SMEP / SMAP / W^X / CFI",  C_GREEN);  y += CHAR_W+2;
+    text(40, y, "+ User shell (sh.c) + GUI",   C_GREEN);  y += CHAR_W+2;
 
     draw_taskbar("About AxOS");
 }
 
 /* ── Cursor ──────────────────────────────────────────────────────── */
-/* 8x8 arrow cursor, tip at (0,0) top-left */
+/* 8x8 arrow cursor bitmap, tip at (0,0) top-left, rendered at 2x for
+ * visibility on the bigger canvas (matches FONT_SCALE). */
+#define CURSOR_SCALE 2
 static const unsigned char cursor_bmp[8] = {
     0x80, /* 10000000  X....... */
     0xC0, /* 11000000  XX...... */
@@ -531,19 +573,20 @@ static const unsigned char cursor_bmp[8] = {
     0xFE, /* 11111110  XXXXXXX. */
     0x00,
 };
-static unsigned char cursor_save[8*8];
+#define CURSOR_PX (8*CURSOR_SCALE)
+static color_t cursor_save[CURSOR_PX*CURSOR_PX];
 
 static void cursor_draw(int cx, int cy) {
     int i=0;
-    for (int r=0; r<8; r++) for (int c=0; c<8; c++) {
+    for (int r=0; r<CURSOR_PX; r++) for (int c=0; c<CURSOR_PX; c++) {
         int xx=cx+c, yy=cy+r;
-        cursor_save[i++] = ((unsigned)xx<SW && (unsigned)yy<SH) ? VGA[yy*SW+xx] : 0;
-        if (cursor_bmp[r] & (0x80>>c)) px(xx, yy, C_WHITE);
+        cursor_save[i++] = ((unsigned)xx<SW && (unsigned)yy<SH) ? BACKBUF[yy*SW+xx] : 0;
+        if (cursor_bmp[r/CURSOR_SCALE] & (0x80>>(c/CURSOR_SCALE))) px(xx, yy, C_WHITE);
     }
 }
 static void cursor_erase(int cx, int cy) {
     int i=0;
-    for (int r=0; r<8; r++) for (int c=0; c<8; c++) px(cx+c, cy+r, cursor_save[i++]);
+    for (int r=0; r<CURSOR_PX; r++) for (int c=0; c<CURSOR_PX; c++) px(cx+c, cy+r, cursor_save[i++]);
 }
 
 /* ── Mouse click detection ───────────────────────────────────────── */
@@ -594,6 +637,14 @@ static void handle_keys(void) {
 
 /* ── Main ─────────────────────────────────────────────────────────── */
 void gfx_main(void) {
+    /* Defensive: boot_shell.asm already searched for exactly this mode,
+     * but if VBE somehow granted something else, halt rather than draw
+     * garbage into a framebuffer of the wrong shape/pitch. */
+    const fb_info_t *fb = FB_INFO;
+    if (fb->xres != SW || fb->yres != SH || fb->bpp != 32) {
+        while (1) { }
+    }
+
     init_idt_shell();
     init_mouse();
 
@@ -604,9 +655,10 @@ void gfx_main(void) {
     while (1) {
         wait_vsync();
 
-        /* Mouse position: driver stores coords in 80x25 grid; scale to 320x200 */
-        int mx = mouse_get_x() * 4;
-        int my = mouse_get_y() * 8;
+        /* Mouse position: driver stores coords in an 80x25 grid; scale
+         * to 800x600 (10x/24x - both exact, no rounding). */
+        int mx = mouse_get_x() * 10;
+        int my = mouse_get_y() * 24;
 
         handle_keys();
         handle_click(mx, my);
@@ -618,7 +670,7 @@ void gfx_main(void) {
             case SCR_ABOUT:    render_about();          break;
         }
 
-        /* Draw cursor on top, then blit back buffer → VGA atomically */
+        /* Draw cursor on top, then blit back buffer → LFB atomically */
         cursor_draw(mx, my);
         blit();
     }

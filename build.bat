@@ -787,6 +787,10 @@ powershell -Command "$file = 'build\os-image-gfx.bin'; $size = (Get-Item $file).
 echo.
 echo ===== Graphical Shell =====
 
+echo Assembling shell bootloader (boot_shell.asm - VBE 800x600x32)...
+.\tools\nasm.exe -f bin src\boot\boot_shell.asm -o build\boot_shell.bin
+if %errorlevel% neq 0 goto :error
+
 echo Assembling shell IDT (keyboard IRQ1 + mouse IRQ12)...
 .\tools\nasm.exe -f elf32 src\kernel\idt_shell.asm -o build\idt_shell.o
 if %errorlevel% neq 0 goto :error
@@ -808,7 +812,7 @@ objcopy -O binary build\kernel_shell.exe build\kernel_shell.bin
 if %errorlevel% neq 0 goto :error
 
 echo Creating shell image...
-copy /b build\boot_gfx.bin + build\kernel_shell.bin build\os-image-shell.bin
+copy /b build\boot_shell.bin + build\kernel_shell.bin build\os-image-shell.bin
 if %errorlevel% neq 0 goto :error
 echo Padding shell image to 1.44MB...
 powershell -Command "$file = 'build\os-image-shell.bin'; $size = (Get-Item $file).Length; $padding = 1474560 - $size; if ($padding -gt 0) { $stream = [System.IO.File]::OpenWrite($file); $stream.Seek($size, 'Begin'); $stream.Write((New-Object byte[] $padding), 0, $padding); $stream.Close() }"
