@@ -139,9 +139,13 @@ int elf_load(unsigned char* staging_buf, unsigned int staging_size,
             if (mod != 0) align_fix = PAGE - mod;
         }
         unsigned int available = max_segment_end_offset - code_max_end;
+        const unsigned int min_heap = 0x5000u; // reserve 20KB for heap
         if (available > align_fix) {
-            unsigned int slots = (available - align_fix) / PAGE;
-            delta = align_fix + (slots > 0 ? (aslr_next_random() % slots) * PAGE : 0u);
+            unsigned int usable = available - align_fix;
+            if (usable > min_heap) usable -= min_heap;
+            else usable = 0u;
+            unsigned int slots = usable / PAGE;
+            delta = align_fix + (slots > 0u ? (aslr_next_random() % slots) * PAGE : 0u);
         }
     }
 

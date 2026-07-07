@@ -692,6 +692,38 @@ if %errorlevel% neq 0 goto :error
 copy /b build\scdemo.elf fs\SCDEMO.BIN
 if %errorlevel% neq 0 goto :error
 
+echo Compiling user program (rv32i.c)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\rv32i.c -o build\rv32i.o
+if %errorlevel% neq 0 goto :error
+
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 --allow-multiple-definition build\libaxiom\crt0.o build\rv32i.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o build\libaxiom\stack_chk.o build\libaxiom\cfi.o -o build\rv32i.exe
+if %errorlevel% neq 0 goto :error
+
+objcopy -O binary build\rv32i.exe build\rv32i.bin
+if %errorlevel% neq 0 goto :error
+
+python tools\make_elf.py build\rv32i.bin build\rv32i.elf
+if %errorlevel% neq 0 goto :error
+
+copy /b build\rv32i.elf fs\RV32I.BIN
+if %errorlevel% neq 0 goto :error
+
+echo Compiling user program (rv32i_full.c)...
+gcc -m32 -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\rv32i_full.c -o build\rv32i_full.o
+if %errorlevel% neq 0 goto :error
+
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 --allow-multiple-definition build\libaxiom\crt0.o build\rv32i_full.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o build\libaxiom\stack_chk.o build\libaxiom\cfi.o -o build\rv32i_full.exe
+if %errorlevel% neq 0 goto :error
+
+objcopy -O binary build\rv32i_full.exe build\rv32i_full.bin
+if %errorlevel% neq 0 goto :error
+
+python tools\make_elf.py build\rv32i_full.bin build\rv32i_full.elf
+if %errorlevel% neq 0 goto :error
+
+copy /b build\rv32i_full.elf fs\RVMTE.BIN
+if %errorlevel% neq 0 goto :error
+
 echo Building FAT12 RAM-disk image from fs/...
 python tools\make_fat12.py
 if %errorlevel% neq 0 goto :error
@@ -741,6 +773,39 @@ copy /b build\boot_gfx.bin + build\kernel_gfx.bin build\os-image-gfx.bin
 if %errorlevel% neq 0 goto :error
 echo Padding graphics image to 1.44MB...
 powershell -Command "$file = 'build\os-image-gfx.bin'; $size = (Get-Item $file).Length; $padding = 1474560 - $size; if ($padding -gt 0) { $stream = [System.IO.File]::OpenWrite($file); $stream.Seek($size, 'Begin'); $stream.Write((New-Object byte[] $padding), 0, $padding); $stream.Close() }"
+
+:: =================================================================
+::  Graphical Shell (os-image-shell.bin) — replaces gfx_demo with
+::  a proper desktop: icons, terminal, about screen, mouse + kbd.
+:: =================================================================
+echo.
+echo ===== Graphical Shell =====
+
+echo Assembling shell IDT (keyboard IRQ1 + mouse IRQ12)...
+.\tools\nasm.exe -f elf32 src\kernel\idt_shell.asm -o build\idt_shell.o
+if %errorlevel% neq 0 goto :error
+
+echo Compiling graphical shell (C)...
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src\kernel\gfx_shell.c -o build\gfx_shell.o
+if %errorlevel% neq 0 goto :error
+
+echo Compiling mouse driver for shell...
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src\drivers\mouse.c -o build\mouse_shell.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking graphical shell kernel...
+ld -T kernel_gfx.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_gfx_entry.o build\idt_shell.o build\gfx_shell.o build\mouse_shell.o -o build\kernel_shell.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping to flat binary...
+objcopy -O binary build\kernel_shell.exe build\kernel_shell.bin
+if %errorlevel% neq 0 goto :error
+
+echo Creating shell image...
+copy /b build\boot_gfx.bin + build\kernel_shell.bin build\os-image-shell.bin
+if %errorlevel% neq 0 goto :error
+echo Padding shell image to 1.44MB...
+powershell -Command "$file = 'build\os-image-shell.bin'; $size = (Get-Item $file).Length; $padding = 1474560 - $size; if ($padding -gt 0) { $stream = [System.IO.File]::OpenWrite($file); $stream.Seek($size, 'Begin'); $stream.Write((New-Object byte[] $padding), 0, $padding); $stream.Close() }"
 
 echo Success!
 exit /b 0
