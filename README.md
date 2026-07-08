@@ -119,13 +119,16 @@ build_riscv.bat
 в `rv64build\fs\rv64\` и генерирует `rv64build\disk.img` через
 `tools\make_fat12_rv64.py`.
 
-Запуск в QEMU (нужны virtio-блок/GPU/клавиатура/планшет-мышь):
+Запуск в QEMU (нужны virtio-блок/GPU/клавиатура/планшет-мышь; сеть
+опциональна — без неё `virtio_net_init()` просто не находит устройство и
+`SYS_NET_*` безобидно отдают -1/0):
 
 ```bat
 qemu-system-riscv64 -M virt -bios default -kernel rv64build\out\kernel.elf ^
   -drive file=rv64build\disk.img,if=none,id=hd0,format=raw ^
   -device virtio-blk-device,drive=hd0 -device virtio-gpu-device ^
-  -device virtio-keyboard-device -device virtio-tablet-device
+  -device virtio-keyboard-device -device virtio-tablet-device ^
+  -netdev user,id=net0 -device virtio-net-device,netdev=net0
 ```
 
 После загрузки — приглашение AxSH/RV64 (`src/user/rv64/axsh.c`), команда
@@ -1312,6 +1315,9 @@ CPU по-настоящему.
 | 23 | `SYS_MOUSE_STATE` | упакованные x/y/кнопки, или -1 если нет устройства; двигает и HW-курсор |
 | 24 | `SYS_GFX_GETPIXEL` | `gfx_getpixel(x,y)` → bgra или 0 |
 | 25 | `SYS_SET_PRIORITY` | `set_priority(pid,priority)` — клампится к [1,10] |
+| 26 | `SYS_NET_MAC` | `net_mac(mac[6])` → 1/0; MAC упакован в младшие 48 бит возврата |
+| 27 | `SYS_NET_SEND` | `net_send(frame,len)` → 0/-1; сырой Ethernet-кадр, без virtio-заголовка |
+| 28 | `SYS_NET_RECV` | `net_recv(buf,max_len)` → байт скопировано, 0 если ничего не пришло (неблокирующий поллинг) |
 
 Все указатели/длины проверяются на попадание в пользовательское VA-окно
 (`user_range_ok`/`user_string_ok`) до использования — `kptrtest.elf`
@@ -1319,7 +1325,7 @@ CPU по-настоящему.
 
 ### Драйверы VirtIO
 
-Все три сканируют до 8 MMIO-слотов (`0x10001000` + `i×0x1000`, layout
+Все четыре сканируют до 8 MMIO-слотов (`0x10001000` + `i×0x1000`, layout
 QEMU `virt`):
 
 - **`virtio_blk.c`** — блочное устройство, поддержаны и legacy (v1), и
@@ -1334,6 +1340,23 @@ QEMU `virt`):
   мыши), требует `-device virtio-tablet-device`; упаковывает состояние в
   одно 64-битное значение (x/y/маска кнопок). Отсутствие устройства не
   фатально — `SYS_MOUSE_STATE` просто деградирует до "нет мыши".
+- **`virtio_net.c`** — сетевая карта, единственная из четырёх с ДВУМЯ
+  независимыми очередями сразу (receiveq=0 в стиле `virtio_input.c` —
+  заранее выставленные device-writable буферы, устройство само их
+  заполняет; transmitq=1 в стиле `virtio_blk.c` — драйвер кладёт кадр,
+  ждёт used-ring поллингом). Даёт только сырые Ethernet-кадры
+  (`virtio_net_send/recv`, `virtio_net_get_mac`) — ни ARP, ни IPv4, ни
+  выше в кодовой базе пока нет, это только сам драйвер. Требует
+  `-netdev user,id=net0 -device virtio-net-device,netdev=net0`; без него
+  `virtio_net_ready()` возвращает 0, `SYS_NET_*` деградируют до -1/0.
+  Перед каждым кадром (RX и TX) устройство ожидает 10-байтный
+  `virtio_net_hdr` (без `num_buffers` — `VIRTIO_NET_F_MRG_RXBUF` не
+  запрашивается) — драйвер добавляет/срезает его сам, наружу отдаёт
+  только чистый Ethernet-кадр. Проверено вживую: `fs/rv64/NETTEST.ELF`
+  берёт MAC, шлёт широковещательный ARP-запрос "кто держит 10.0.2.2?"
+  (гейтвей QEMU SLIRP по умолчанию) и получает настоящий ARP-ответ от
+  SLIRP — подтверждает и приём, и отправку через реальную сетевую
+  эмуляцию QEMU, а не просто отсутствие падения при вызове.
 
 ### Файловая система
 

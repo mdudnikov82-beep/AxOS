@@ -55,6 +55,10 @@ echo [5d] virtio_input.c...
 "%CC%" %KFLAGS% -c %SRC%\virtio_input.c -o %OUT%\virtio_input.o
 if %errorlevel% neq 0 goto :error
 
+echo [5e] virtio_net.c...
+"%CC%" %KFLAGS% -c %SRC%\virtio_net.c -o %OUT%\virtio_net.o
+if %errorlevel% neq 0 goto :error
+
 echo [6] fat12.c...
 "%CC%" %KFLAGS% -c %SRC%\fat12.c -o %OUT%\fat12.o
 if %errorlevel% neq 0 goto :error
@@ -93,6 +97,7 @@ echo [11] Linking kernel...
     %OUT%\virtio_gpu.o ^
     %OUT%\console.o ^
     %OUT%\virtio_input.o ^
+    %OUT%\virtio_net.o ^
     %OUT%\fat12.o ^
     %OUT%\vfs.o ^
     %OUT%\syscall.o ^
@@ -312,6 +317,16 @@ echo [U41] Linking spin...
 "%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\spin_rv64.elf %OUT%\ucrt0.o %OUT%\uspin.o
 if %errorlevel% neq 0 goto :error
 
+echo [U42] nettest.c...
+"%CC%" %UFLAGS% -c %USRC%\nettest.c -o %OUT%\unettest.o
+if %errorlevel% neq 0 goto :error
+
+echo [U43] Linking nettest...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\nettest_rv64.elf %OUT%\ucrt0.o %OUT%\unettest.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\nettest_rv64.elf) do echo   nettest_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -336,6 +351,7 @@ copy /b %OUT%\axpaint_rv64.elf    rv64build\fs\rv64\AXPAINT.ELF
 copy /b %OUT%\axdesk_rv64.elf     rv64build\fs\rv64\AXDESK.ELF
 copy /b %OUT%\kptrtest_rv64.elf   rv64build\fs\rv64\KPTRTEST.ELF
 copy /b %OUT%\spin_rv64.elf       rv64build\fs\rv64\SPIN.ELF
+copy /b %OUT%\nettest_rv64.elf     rv64build\fs\rv64\NETTEST.ELF
 if %errorlevel% neq 0 goto :error
 
 python tools\make_fat12_rv64.py

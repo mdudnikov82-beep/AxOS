@@ -29,6 +29,9 @@
 #define SYS_MOUSE_STATE   23
 #define SYS_GFX_GETPIXEL  24
 #define SYS_SET_PRIORITY  25
+#define SYS_NET_MAC       26
+#define SYS_NET_SEND      27
+#define SYS_NET_RECV      28
 
 static inline long __syscall0(long nr) {
     register long _nr  __asm__("a7") = nr;
@@ -235,6 +238,27 @@ static inline int mouse_state(unsigned int *x, unsigned int *y, unsigned int *bu
     if (y)       *y       = (unsigned int)((v >> 16) & 0xFFFF);
     if (buttons) *buttons = (unsigned int)(v & 0xFF);
     return 1;
+}
+
+/* net_mac(mac[6]) -> 1 if a NIC is present (mac filled in), 0 if not. */
+static inline int net_mac(unsigned char mac[6]) {
+    long v = __syscall0(SYS_NET_MAC);
+    if (v < 0) return 0;
+    unsigned long packed = (unsigned long)v;
+    for (int i = 0; i < 6; i++) mac[5 - i] = (unsigned char)(packed >> (i * 8));
+    return 1;
+}
+
+/* net_send(frame, len) -> 0 ok / -1 err. Raw Ethernet frame, no virtio header
+ * (the kernel driver adds/strips that). */
+static inline int net_send(const void *frame, unsigned int len) {
+    return (int)__syscall2(SYS_NET_SEND, (long)frame, (long)len);
+}
+
+/* net_recv(buf, max_len) -> bytes copied, 0 if nothing pending right now
+ * (non-blocking - call it in a poll loop). */
+static inline unsigned int net_recv(void *buf, unsigned int max_len) {
+    return (unsigned int)__syscall2(SYS_NET_RECV, (long)buf, (long)max_len);
 }
 
 /* Convenience: write a NUL-terminated string to stdout */

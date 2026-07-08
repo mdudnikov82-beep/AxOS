@@ -5,6 +5,7 @@
 #include "virtio_blk.h"
 #include "virtio_gpu.h"
 #include "virtio_input.h"
+#include "virtio_net.h"
 #include "console.h"
 #include "vfs.h"
 #include "syscall.h"
@@ -259,6 +260,13 @@ void kernel_main(unsigned long hart_id, unsigned long dtb) {
     // находится и virtio_input_ready() всегда возвращает 0 (SYS_MOUSE_STATE
     // тогда безобидно отдаёт 0 вызывающему).
     virtio_input_init();
+
+    // VirtIO-net — только приём/отправка сырых Ethernet-кадров (см.
+    // virtio_net.h); ARP/IPv4/ICMP поверх этого пока не реализованы.
+    // Требует `-netdev user,id=net0 -device virtio-net-device,netdev=net0`;
+    // если устройства нет, просто не находится и virtio_net_ready() всегда
+    // возвращает 0 (SYS_NET_* тогда безобидно отдают -1/0 вызывающему).
+    virtio_net_init();
 
     // Файловая система (через VFS — см. vfs.c; сегодня единственный
     // backend это FAT12, но kernel_main.c больше не знает об этом напрямую)

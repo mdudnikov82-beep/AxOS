@@ -8,6 +8,7 @@
 #include "paging.h"
 #include "virtio_gpu.h"
 #include "virtio_input.h"
+#include "virtio_net.h"
 #include "console.h"
 
 /* Register indices in the trap frame (sd xN, N*8(sp)) */
@@ -498,6 +499,28 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
     case SYS_SET_PRIORITY:
         proc_set_priority((int)arg0, (int)arg1);
         ret = 0;
+        break;
+
+    case SYS_NET_MAC: {
+        if (!virtio_net_ready()) { ret = -1; break; }
+        unsigned char m[6];
+        virtio_net_get_mac(m);
+        unsigned long packed = 0;
+        for (int i = 0; i < 6; i++) packed = (packed << 8) | m[i];
+        ret = (long)packed;
+        break;
+    }
+
+    case SYS_NET_SEND:
+        if (!virtio_net_ready()) { ret = -1; break; }
+        if (!user_range_ok(arg0, arg1)) { ret = -1; break; }
+        ret = virtio_net_send((const void *)arg0, (unsigned int)arg1);
+        break;
+
+    case SYS_NET_RECV:
+        if (!virtio_net_ready()) { ret = 0; break; }
+        if (!user_range_ok(arg0, arg1)) { ret = 0; break; }
+        ret = (long)virtio_net_recv((void *)arg0, (unsigned int)arg1);
         break;
 
     default:
