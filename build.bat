@@ -84,6 +84,10 @@ echo Compiling PCI driver (C)...
 gcc %KFLAGS% -I src/drivers -c src/drivers/pci.c -o build/pci.o
 if %errorlevel% neq 0 goto :error
 
+echo Compiling DMA pool (fixed identity-mapped physical memory for drivers)...
+gcc %KFLAGS% -I src/drivers -c src/drivers/dma_pool.c -o build/dma_pool.o
+if %errorlevel% neq 0 goto :error
+
 echo Compiling virtio-net driver (C)...
 gcc %KFLAGS% -I src/drivers -c src/drivers/virtio_net.c -o build/virtio_net.o
 if %errorlevel% neq 0 goto :error
@@ -105,7 +109,7 @@ echo Compiling Usermode (ring3 entry)...
 if %errorlevel% neq 0 goto :error
 
 echo Linking to PE (64-bit)...
-ld -T kernel.ld -m i386pep --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\kcfi.o build\stack_chk.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\elf.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\pci.o build\virtio_net.o build\syscalls.o build\usermode.o -o build\kernel.exe
+ld -T kernel.ld -m i386pep --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\kcfi.o build\stack_chk.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\elf.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\pci.o build\dma_pool.o build\virtio_net.o build\syscalls.o build\usermode.o -o build\kernel.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping to Binary...

@@ -29,7 +29,7 @@
 // задействуются, экономя память на RX-буферах.
 
 #include "pci.h"
-#include "../kernel/heap.h"
+#include "dma_pool.h"
 
 // Тики PIT (kernel.c, 100 Гц) - для тайм-аута ожидания завершения TX (см.
 // virtio_net_send) через sti+hlt вместо busy-spin, тот же приём, что и
@@ -130,20 +130,14 @@ static unsigned char* tx_scratch;
 static unsigned char mac[6];
 static int ready = 0;
 
-// malloc() гарантирует только 8-байтовое выравнивание (heap.c) - для PFN
-// virtqueue нужна выровненная на 4КБ физическая страница. Кучи ядра
-// identity-mapped (paging.c: g_kheap_base используется и как VA, и как PA
-// huge-page записей PD) - указатель malloc() уже И ЕСТЬ физический адрес,
-// достаточно только выровнять и с запасом выделить лишнее.
+// PFN virtqueue нужна выровненная на 4КБ ФИЗИЧЕСКАЯ страница. Раньше (пока
+// куча ядра была identity-mapped) для этого сгодился бы и malloc(), но
+// куча теперь живёт на случайном высоком виртуальном адресе, развязанном
+// от физического (см. "64-битный KASLR" в paging.c) - использовать
+// malloc()-указатель как физический адрес больше нельзя. dma_pool.c даёт
+// память, которая ВСЕГДА identity-mapped, специально для таких случаев.
 static void* alloc_pages_zeroed(unsigned int num_pages) {
-    unsigned int size = num_pages * PAGE_SIZE;
-    unsigned char* raw = (unsigned char*)malloc(size + PAGE_SIZE);
-    if (!raw) return 0;
-    unsigned long long addr = (unsigned long long)raw;
-    unsigned long long aligned = (addr + (PAGE_SIZE - 1)) & ~((unsigned long long)PAGE_SIZE - 1);
-    unsigned char* p = (unsigned char*)aligned;
-    for (unsigned int i = 0; i < size; i++) p[i] = 0;
-    return p;
+    return dma_alloc_pages(num_pages);
 }
 
 static void avail_put16(unsigned char* avail, unsigned int off, unsigned short v) {
