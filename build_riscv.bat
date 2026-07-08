@@ -407,6 +407,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\tcptest_rv64.elf) do echo   tcptest_rv64.elf: %%~zF bytes
 
+echo [U60] tcpserve.c...
+"%CC%" %UFLAGS% -c %USRC%\tcpserve.c -o %OUT%\utcpserve.o
+if %errorlevel% neq 0 goto :error
+
+echo [U61] Linking tcpserve...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\tcpserve_rv64.elf %OUT%\ucrt0.o %OUT%\utcpserve.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\tcpserve_rv64.elf) do echo   tcpserve_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -440,6 +450,7 @@ copy /b %OUT%\icmpsrv_rv64.elf     rv64build\fs\rv64\ICMPSRV.ELF
 copy /b %OUT%\dhcptest_rv64.elf    rv64build\fs\rv64\DHCPTEST.ELF
 copy /b %OUT%\httpget_rv64.elf     rv64build\fs\rv64\HTTPGET.ELF
 copy /b %OUT%\tcptest_rv64.elf     rv64build\fs\rv64\TCPTEST.ELF
+copy /b %OUT%\tcpserve_rv64.elf    rv64build\fs\rv64\TCPSERVE.ELF
 if %errorlevel% neq 0 goto :error
 
 python tools\make_fat12_rv64.py
