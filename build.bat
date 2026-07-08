@@ -570,6 +570,26 @@ echo Copying user program into fs/ for FAT12 image...
 copy /b build\dnstest.elf fs\DNSTEST.BIN
 if %errorlevel% neq 0 goto :error
 
+echo Compiling user program (dhcptest.c)...
+gcc -m32 -ffreestanding -fstack-protector -finstrument-functions -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\dhcptest.c -o build\dhcptest.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\dhcptest.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o build\libaxiom\stack_chk.o build\libaxiom\cfi.o -o build\dhcptest.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\dhcptest.exe build\dhcptest.bin
+if %errorlevel% neq 0 goto :error
+
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\dhcptest.bin build\dhcptest.elf
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\dhcptest.elf fs\DHCPTEST.BIN
+if %errorlevel% neq 0 goto :error
+
 echo Compiling user program (memtest.c)...
 gcc -m32 -ffreestanding -fstack-protector -finstrument-functions -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\memtest.c -o build\memtest.o
 if %errorlevel% neq 0 goto :error
