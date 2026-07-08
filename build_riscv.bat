@@ -337,6 +337,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\arptest_rv64.elf) do echo   arptest_rv64.elf: %%~zF bytes
 
+echo [U46] pingtest.c...
+"%CC%" %UFLAGS% -c %USRC%\pingtest.c -o %OUT%\upingtest.o
+if %errorlevel% neq 0 goto :error
+
+echo [U47] Linking pingtest...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\pingtest_rv64.elf %OUT%\ucrt0.o %OUT%\upingtest.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\pingtest_rv64.elf) do echo   pingtest_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -363,6 +373,7 @@ copy /b %OUT%\kptrtest_rv64.elf   rv64build\fs\rv64\KPTRTEST.ELF
 copy /b %OUT%\spin_rv64.elf       rv64build\fs\rv64\SPIN.ELF
 copy /b %OUT%\nettest_rv64.elf     rv64build\fs\rv64\NETTEST.ELF
 copy /b %OUT%\arptest_rv64.elf     rv64build\fs\rv64\ARPTEST.ELF
+copy /b %OUT%\pingtest_rv64.elf    rv64build\fs\rv64\PINGTEST.ELF
 if %errorlevel% neq 0 goto :error
 
 python tools\make_fat12_rv64.py
