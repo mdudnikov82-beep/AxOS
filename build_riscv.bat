@@ -357,6 +357,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\arpserve_rv64.elf) do echo   arpserve_rv64.elf: %%~zF bytes
 
+echo [U50] dnstest.c...
+"%CC%" %UFLAGS% -c %USRC%\dnstest.c -o %OUT%\udnstest.o
+if %errorlevel% neq 0 goto :error
+
+echo [U51] Linking dnstest...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\dnstest_rv64.elf %OUT%\ucrt0.o %OUT%\udnstest.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\dnstest_rv64.elf) do echo   dnstest_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -385,6 +395,7 @@ copy /b %OUT%\nettest_rv64.elf     rv64build\fs\rv64\NETTEST.ELF
 copy /b %OUT%\arptest_rv64.elf     rv64build\fs\rv64\ARPTEST.ELF
 copy /b %OUT%\pingtest_rv64.elf    rv64build\fs\rv64\PINGTEST.ELF
 copy /b %OUT%\arpserve_rv64.elf    rv64build\fs\rv64\ARPSERVE.ELF
+copy /b %OUT%\dnstest_rv64.elf     rv64build\fs\rv64\DNSTEST.ELF
 if %errorlevel% neq 0 goto :error
 
 python tools\make_fat12_rv64.py
