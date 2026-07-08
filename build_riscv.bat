@@ -417,6 +417,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\tcpserve_rv64.elf) do echo   tcpserve_rv64.elf: %%~zF bytes
 
+echo [U62] httpsrv.c...
+"%CC%" %UFLAGS% -c %USRC%\httpsrv.c -o %OUT%\uhttpsrv.o
+if %errorlevel% neq 0 goto :error
+
+echo [U63] Linking httpsrv...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\httpsrv_rv64.elf %OUT%\ucrt0.o %OUT%\uhttpsrv.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\httpsrv_rv64.elf) do echo   httpsrv_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -451,6 +461,8 @@ copy /b %OUT%\dhcptest_rv64.elf    rv64build\fs\rv64\DHCPTEST.ELF
 copy /b %OUT%\httpget_rv64.elf     rv64build\fs\rv64\HTTPGET.ELF
 copy /b %OUT%\tcptest_rv64.elf     rv64build\fs\rv64\TCPTEST.ELF
 copy /b %OUT%\tcpserve_rv64.elf    rv64build\fs\rv64\TCPSERVE.ELF
+copy /b %OUT%\httpsrv_rv64.elf     rv64build\fs\rv64\HTTPSRV.ELF
+copy /b %USRC%\index.htm           rv64build\fs\rv64\INDEX.HTM
 if %errorlevel% neq 0 goto :error
 
 python tools\make_fat12_rv64.py
