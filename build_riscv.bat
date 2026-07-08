@@ -377,6 +377,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\icmpsrv_rv64.elf) do echo   icmpsrv_rv64.elf: %%~zF bytes
 
+echo [U54] dhcptest.c...
+"%CC%" %UFLAGS% -c %USRC%\dhcptest.c -o %OUT%\udhcptest.o
+if %errorlevel% neq 0 goto :error
+
+echo [U55] Linking dhcptest...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\dhcptest_rv64.elf %OUT%\ucrt0.o %OUT%\udhcptest.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\dhcptest_rv64.elf) do echo   dhcptest_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -407,6 +417,7 @@ copy /b %OUT%\pingtest_rv64.elf    rv64build\fs\rv64\PINGTEST.ELF
 copy /b %OUT%\arpserve_rv64.elf    rv64build\fs\rv64\ARPSERVE.ELF
 copy /b %OUT%\dnstest_rv64.elf     rv64build\fs\rv64\DNSTEST.ELF
 copy /b %OUT%\icmpsrv_rv64.elf     rv64build\fs\rv64\ICMPSRV.ELF
+copy /b %OUT%\dhcptest_rv64.elf    rv64build\fs\rv64\DHCPTEST.ELF
 if %errorlevel% neq 0 goto :error
 
 python tools\make_fat12_rv64.py
