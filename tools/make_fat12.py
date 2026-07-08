@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
-# Генерирует образ FAT12-раздела (256 КБ = 512 секторов) из файлов в fs/.
-# Раздел читает kernel через src/fs/fat12.c (IDE, build/disk.img) - см.
-# FAT12_BASE/FAT12_TOTAL_SECTORS там, оба должны совпадать со значениями
-# здесь. Объём поднят с 256 до 512 секторов (commit "Properly grow FAT12
-# capacity") - на 256 уже не оставалось свободных кластеров под runtime-
-# файл selftest.c (test_fat12), сборка fs/ заполняла том почти полностью.
+# Генерирует образ FAT12-раздела из файлов в fs/. Раздел читает kernel
+# через src/fs/fat12.c (IDE, build/disk.img) - см. FAT12_BASE/
+# FAT12_TOTAL_SECTORS там, оба должны совпадать со значениями здесь.
+#
+# История роста: 128КБ (256 секторов) -> 256КБ (512) -> 1МБ (2048) ->
+# 2МБ (4096, текущее). Последний шаг понадобился, когда сетевой стек
+# (virtio-net/ARP/ICMP/UDP-тесты) добавил несколько новых программ по
+# ~30КБ каждая - тома уже не хватало даже для существующих файлов
+# ("wxdemo.bin не помещается на FAT12-диск"). 2МБ FAT12 теперь пересекает
+# старую границу 4МБ, поэтому PD[2] в paging.c тоже стал фиксированной
+# huge page (было только PD[1]) - см. комментарий у kheap_pick_pd_index().
 
 import os
 import struct
 import sys
 
 SECTOR_SIZE = 512
-TOTAL_SECTORS = 2048
+TOTAL_SECTORS = 4096
 RESERVED_SECTORS = 1
 NUM_FATS = 1
 ROOT_ENTRIES = 64
-# 6 секторов FAT12 (6×512=3072 байт, 12 бит/запись) вмещают ~2048 кластеров -
-# достаточно для DATA_SECTORS=2039 при TOTAL_SECTORS=2048.
-SECTORS_PER_FAT = 6
+# 12 секторов FAT12 (12×512=6144 байт, 12 бит/запись) вмещают ~4096
+# кластеров - достаточно для DATA_SECTORS=4079 при TOTAL_SECTORS=4096.
+SECTORS_PER_FAT = 12
 SECTORS_PER_CLUSTER = 1
 CLUSTER_SIZE = SECTOR_SIZE * SECTORS_PER_CLUSTER
 

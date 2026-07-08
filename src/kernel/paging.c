@@ -50,24 +50,30 @@ static unsigned int g_pool_pd_index;
 // PIT/IRQ0 tick counter doesn't exist yet - same reasoning as
 // stack_chk.c's kernel_init_stack_guard() (called even earlier, for the
 // same reason: no timer to seed from yet at that point either). Range
-// [2,34): PD[0]/[1] are always identity-map/user-program-slots, and even
-// the highest start (33) plus 32MB of heap stays inside QEMU's default
-// 128MB RAM.
+// [3,34): PD[0]/[1] are always identity-map/user-program-slots, PD[2] is
+// now ALSO fixed (2МБ huge page, 4-6МБ) - FAT12 grew to 2МБ (см.
+// FAT12_BASE/FAT12_TOTAL_SECTORS в fat12.c) and now spans past the old
+// 4МБ boundary into what used to be the heap's lowest candidate slot.
+// Floor moved from 2 to 3 (one candidate lost, 32->31 - "lite"
+// randomization was never meant to be cryptographically precise about
+// the exact count). Even the highest start (33) plus 32MB of heap stays
+// inside QEMU's default 128MB RAM.
 static unsigned int kheap_pick_pd_index(void) {
     unsigned int lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     unsigned long long seed = (((unsigned long long)hi << 32) | lo) ^ 0x9E3779B97F4A7C15ULL;
-    return 2 + (unsigned int)(seed % 32);
+    return 3 + (unsigned int)(seed % 31);
 }
 
 // Same idea for the isolated-task page-table pool (1 PD slot, 2MB - the
 // pool itself is only 64KB, the rest of the huge page is just unused
 // padding, cheap to spend for the address-space spread). Range [50,64):
 // disjoint from the heap's OWN OCCUPIED footprint by construction - heap
-// candidates start at [2,34) and each occupies 16 CONSECUTIVE slots, so
-// the heap can occupy at most [2,50) - starting the pool's range exactly
-// at 50 makes collision impossible without needing to check for one at
-// runtime. Top of range (63) plus its 2MB stays under 128MB RAM.
+// candidates start at [3,34) (floor moved from 2 - see kheap_pick_pd_index)
+// and each occupies 16 CONSECUTIVE slots, so the heap can occupy at most
+// [3,49) - starting the pool's range at 50 keeps collision impossible
+// without needing to check for one at runtime. Top of range (63) plus
+// its 2MB stays under 128MB RAM.
 static unsigned int kpool_pick_pd_index(void) {
     unsigned int lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
@@ -129,14 +135,21 @@ void init_paging() {
     pae_t pd1_flags = PAE_P | PAE_RW | PAE_PS;
     if (g_nx) pd1_flags |= PAE_XD;
     pd[1] = 0x200000ULL | pd1_flags;
+    // PD[2] = 2МБ huge page для 4-6МБ (те же флаги, ядро-only) - FAT12
+    // выросла до 2МБ (см. FAT12_BASE/FAT12_TOTAL_SECTORS в fat12.c) и
+    // теперь занимает [0x300000, 0x500000) - пересекает границу старых
+    // первых 4МБ, так что этот диапазон тоже должен быть фиксированным,
+    // а не кандидатом кучи (см. новый floor=3 в kheap_pick_pd_index).
+    pd[2] = 0x400000ULL | pd1_flags;
 
     // PD[g_kheap_pd_index..+KHEAP_PAGES-1]: куча ядра (см. g_kheap_base
-    // comment above) - те же флаги, что и PD[1] (ядро-only, NX): чистые
-    // данные, никогда не код. Zero the rest of the PD FIRST: the heap's
-    // start index is now random, not always right after PD[1], so a
-    // fixed "zero everything past the heap" tail loop no longer covers
-    // entries between PD[2] and wherever the heap actually landed.
-    for (unsigned int i = 2; i < 512; i++) pd[i] = 0;
+    // comment above) - те же флаги, что и PD[1]/[2] (ядро-only, NX):
+    // чистые данные, никогда не код. Zero the rest of the PD FIRST (from
+    // index 3 - PD[2] уже занята выше): the heap's start index is
+    // random, not always right after the fixed region, so a fixed
+    // "zero everything past the fixed region" tail loop no longer covers
+    // entries between PD[3] and wherever the heap actually landed.
+    for (unsigned int i = 3; i < 512; i++) pd[i] = 0;
 
     g_kheap_pd_index = kheap_pick_pd_index();
     g_kheap_base = (unsigned long long)g_kheap_pd_index * 0x200000ULL;
@@ -260,7 +273,8 @@ unsigned long long paging_create_user_directory(int user_slot_index,
         dst_pt[first_page + i] = entry;
     }
 
-    // dst_pd: [0] → dst_pt (0-2МБ с USER), [1] = 2МБ huge page ядра-only,
+    // dst_pd: [0] → dst_pt (0-2МБ с USER), [1]/[2] = 2МБ huge pages
+    // ядра-only (2-6МБ, покрывает выросшую до 2МБ FAT12 - см. init_paging),
     // [g_kheap_pd_index..+KHEAP_PAGES-1] = куча ядра (те же huge pages,
     // что в GLOBAL_PD - копируем ПО ЗНАЧЕНИЮ из GLOBAL_PD на текущем
     // случайном индексе, а не пересчитываем адрес заново, так что этот
@@ -272,9 +286,11 @@ unsigned long long paging_create_user_directory(int user_slot_index,
     // пределами первых 4МБ (её там просто нет - см. комментарий у
     // GLOBAL_PD в paging.h).
     pae_t pd1 = GLOBAL_PD[1] & ~PAE_USER;
-    for (unsigned int i = 2; i < 512; i++) dst_pd[i] = 0;
+    pae_t pd2 = GLOBAL_PD[2] & ~PAE_USER;   // FAT12 теперь занимает и это (см. init_paging)
+    for (unsigned int i = 3; i < 512; i++) dst_pd[i] = 0;
     dst_pd[0] = (pae_t)dst_pt | PAE_P | PAE_RW | PAE_USER;
     dst_pd[1] = pd1;
+    dst_pd[2] = pd2;
     for (unsigned int i = 0; i < KHEAP_PAGES; i++)
         dst_pd[g_kheap_pd_index + i] = GLOBAL_PD[g_kheap_pd_index + i] & ~PAE_USER;
 

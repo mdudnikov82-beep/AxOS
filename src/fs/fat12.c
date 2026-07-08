@@ -16,8 +16,14 @@
                     // сигнатуры (и константы FAT12_MKDIR_*/FAT12_DELETE_NOTFOUND)
                     // внутри этого файла, а не только в местах вызова (vfs.c)
 
-#define FAT12_BASE 0x300000      // after user slots 0x200000-0x23FFFF, within PD[1] huge page
-#define FAT12_TOTAL_SECTORS 2048 // 1 МБ / 512 = TOTAL_SECTORS в make_fat12.py
+// after user slots 0x200000-0x23FFFF, within PD[1] huge page. Выросла
+// 1МБ -> 2МБ (2048 -> 4096 секторов, см. ниже) - заняла место дальше,
+// чем PD[1] сам по себе покрывает (2-4МБ), поэтому PD[2] (4-6МБ) тоже
+// теперь фиксированная huge page (см. init_paging() в paging.c) - не
+// кандидат случайной кучи (её floor сдвинут с PD[2] на PD[3], см.
+// kheap_pick_pd_index()).
+#define FAT12_BASE 0x300000
+#define FAT12_TOTAL_SECTORS 4096 // 2 МБ / 512 = TOTAL_SECTORS в make_fat12.py
 
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
