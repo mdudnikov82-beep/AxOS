@@ -1,5 +1,6 @@
 #pragma once
 #include "syscall.h"
+#include "gfx_ui.h"
 
 /* Minimal bordered-window helper on top of the gfx_* syscalls. No window
  * manager, no z-ordering — every process draws directly into the one
@@ -9,6 +10,7 @@
  * by owning non-overlapping screen rectangles. */
 
 #define WIN_TITLE_H 14
+#define WIN_RADIUS  4   /* see gfx_ui.h UI_MAX_R comment - keep this <= 4 */
 
 typedef struct {
     unsigned int x, y, w, h;
@@ -28,13 +30,12 @@ static void window_init(window_t *win, unsigned int x, unsigned int y,
     win->content_h = (h > WIN_TITLE_H + 8) ? h - WIN_TITLE_H - 8 : 0;
     win->cur_row = 0;
 
-    gfx_fill_rect(x, y, w, h, bg);
-    gfx_fill_rect(x, y, w, 2, border);                 /* top    */
-    gfx_fill_rect(x, y + h - 2, w, 2, border);          /* bottom */
-    gfx_fill_rect(x, y, 2, h, border);                  /* left   */
-    gfx_fill_rect(x + w - 2, y, 2, h, border);          /* right  */
-    gfx_fill_rect(x + 2, y + 2, w - 4, WIN_TITLE_H, border); /* title bar */
-    gfx_draw_text(x + 6, y + 4, title, gfx_rgb(255, 255, 255));
+    /* Drop shadow first (into the desktop behind), then the rounded,
+     * gradient-titled card on top - was a flat bg fill + four 2px-thick
+     * border strips before (plain rectangle, no depth). */
+    ui_shadow((int)x, (int)y, (int)w, (int)h, 6, 90);
+    ui_round_window((int)x, (int)y, (int)w, (int)h, WIN_RADIUS, WIN_TITLE_H,
+                    border, bg, title);
 }
 
 /* Prints one line into the content area; when it fills up, clears just

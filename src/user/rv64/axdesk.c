@@ -1,5 +1,6 @@
 #include "syscall.h"
 #include "cursor.h"
+#include "gfx_ui.h"
 
 /* AxDesktop — a minimal point-and-click desktop: draws icons, and a left
  * click on one launches the corresponding program via exec() directly
@@ -40,17 +41,17 @@ int main(void) {
     unsigned int total_w = n_icons * ICON_W + (n_icons - 1) * ICON_GAP;
     unsigned int start_x = (w > total_w) ? (w - total_w) / 2 : 0;
 
-    /* Desktop background + title bar. */
-    gfx_fill_rect(0, 0, w, h, gfx_rgb(20, 20, 40));
-    gfx_fill_rect(0, 0, w, 28, gfx_rgb(10, 10, 25));
+    /* Desktop background (gradient - was flat) + title bar. */
+    ui_vgrad(0, 0, w, h, gfx_rgb(30, 30, 60), gfx_rgb(8, 8, 20));
+    ui_vgrad(0, 0, w, 28, gfx_rgb(20, 20, 45), gfx_rgb(10, 10, 25));
     gfx_draw_text(8, 10, "AxOS Desktop  --  click an icon to launch", gfx_rgb(200, 200, 255));
 
     for (unsigned int i = 0; i < n_icons; i++) {
-        unsigned int x = start_x + i * (ICON_W + ICON_GAP);
-        gfx_fill_rect(x, ICON_TOP, ICON_W, ICON_H, icons[i].color);
-        gfx_fill_rect(x, ICON_TOP, ICON_W, 2, gfx_rgb(255, 255, 255));
-        gfx_fill_rect(x, ICON_TOP + ICON_H - 2, ICON_W, 2, gfx_rgb(0, 0, 0));
-        gfx_draw_text(x + 6, ICON_TOP + ICON_H / 2 - 4, icons[i].label, gfx_rgb(0, 0, 0));
+        int x = (int)(start_x + i * (ICON_W + ICON_GAP));
+        ui_shadow(x, ICON_TOP, ICON_W, ICON_H, 5, 90);
+        /* radius <= gfx_ui.h's UI_MAX_R (4) - see the comment there */
+        ui_round_rect(x, ICON_TOP, ICON_W, ICON_H, 4, gfx_rgb(255, 255, 255), icons[i].color);
+        gfx_draw_text((unsigned int)x + 6, ICON_TOP + ICON_H / 2 - 4, icons[i].label, gfx_rgb(0, 0, 0));
     }
     gfx_flush();
 
