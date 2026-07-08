@@ -1,18 +1,21 @@
 // =================================================================
-//  Heap allocator: kmalloc/kfree поверх KHEAP_BASE..+KHEAP_SIZE
+//  Heap allocator: kmalloc/kfree поверх g_kheap_base..+KHEAP_SIZE
 // =================================================================
 //
 // Раньше куча жила в 128КБ (0x70000-0x90000), зажатых между FAT12-образом
 // и стеком ядра, внутри тех же первых 4МБ, которые init_paging()
 // identity-map'ит с самого начала. С 2026-07 куча переехала в отдельный
-// регион KHEAP_BASE (см. paging.h) размером KHEAP_SIZE (32МБ) сразу ПОСЛЕ
-// этих 4МБ - init_paging() добавляет туда ещё 2МБ huge pages (kernel-only,
-// NX), которые раньше стояли занулёнными (not present), хотя сама
-// 4-уровневая 64-битная адресация уже была на месте. 128КБ на практике
-// хватало впритык (task-структуры, ELF-стейджинг и т.п. постоянно жались
-// друг к другу); 32МБ - это фактическое использование того адресного
-// пространства, которое long-mode paging уже предоставлял, а не расширение
-// самой архитектуры.
+// регион (32МБ, KHEAP_SIZE) сразу после этих 4МБ - init_paging() добавляет
+// туда ещё 2МБ huge pages (kernel-only, NX), которые раньше стояли
+// занулёнными (not present), хотя сама 4-уровневая 64-битная адресация уже
+// была на месте. 128КБ на практике хватало впритык (task-структуры,
+// ELF-стейджинг и т.п. постоянно жались друг к другу); 32МБ - это
+// фактическое использование того адресного пространства, которое
+// long-mode paging уже предоставлял, а не расширение самой архитектуры.
+//
+// KASLR-lite: базовый адрес (g_kheap_base) больше не константа - init_paging()
+// (paging.c) выбирает его случайно при каждой загрузке, см. комментарий у
+// g_kheap_base в paging.h.
 //
 // Структура данных - классический связный список блоков. Перед
 // каждым выделенным/свободным блоком лежит заголовок block_header_t.
@@ -86,12 +89,25 @@
 // детерминированный отказ вместо тихой порчи кучи, и не даёт типичному UAF
 // "сразу" попасть в свежую запись.
 
-#include "paging.h"   // KHEAP_BASE / KHEAP_SIZE
+#include "paging.h"   // g_kheap_base / KHEAP_SIZE
 
 extern void print_string(char* str);
 extern volatile unsigned long timer_ticks; // kernel.c, IRQ0 (100 Гц) - энтропия для тега
 
-#define HEAP_START ((unsigned long long)KHEAP_BASE)
+// Only needed to print the (now randomized) heap base at init_heap() -
+// same approach as kcfi.c's own local hex helper.
+static void print_hex32(unsigned int val) {
+    const char hx[16] = "0123456789ABCDEF";
+    char buf[9]; buf[8] = 0;
+    for (int i = 7; i >= 0; i--) { buf[i] = hx[val & 0xF]; val >>= 4; }
+    print_string(buf);
+}
+
+// g_kheap_base - НЕ константа времени компиляции (KASLR-lite, см. paging.h) -
+// выбирается случайно в init_paging(), которая должна отработать раньше
+// init_heap(). Эти макросы поэтому нельзя использовать в статических
+// инициализаторах (heap_head ниже стартует с 0, а не с HEAP_START).
+#define HEAP_START (g_kheap_base)
 #define HEAP_SIZE  KHEAP_SIZE
 #define HEAP_END   (HEAP_START + HEAP_SIZE)
 
@@ -143,7 +159,10 @@ typedef struct block_header {
 // естественной границе слова вместо произвольного 4-байтного смещения.
 #define ALIGN8(x) (((x) + 7) & ~7)
 
-static block_header_t* heap_head = (block_header_t*)HEAP_START;
+// 0, not HEAP_START: HEAP_START now depends on the runtime g_kheap_base
+// (KASLR-lite), which C won't accept in a static initializer anyway -
+// init_heap() sets the real value before anything can call kmalloc/kfree.
+static block_header_t* heap_head = 0;
 
 static block_header_t* quarantine[QUARANTINE_CAPACITY];
 static unsigned int quarantine_count = 0;
@@ -222,7 +241,9 @@ void init_heap() {
     quarantine_count = 0;
     quarantine_pos = 0;
 
-    print_string("[heap] kmalloc arena: 32MB at 0x400000\n");
+    print_string("[heap] kmalloc arena: 32MB at 0x");
+    print_hex32((unsigned int)HEAP_START);   // was a hardcoded "0x400000" - wrong since KASLR-lite
+    print_string("\n");
 }
 
 void* malloc(unsigned int size) {

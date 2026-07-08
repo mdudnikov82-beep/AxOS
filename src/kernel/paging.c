@@ -10,8 +10,9 @@
 //   CR3 → PML4 (0x9C000) → PDPT (0x9D000) → PD (0x9E000)
 //   PD[0] → PT0 (0x9F000): 4КБ-страницы VA 0..2МБ
 //   PD[1] = 2МБ huge page: VA 2..4МБ (ядро-only)
-//   PD[2..2+KHEAP_PAGES-1] = 2МБ huge pages: куча ядра, KHEAP_BASE.. (см.
-//   paging.h) - тот же PDPT[0]/PML4[0] уже покрывают этот диапазон,
+//   PD[g_kheap_pd_index..+KHEAP_PAGES-1] = 2МБ huge pages: куча ядра
+//   (KASLR-lite - индекс случайный каждую загрузку, см. g_kheap_base
+//   comment ниже) - тот же PDPT[0]/PML4[0] уже покрывают этот диапазон,
 //   отдельных таблиц не нужно.
 //
 // W^X: бит 63 PTE = XD (Execute-Disable) при EFER.NXE=1.
@@ -35,6 +36,24 @@ extern char _text_end[];
 static int g_nx   = 0;
 static int g_smep = 0;
 static int g_smap = 0;
+
+unsigned long long g_kheap_base;     // set once, randomly, below - see paging.h
+static unsigned int g_kheap_pd_index;
+
+// KASLR-lite: which PD slot the kernel heap's 16 huge pages start at.
+// RDTSC, not timer_ticks: init_paging() runs before init_idt(), so the
+// PIT/IRQ0 tick counter doesn't exist yet - same reasoning as
+// stack_chk.c's kernel_init_stack_guard() (called even earlier, for the
+// same reason: no timer to seed from yet at that point either). Range
+// [2,34): PD[0]/[1] are always identity-map/user-program-slots, and even
+// the highest start (33) plus 32MB of heap stays inside QEMU's default
+// 128MB RAM.
+static unsigned int kheap_pick_pd_index(void) {
+    unsigned int lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    unsigned long long seed = (((unsigned long long)hi << 32) | lo) ^ 0x9E3779B97F4A7C15ULL;
+    return 2 + (unsigned int)(seed % 32);
+}
 
 void init_paging() {
     pae_t* pml4 = GLOBAL_PML4;
@@ -91,14 +110,21 @@ void init_paging() {
     if (g_nx) pd1_flags |= PAE_XD;
     pd[1] = 0x200000ULL | pd1_flags;
 
-    // PD[2..2+KHEAP_PAGES-1]: куча ядра (KHEAP_BASE.., см. paging.h) - те же
-    // флаги, что и PD[1] (ядро-only, NX): чистые данные, никогда не код.
+    // PD[g_kheap_pd_index..+KHEAP_PAGES-1]: куча ядра (см. g_kheap_base
+    // comment above) - те же флаги, что и PD[1] (ядро-only, NX): чистые
+    // данные, никогда не код. Zero the rest of the PD FIRST: the heap's
+    // start index is now random, not always right after PD[1], so a
+    // fixed "zero everything past the heap" tail loop no longer covers
+    // entries between PD[2] and wherever the heap actually landed.
+    for (unsigned int i = 2; i < 512; i++) pd[i] = 0;
+
+    g_kheap_pd_index = kheap_pick_pd_index();
+    g_kheap_base = (unsigned long long)g_kheap_pd_index * 0x200000ULL;
+
     pae_t kheap_flags = PAE_P | PAE_RW | PAE_PS;
     if (g_nx) kheap_flags |= PAE_XD;
     for (unsigned int i = 0; i < KHEAP_PAGES; i++)
-        pd[2 + i] = (pae_t)(KHEAP_BASE + i * 0x200000ULL) | kheap_flags;
-
-    for (unsigned int i = 2 + KHEAP_PAGES; i < 512; i++) pd[i] = 0;
+        pd[g_kheap_pd_index + i] = (pae_t)(g_kheap_base + i * 0x200000ULL) | kheap_flags;
 
     // PDPT и PML4 уже настроены boot.asm; проверяем/обновляем флаги.
     // boot ставил US=1 на оба, что нам и нужно.
@@ -205,7 +231,10 @@ unsigned long long paging_create_user_directory(int user_slot_index,
     }
 
     // dst_pd: [0] → dst_pt (0-2МБ с USER), [1] = 2МБ huge page ядра-only,
-    // [2..2+KHEAP_PAGES-1] = куча ядра (те же huge pages, что в GLOBAL_PD).
+    // [g_kheap_pd_index..+KHEAP_PAGES-1] = куча ядра (те же huge pages,
+    // что в GLOBAL_PD - копируем ПО ЗНАЧЕНИЮ из GLOBAL_PD на текущем
+    // случайном индексе, а не пересчитываем адрес заново, так что этот
+    // код не должен ничего знать про то, КАК был выбран индекс).
     // Без этого: как только CR3 переключается на приватные таблицы этой
     // задачи, ЛЮБОЙ код ядра (обработчики прерываний, syscall'ы), который
     // исполняется, пока эта задача активна, и трогает kmalloc/kfree -
@@ -213,11 +242,11 @@ unsigned long long paging_create_user_directory(int user_slot_index,
     // пределами первых 4МБ (её там просто нет - см. комментарий у
     // GLOBAL_PD в paging.h).
     pae_t pd1 = GLOBAL_PD[1] & ~PAE_USER;
+    for (unsigned int i = 2; i < 512; i++) dst_pd[i] = 0;
     dst_pd[0] = (pae_t)dst_pt | PAE_P | PAE_RW | PAE_USER;
     dst_pd[1] = pd1;
     for (unsigned int i = 0; i < KHEAP_PAGES; i++)
-        dst_pd[2 + i] = GLOBAL_PD[2 + i] & ~PAE_USER;
-    for (unsigned int i = 2 + KHEAP_PAGES; i < 512; i++) dst_pd[i] = 0;
+        dst_pd[g_kheap_pd_index + i] = GLOBAL_PD[g_kheap_pd_index + i] & ~PAE_USER;
 
     // dst_pdpt: [0] → dst_pd.
     dst_pdpt[0] = (pae_t)dst_pd | PAE_P | PAE_RW | PAE_USER;

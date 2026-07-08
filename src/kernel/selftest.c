@@ -8,10 +8,7 @@
 // FAT12-том на build/disk.img (если он подключён) через VFS-интерфейс.
 
 #include "vfs.h"
-
-// PAE: PT для VA 0..2МБ теперь по адресу 0x9E000 (GLOBAL_PT0 из paging.h),
-// каждая запись 8 байт. Бит 0 = P, бит 1 = R/W.
-#define PAE_PT0      ((unsigned long long*)0x9E000)
+#include "paging.h"
 
 extern void print_string(char* str);
 extern int memtest_demo();
@@ -37,17 +34,30 @@ static int test_paging() {
         return 0;
     }
 
-    // PAE: PT0 (0x9E000) покрывает VA 0..2МБ, запись i = PTE для VA i*4КБ.
+    // GLOBAL_PT0 (0x9F000) покрывает VA 0..2МБ, запись i = PTE для VA i*4КБ.
     // PT0[1] → VA 0x1000 (.text ядра): PRESENT, read-only (R/W=0).
-    // PT0[0x60] → VA 0x60000 (куча): PRESENT, writable (R/W=1).
-    unsigned long long text_pte = PAE_PT0[1];
+    //
+    // ИСПРАВЛЕНО: этот тест раньше молча всегда проваливался - читал
+    // 0x9E000 (это GLOBAL_PD, не GLOBAL_PT0!) под именем PAE_PT0. Адрес
+    // был верным ДО перехода на 4-уровневую адресацию (PML4→PDPT→PD→PT0),
+    // которая вставила лишний уровень и сдвинула PT0 на 0x9F000 - этот
+    // файл тогда не поправили. PD[1] (то, что реально читалось) - 2МБ
+    // huge page с RW=1 (данные ядра), поэтому "не read-only" срабатывало
+    // всегда, независимо от реального состояния .text.
+    unsigned long long text_pte = GLOBAL_PT0[1];
     if (!(text_pte & 1) || (text_pte & 2)) {
         print_string("\033[31mPaging: FAIL (.text page not read-only)\033[0m\n");
         return 0;
     }
 
-    unsigned long long heap_pte = PAE_PT0[0x60];
-    if (!(heap_pte & 1) || !(heap_pte & 2)) {
+    // Куча ядра с 32МБ-расширения живёт в 2МБ huge pages в PD (не 4КБ
+    // страницах PT0) - раньше (128КБ, VA 0x60000) она действительно была
+    // внутри первых 2МБ, отсюда и старая проверка PT0[0x60]; с тех пор
+    // не обновлялась. Теперь ещё и KASLR-lite (см. paging.h) - проверяем
+    // фактическую PD-запись кучи по её текущему (случайному) индексу.
+    unsigned int kheap_pd_index = (unsigned int)(g_kheap_base / 0x200000ULL);
+    unsigned long long heap_pde = GLOBAL_PD[kheap_pd_index];
+    if (!(heap_pde & 1) || !(heap_pde & 2)) {
         print_string("\033[31mPaging: FAIL (heap page not writable)\033[0m\n");
         return 0;
     }
