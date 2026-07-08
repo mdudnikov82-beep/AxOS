@@ -17,7 +17,7 @@ int main(void) {
     window_println(&win, "scoped SMAP-lite (SUM)", gfx_rgb(0, 255, 255));
     window_println(&win, "software MTE heap", gfx_rgb(0, 255, 255));
     window_println(&win, "virtio-blk + virtio-gpu", gfx_rgb(0, 255, 255));
-    window_println(&win, "cooperative multitasking", gfx_rgb(0, 255, 255));
+    window_println(&win, "preemptive sched, priorities", gfx_rgb(0, 255, 255));
     window_println(&win, "", 0);
     window_println_udec(&win, "pid: ", (unsigned long)getpid(), gfx_rgb(255, 255, 0));
     gfx_flush();
