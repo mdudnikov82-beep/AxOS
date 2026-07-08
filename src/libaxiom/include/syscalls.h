@@ -250,4 +250,29 @@ struct set_priority_args {
     int priority;
 };
 
+// --- virtio-net (0x25-0x27) ---
+#define SYS_NET_MAC  0x25  // ESI -> struct net_mac_args
+#define SYS_NET_SEND 0x26  // ESI -> struct net_send_args
+#define SYS_NET_RECV 0x27  // ESI -> struct net_recv_args
+
+// result: 1 - найден NIC (mac заполнен, минимум 6 байт), 0 - нет.
+struct net_mac_args {
+    unsigned char* mac;
+    int            result;
+};
+
+// result: 0 - ок, -1 - ошибка/нет NIC.
+struct net_send_args {
+    const void*  frame;
+    unsigned int len;
+    int          result;
+};
+
+// Неблокирующий: result = байт скопировано, 0 = ничего/нет NIC.
+struct net_recv_args {
+    void*        buf;
+    unsigned int max_len;
+    unsigned int result;
+};
+
 #endif

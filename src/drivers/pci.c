@@ -27,8 +27,8 @@ static void port_long_out(unsigned short port, unsigned int data) {
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC
 
-static unsigned int pci_config_read32(unsigned char bus, unsigned char device,
-                                       unsigned char function, unsigned char offset) {
+unsigned int pci_config_read32(unsigned char bus, unsigned char device,
+                                unsigned char function, unsigned char offset) {
     unsigned int address = 0x80000000u
                           | ((unsigned int)bus << 16)
                           | ((unsigned int)device << 11)
@@ -36,6 +36,18 @@ static unsigned int pci_config_read32(unsigned char bus, unsigned char device,
                           | (offset & 0xFC);
     port_long_out(PCI_CONFIG_ADDRESS, address);
     return port_long_in(PCI_CONFIG_DATA);
+}
+
+void pci_config_write32(unsigned char bus, unsigned char device,
+                         unsigned char function, unsigned char offset,
+                         unsigned int value) {
+    unsigned int address = 0x80000000u
+                          | ((unsigned int)bus << 16)
+                          | ((unsigned int)device << 11)
+                          | ((unsigned int)function << 8)
+                          | (offset & 0xFC);
+    port_long_out(PCI_CONFIG_ADDRESS, address);
+    port_long_out(PCI_CONFIG_DATA, value);
 }
 
 static unsigned short pci_config_read16(unsigned char bus, unsigned char device,

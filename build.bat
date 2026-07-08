@@ -84,6 +84,10 @@ echo Compiling PCI driver (C)...
 gcc %KFLAGS% -I src/drivers -c src/drivers/pci.c -o build/pci.o
 if %errorlevel% neq 0 goto :error
 
+echo Compiling virtio-net driver (C)...
+gcc %KFLAGS% -I src/drivers -c src/drivers/virtio_net.c -o build/virtio_net.o
+if %errorlevel% neq 0 goto :error
+
 echo Compiling KCFI (Forward-edge CFI for syscall_table)...
 gcc %KFLAGS% -I src/kernel -c src/kernel/kcfi.c -o build/kcfi.o
 if %errorlevel% neq 0 goto :error
@@ -101,7 +105,7 @@ echo Compiling Usermode (ring3 entry)...
 if %errorlevel% neq 0 goto :error
 
 echo Linking to PE (64-bit)...
-ld -T kernel.ld -m i386pep --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\kcfi.o build\stack_chk.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\elf.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\pci.o build\syscalls.o build\usermode.o -o build\kernel.exe
+ld -T kernel.ld -m i386pep --file-alignment 0x200 --section-alignment 0x200 build\kernel_entry.o build\idt.o build\kernel.o build\screen.o build\fat12.o build\paging.o build\kcfi.o build\stack_chk.o build\tss.o build\heap.o build\tasking.o build\selftest.o build\elf.o build\vfs.o build\ide.o build\mouse.o build\speaker.o build\pci.o build\virtio_net.o build\syscalls.o build\usermode.o -o build\kernel.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping to Binary...
@@ -484,6 +488,26 @@ if %errorlevel% neq 0 goto :error
 
 echo Copying user program into fs/ for FAT12 image...
 copy /b build\lspci.elf fs\LSPCI.BIN
+if %errorlevel% neq 0 goto :error
+
+echo Compiling user program (nettest.c)...
+gcc -m32 -ffreestanding -fstack-protector -finstrument-functions -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\nettest.c -o build\nettest.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\nettest.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o build\libaxiom\stack_chk.o build\libaxiom\cfi.o -o build\nettest.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\nettest.exe build\nettest.bin
+if %errorlevel% neq 0 goto :error
+
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\nettest.bin build\nettest.elf
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\nettest.elf fs\NETTEST.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (memtest.c)...

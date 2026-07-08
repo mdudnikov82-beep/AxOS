@@ -44,6 +44,9 @@ global _ax_set_level
 global _ax_pci_get_device
 global _ax_seccomp_raw
 global _ax_set_priority
+global _ax_net_mac
+global _ax_net_send
+global _ax_net_recv
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -639,6 +642,69 @@ _ax_set_priority:
     mov ah, 0x24            ; SYS_SET_PRIORITY
     int 0x80
     add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; int ax_net_mac(unsigned char* mac)
+; Строит struct net_mac_args { mac, result=0 } на стеке (см. _ax_unlink -
+; тот же приём для одного указателя-аргумента).
+; Возвращает 1 (найден NIC, mac[6] заполнен) или 0 (нет NIC).
+_ax_net_mac:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=mac
+    mov eax, [esp+12]
+    push dword 0            ; struct.result = 0  (offset 4)
+    push eax                ; struct.mac          (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x25            ; SYS_NET_MAC
+    int 0x80
+    mov eax, [esp+4]        ; result (offset 4)
+    add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; int ax_net_send(const void* frame, unsigned int len)
+; Строит struct net_send_args { frame, len, result=-1 } на стеке (см.
+; _ax_fread/_ax_fwrite - тот же приём для двух скалярных аргументов).
+; Возвращает 0 (ок) или -1 (ошибка/нет NIC).
+_ax_net_send:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=frame, [esp+16]=len
+    mov eax, [esp+12]       ; frame
+    mov ecx, [esp+16]       ; len
+    push dword -1           ; struct.result = -1 (offset 8)
+    push ecx                ; struct.len          (offset 4)
+    push eax                ; struct.frame        (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x26            ; SYS_NET_SEND
+    int 0x80
+    mov eax, [esp+8]        ; result (offset 8)
+    add esp, 12
+    pop ebx
+    pop esi
+    ret
+
+; unsigned int ax_net_recv(void* buf, unsigned int max_len)
+; Строит struct net_recv_args { buf, max_len, result=0 } на стеке.
+; Неблокирующий - возвращает 0 сразу, если кадра ещё нет (не ждёт).
+_ax_net_recv:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=buf, [esp+16]=max_len
+    mov eax, [esp+12]       ; buf
+    mov ecx, [esp+16]       ; max_len
+    push dword 0            ; struct.result = 0  (offset 8)
+    push ecx                ; struct.max_len      (offset 4)
+    push eax                ; struct.buf          (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x27            ; SYS_NET_RECV
+    int 0x80
+    mov eax, [esp+8]        ; result (offset 8)
+    add esp, 12
     pop ebx
     pop esi
     ret

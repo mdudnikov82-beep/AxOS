@@ -4,6 +4,7 @@
 #include "ide.h" // PIO-драйвер ATA/IDE (build/disk.img - настоящий диск)
 #include "mouse.h" // PS/2-мышь, IRQ12
 #include "pci.h" // сканирование шины PCI (mechanism #1), см. lspci.c
+#include "virtio_net.h" // virtio-net поверх legacy PCI - см. src/drivers/virtio_net.c
 #include "speaker.h" // системный динамик (PC speaker)
 #include "paging.h" // Защита памяти: paging + read-only код ядра
 #include "kcfi.h"  // Forward-edge CFI: shadow table + cookie auth
@@ -538,6 +539,7 @@ typedef enum {
     AX_CLASS_CLIPBOARD,
     AX_CLASS_TASK_INFO,
     AX_CLASS_PCI_RAW,
+    AX_CLASS_NET,
     AX_CLASS_COUNT
 } ax_class_t;
 
@@ -557,9 +559,15 @@ typedef enum {
 // принцип, что и disk_raw: прямой порт-ввод/вывод в конфигурационное
 // пространство шины (0xCF8/0xCFC), минуя любую абстракцию ядра - confined
 // lspci.bin получает тот же "avc: denied", что disktool.bin на disk_raw.
+// net - тот же принцип, что file_write/exec/clipboard (не disk_raw/pci_raw):
+// net_mac/net_send/net_recv - конкретные, ограниченные операции (взять
+// MAC, отправить/принять один Ethernet-кадр), а не "сырой" обход
+// абстракции железа наружу мимо всего остального - ARP/ping/HTTP-демки
+// (см. RISC-V сторону этого же стека) рассчитаны запускаться из-под
+// confined user_t, как и все остальные демо-программы.
 static const unsigned char ax_policy[AX_DOMAIN_COUNT][AX_CLASS_COUNT] = {
-    /* AX_DOMAIN_KERNEL */ {1, 1, 1, 1, 1, 1, 1, 1, 1}, // unconfined - разрешено всё
-    /* AX_DOMAIN_USER   */ {0, 0, 1, 1, 1, 1, 1, 1, 0}, // confined - см. комментарий выше
+    /* AX_DOMAIN_KERNEL */ {1, 1, 1, 1, 1, 1, 1, 1, 1, 1}, // unconfined - разрешено всё
+    /* AX_DOMAIN_USER   */ {0, 0, 1, 1, 1, 1, 1, 1, 0, 1}, // confined - см. комментарий выше
 };
 
 static char* ax_domain_name(ax_domain_t d) {
@@ -577,6 +585,7 @@ static char* ax_class_name(ax_class_t c) {
         case AX_CLASS_CLIPBOARD:   return "clipboard";
         case AX_CLASS_TASK_INFO:   return "task_info";
         case AX_CLASS_PCI_RAW:     return "pci_raw";
+        case AX_CLASS_NET:         return "net";
         default:                   return "?";
     }
 }
@@ -1118,6 +1127,51 @@ void sys_pci_get_device(char* arg) {
     a->result = 1;
 }
 
+// --- virtio-net (SYS_NET_MAC/SEND/RECV, 0x25-0x27) ---
+//
+// Инициализация ленивая (как pci_scan() выше через pci_scanned) - при
+// первом же обращении к любому из трёх syscall'ов, а не безусловно на
+// каждой загрузке: если QEMU запущен без `-device virtio-net-pci`,
+// virtio_net_init() просто не находит устройство и virtio_net_ready()
+// остаётся 0 - остальные два syscall'а тогда безобидно отдают -1/0
+// вызывающему, как и на RISC-V стороне этого же стека.
+static int net_init_tried = 0;
+
+static void ensure_net_init() {
+    if (!net_init_tried) {
+        virtio_net_init();
+        net_init_tried = 1;
+    }
+}
+
+void sys_net_mac(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct net_mac_args))) return;
+    struct net_mac_args* a = (struct net_mac_args*)arg;
+    if (!ax_mac_check(AX_CLASS_NET)) { a->result = 0; return; }
+    ensure_net_init();
+    if (!virtio_net_ready() || !validate_user_ptr((void*)a->mac, 6)) { a->result = 0; return; }
+    virtio_net_get_mac((unsigned char*)a->mac);
+    a->result = 1;
+}
+
+void sys_net_send(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct net_send_args))) return;
+    struct net_send_args* a = (struct net_send_args*)arg;
+    if (!ax_mac_check(AX_CLASS_NET)) { a->result = -1; return; }
+    ensure_net_init();
+    if (!virtio_net_ready() || !validate_user_ptr((void*)a->frame, a->len)) { a->result = -1; return; }
+    a->result = virtio_net_send((const void*)a->frame, a->len);
+}
+
+void sys_net_recv(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct net_recv_args))) return;
+    struct net_recv_args* a = (struct net_recv_args*)arg;
+    if (!ax_mac_check(AX_CLASS_NET)) { a->result = 0; return; }
+    ensure_net_init();
+    if (!virtio_net_ready() || !validate_user_ptr((void*)a->buf, a->max_len)) { a->result = 0; return; }
+    a->result = virtio_net_recv((void*)a->buf, a->max_len);
+}
+
 // SYS_SBRK: сдвигает heap break задачи на increment байт вперёд.
 // Возвращает старый break (начало выделенного региона) или -1 при переполнении.
 void sys_sbrk(char* arg) {
@@ -1287,6 +1341,9 @@ syscall_fn syscall_table[] = {
     sys_pci_get_device,    // 0x22
     sys_seccomp,           // 0x23
     sys_set_priority,      // 0x24
+    sys_net_mac,           // 0x25
+    sys_net_send,          // 0x26
+    sys_net_recv,          // 0x27
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))

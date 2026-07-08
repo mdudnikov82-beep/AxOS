@@ -328,4 +328,36 @@ struct set_priority_args {
     int priority;
 };
 
+// --- virtio-net (0x25-0x27) ---
+// Сырой доступ к Ethernet-кадрам через virtio-net-pci (см.
+// src/drivers/virtio_net.c) - ни ARP, ни IPv4 тут нет, это отдельный
+// (userspace) слой, как и на RISC-V стороне того же стека.
+#define SYS_NET_MAC  0x25  // ESI -> struct net_mac_args
+#define SYS_NET_SEND 0x26  // ESI -> struct net_send_args
+#define SYS_NET_RECV 0x27  // ESI -> struct net_recv_args
+
+// SYS_NET_MAC: mac - буфер минимум 6 байт. result: 1 - найден NIC (mac
+// заполнен), 0 - нет.
+struct net_mac_args {
+    unsigned int mac;   // 32-bit user unsigned char*
+    int          result;
+};
+
+// SYS_NET_SEND: шлёт один сырой Ethernet-кадр (без virtio-заголовка -
+// драйвер добавляет его сам). result: 0 - ок, -1 - ошибка/нет NIC.
+struct net_send_args {
+    unsigned int frame;  // 32-bit user const void*
+    unsigned int len;
+    int          result;
+};
+
+// SYS_NET_RECV: неблокирующий приём - если кадр есть, копирует его в buf
+// (максимум max_len байт) и возвращает его длину; иначе result=0 сразу
+// (не ждёт).
+struct net_recv_args {
+    unsigned int buf;      // 32-bit user void*
+    unsigned int max_len;
+    unsigned int result;
+};
+
 #endif

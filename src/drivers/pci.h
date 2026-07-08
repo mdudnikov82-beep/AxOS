@@ -21,4 +21,16 @@ unsigned int pci_scan(struct pci_device* out, unsigned int max);
 // "Unknown" для кодов, которых нет в таблице.
 const char* pci_class_name(unsigned char class_code);
 
+// Читает/пишет 32 бита конфигурационного пространства PCI-устройства по
+// смещению offset (округляется вниз до кратного 4 контроллером). Нужны
+// драйверам конкретных устройств (virtio-net-pci и т.п.) для чтения BAR0
+// (offset 0x10+) и включения bus mastering/IO space в Command-регистре
+// (offset 0x04) - то, что pci_scan() сам не делает (ему для перечисления
+// хватает vendor/device/class/subclass).
+unsigned int pci_config_read32(unsigned char bus, unsigned char device,
+                                unsigned char function, unsigned char offset);
+void pci_config_write32(unsigned char bus, unsigned char device,
+                         unsigned char function, unsigned char offset,
+                         unsigned int value);
+
 #endif

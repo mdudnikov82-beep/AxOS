@@ -92,6 +92,13 @@ void ax_set_priority(int pid, int priority);
 // d->result (1 = запись найдена, 0 = конец списка).
 int ax_pci_get_device(struct pci_device_args* d);
 
+// virtio-net (SYS_NET_MAC/SEND/RECV) - сырой доступ к Ethernet-кадрам,
+// см. src/drivers/virtio_net.c. Без флага QEMU `-device virtio-net-pci`
+// ax_net_mac() просто вернёт 0 (нет NIC), остальные два безобидно -1/0.
+int          ax_net_mac(unsigned char* mac);              // mac[6]; 1=найден NIC, 0=нет
+int          ax_net_send(const void* frame, unsigned int len);   // 0=ок, -1=ошибка/нет NIC
+unsigned int ax_net_recv(void* buf, unsigned int max_len);        // байт скопировано, 0=ничего/нет NIC
+
 // Динамическая память (sbrk + malloc/free + shadow memory)
 void* ax_sbrk(int increment);           // сдвинуть heap break; (void*)-1 при ошибке
 void* ax_malloc(unsigned int size);     // выделить size байт или NULL
@@ -172,6 +179,9 @@ void ax_printf(const char* fmt, ...);  // %s %d %u %x %c %%
 #define AX_SC_PCI          AX_SC_BIT(0x22)  // ax_pci_get_device
 // 0x23 = SYS_SECCOMP — всегда разрешён ядром, бит здесь для явного включения
 #define AX_SC_SET_PRIORITY AX_SC_BIT(0x24)  // ax_set_priority
+#define AX_SC_NET_MAC      AX_SC_BIT(0x25)  // ax_net_mac
+#define AX_SC_NET_SEND     AX_SC_BIT(0x26)  // ax_net_send
+#define AX_SC_NET_RECV     AX_SC_BIT(0x27)  // ax_net_recv
 
 // Готовые профили:
 #define AX_SC_PRINT_ONLY  (AX_SC_PRINT | AX_SC_CLEAR | AX_SC_EXIT | AX_SC_SBRK)
