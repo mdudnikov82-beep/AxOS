@@ -327,4 +327,189 @@ static void tcp_close(tcp_conn_t *c) {
     c->peer_closed = 0;
 }
 
+// ---------------------------------------------------------------------
+// Многосоединённый сервер (tcp_mux_*) - НЕСКОЛЬКО одновременных клиентов
+// на одном слушающем порту, поверх тех же низкоуровневых помощников
+// (tcp_send_segment/tcp_parse_segment/ip_checksum/tcp_checksum), что и
+// tcp_connect/tcp_accept выше. Те функции ОДНО соединение за раз
+// (единственный глобальный tcp_conn_t) остаются как есть, не трогались -
+// это отдельный, ДОПОЛНИТЕЛЬНЫЙ API для случая, когда одному серверу
+// (например httpsrv.c) нужно обслуживать несколько клиентов сразу, не
+// блокируясь на каждом по очереди.
+//
+// Модель: TCP_MAX_CONNS слотов, каждый - свой tcp_conn_t + маленький
+// стейт-машин (SYN_RCVD -> ESTABLISHED -> CLOSING -> FREE). Один вызов
+// tcp_mux_poll() = одна попытка ax_net_recv() (один входящий кадр) -
+// вызывающий код сам гоняет цикл, вызывая poll() снова и снова (как и
+// весь остальной этот "стек" - однопоточный, кооперативный, без реальных
+// прерываний на уровне TCP). Как и everywhere else в tcp.h - только
+// "счастливый путь": ни ретрансмита, ни переупорядочивания сегментов,
+// ни SYN-flood защиты - только таймаут на подвисшие полуоткрытые/
+// закрывающиеся слоты, чтобы они не отъедали слот навсегда.
+#define TCP_MAX_CONNS 4
+
+typedef enum {
+    TCP_SLOT_FREE = 0,
+    TCP_SLOT_SYN_RCVD,
+    TCP_SLOT_ESTABLISHED,
+    TCP_SLOT_CLOSING
+} tcp_slot_state_t;
+
+typedef struct {
+    tcp_slot_state_t state;
+    tcp_conn_t       conn;
+    unsigned char    reqbuf[512];
+    unsigned int     reqlen;
+    unsigned int     deadline;   // ax_get_ticks() - для SYN_RCVD/CLOSING, тайм-аут очистки
+} tcp_slot_t;
+
+static tcp_slot_t     tcp_slots[TCP_MAX_CONNS];
+static unsigned short tcp_mux_local_port;
+
+// Начинает слушать local_port; сбрасывает все слоты (на случай повторного
+// вызова - хотя обычно вызывается один раз за всю жизнь программы).
+static void tcp_mux_listen(unsigned short local_port) {
+    tcp_mux_local_port = local_port;
+    for (int i = 0; i < TCP_MAX_CONNS; i++) tcp_slots[i].state = TCP_SLOT_FREE;
+}
+
+static int tcp_mux_find(unsigned int remote_ip, unsigned short remote_port) {
+    for (int i = 0; i < TCP_MAX_CONNS; i++) {
+        if (tcp_slots[i].state != TCP_SLOT_FREE &&
+            tcp_slots[i].conn.remote_ip == remote_ip &&
+            tcp_slots[i].conn.remote_port == remote_port) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int tcp_mux_find_free(void) {
+    for (int i = 0; i < TCP_MAX_CONNS; i++) if (tcp_slots[i].state == TCP_SLOT_FREE) return i;
+    return -1;
+}
+
+// Один шаг обслуживания: один ax_net_recv(), разбор и продвижение стейт-
+// машины ОДНОГО затронутого слота. Возвращает индекс слота, для которого
+// только что стал готов ПОЛНЫЙ запрос (reqbuf[0..reqlen) можно разбирать -
+// тот же "один tcp_recv() = весь запрос" допущение, что и в исходном
+// однослотовом httpsrv.c), иначе -1 (ничего не пришло / кадр не по нашей
+// части / это было только рукопожатие или входящий FIN хвоста закрытия).
+static int tcp_mux_poll(void) {
+    unsigned int now = ax_get_ticks();
+    for (int i = 0; i < TCP_MAX_CONNS; i++) {
+        if ((tcp_slots[i].state == TCP_SLOT_SYN_RCVD || tcp_slots[i].state == TCP_SLOT_CLOSING) &&
+            now >= tcp_slots[i].deadline) {
+            tcp_slots[i].state = TCP_SLOT_FREE;
+        }
+    }
+
+    unsigned int n = ax_net_recv(tcp_rx, sizeof(tcp_rx));
+    if (n == 0) return -1;
+
+    arp_maybe_respond(tcp_rx, n);   // тот же приём, что и в tcp_accept()
+
+    tcp_seg_t seg;
+    if (!tcp_parse_segment(n, &seg)) return -1;
+    if (seg.dst_port != tcp_mux_local_port) return -1;
+
+    int idx = tcp_mux_find(seg.src_ip, (unsigned short)seg.src_port);
+
+    if (idx < 0) {
+        // Новый клиент - принимаем, только если это чистый SYN и есть
+        // свободный слот (иначе молча игнорируем - настоящий клиент
+        // повторит SYN, у нас просто нет ретрансмита/backlog).
+        if ((seg.flags & TCP_FLAG_SYN) && !(seg.flags & TCP_FLAG_ACK)) {
+            int fi = tcp_mux_find_free();
+            if (fi < 0) return -1;
+            tcp_slot_t *s = &tcp_slots[fi];
+            if (!ax_net_mac(s->conn.my_mac)) return -1;
+            for (int i = 0; i < 6; i++) s->conn.remote_mac[i] = tcp_rx[6 + i];
+            s->conn.remote_ip   = seg.src_ip;
+            s->conn.remote_port = (unsigned short)seg.src_port;
+            s->conn.local_port  = tcp_mux_local_port;
+            s->conn.rcv_nxt     = seg.seq + 1;
+            s->conn.snd_nxt     = 0x77AA0011u + (unsigned int)fi * 0x1000u;   // разный ISN на слот
+            s->conn.connected   = 0;
+            s->conn.peer_closed = 0;
+            s->reqlen  = 0;
+            s->state   = TCP_SLOT_SYN_RCVD;
+            s->deadline = now + 300;   // 3с на завершение handshake
+            tcp_send_segment(&s->conn, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, 0);
+        }
+        return -1;
+    }
+
+    tcp_slot_t *s = &tcp_slots[idx];
+
+    if (s->state == TCP_SLOT_SYN_RCVD) {
+        if ((seg.flags & TCP_FLAG_ACK) && seg.ack == s->conn.snd_nxt + 1) {
+            s->conn.snd_nxt  += 1;
+            s->conn.connected = 1;
+            s->state = TCP_SLOT_ESTABLISHED;
+        }
+        return -1;
+    }
+
+    if (s->state == TCP_SLOT_ESTABLISHED) {
+        if (seg.seq != s->conn.rcv_nxt) return -1;   // не тот сегмент - игнорируем (без ретрансмита/переупорядочивания)
+
+        unsigned int room = sizeof(s->reqbuf) - s->reqlen;
+        unsigned int copy_len = (seg.data_len > room) ? room : seg.data_len;
+        for (unsigned int i = 0; i < copy_len; i++) s->reqbuf[s->reqlen + i] = seg.data[i];
+        s->reqlen += copy_len;
+        s->conn.rcv_nxt += seg.data_len;
+        if (seg.flags & TCP_FLAG_FIN) s->conn.rcv_nxt += 1;
+
+        if (seg.data_len > 0 || (seg.flags & TCP_FLAG_FIN)) {
+            tcp_send_segment(&s->conn, TCP_FLAG_ACK, 0, 0);
+        }
+        if (seg.data_len > 0) return idx;   // запрос готов к разбору
+        return -1;
+    }
+
+    if (s->state == TCP_SLOT_CLOSING) {
+        // Дренируем хвост закрытия (их FIN и/или запоздавший ACK) - тот же
+        // смысл, что и у 500мс-дренажа в tcp_close(), только не блокируясь.
+        if (seg.data_len > 0 || (seg.flags & TCP_FLAG_FIN)) {
+            s->conn.rcv_nxt += seg.data_len;
+            if (seg.flags & TCP_FLAG_FIN) s->conn.rcv_nxt += 1;
+            tcp_send_segment(&s->conn, TCP_FLAG_ACK, 0, 0);
+        }
+        s->state = TCP_SLOT_FREE;
+        return -1;
+    }
+
+    return -1;
+}
+
+// Шлёт данные клиенту слота idx (может быть длиннее 512 - разобьётся на
+// несколько сегментов сама, как и обычный tcp_send() в цикле вручную).
+static int tcp_mux_send(int idx, const void *data, unsigned int len) {
+    tcp_slot_t *s = &tcp_slots[idx];
+    if (s->state != TCP_SLOT_ESTABLISHED) return -1;
+    const unsigned char *p = (const unsigned char *)data;
+    unsigned int sent = 0;
+    while (sent < len) {
+        unsigned int chunk = len - sent;
+        if (chunk > 512) chunk = 512;
+        tcp_send_segment(&s->conn, TCP_FLAG_PSH | TCP_FLAG_ACK, p + sent, chunk);
+        s->conn.snd_nxt += chunk;
+        sent += chunk;
+    }
+    return 0;
+}
+
+// Инициирует закрытие слота idx (шлёт FIN, переводит в CLOSING - слот
+// освободится либо когда придёт ACK/FIN клиента через tcp_mux_poll(),
+// либо по тайм-ауту в 500мс, как и однослотовый tcp_close()).
+static void tcp_mux_close(int idx) {
+    tcp_slot_t *s = &tcp_slots[idx];
+    if (s->state != TCP_SLOT_ESTABLISHED) return;
+    tcp_send_segment(&s->conn, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0);
+    s->conn.snd_nxt += 1;
+    s->state    = TCP_SLOT_CLOSING;
+    s->deadline = ax_get_ticks() + 50;   // 500мс (100Гц)
+}
+
 #endif

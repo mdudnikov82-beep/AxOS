@@ -1,13 +1,15 @@
 #include "axiom.h"
 #include "tcp.h"
 
-// Минимальный HTTP/1.0-сервер поверх tcp_accept(): слушает порт 80,
-// разбирает первую строку запроса ("GET /путь HTTP/1.x"), отдаёт
-// соответствующий файл из FAT12 (пустой путь/"/" -> INDEX.HTM) через
-// ax_open()/ax_fread()/ax_close(), либо 404. Одно соединение за раз (как
-// и весь tcp.h) - обслужив клиента, снова слушает следующего, бесконечно.
-// Портирован с RISC-V стороны (src/user/rv64/httpsrv.c) - тот же
-// протокол, та же логика.
+// Минимальный HTTP/1.0-сервер поверх tcp_mux_* (tcp.h): слушает порт 80,
+// обслуживает до TCP_MAX_CONNS клиентов ОДНОВРЕМЕННО (не по одному, как
+// раньше через tcp_accept()), разбирает первую строку запроса
+// ("GET /путь HTTP/1.x"), отдаёт соответствующий файл из FAT12 (пустой
+// путь/"/" -> INDEX.HTM) через ax_open()/ax_fread()/ax_close(), либо 404.
+// Портирован с RISC-V стороны (src/user/rv64/httpsrv.c), логика та же -
+// только вместо блокирующего "принять одного -> обслужить -> закрыть ->
+// принять следующего" тут кооперативный цикл tcp_mux_poll(), способный
+// вести несколько рукопожатий/запросов вперемешку.
 
 static void print_ip(unsigned int ip) {
     ax_printf("%u.%u.%u.%u", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
@@ -28,6 +30,65 @@ static int parse_request_path(const unsigned char *req, unsigned int len,
     return 1;
 }
 
+// Разбирает запрос слота idx и шлёт ответ (файл из FAT12 или 404),
+// затем инициирует закрытие. Вынесено в отдельную функцию, потому что
+// каждый вызов tcp_mux_poll() может вернуть готовность ЛЮБОГО из
+// TCP_MAX_CONNS слотов - обработка одного не должна знать о других.
+static void handle_request(int idx) {
+    tcp_slot_t *s = &tcp_slots[idx];
+
+    static char path[64];
+    if (!parse_request_path(s->reqbuf, s->reqlen, path, sizeof(path))) {
+        tcp_mux_close(idx);
+        return;
+    }
+    ax_printf("httpsrv: GET %s\n", path);
+
+    const char *fname = (path[0] == '\0' || (path[0] == '/' && path[1] == '\0'))
+                         ? "INDEX.HTM" : path + 1;
+
+    int fd = ax_open((char*)fname, 0);
+    if (fd >= 0) {
+        static unsigned char filebuf[8192];
+        int flen = 0, r;
+        while (flen < (int)sizeof(filebuf) &&
+               (r = ax_fread(fd, filebuf + flen, sizeof(filebuf) - (unsigned int)flen)) > 0) {
+            flen += r;
+        }
+        ax_close(fd);
+
+        static char header[128];
+        int hlen = 0;
+        const char *h1 = "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: ";
+        for (const char *p = h1; *p; p++) header[hlen++] = *p;
+        {
+            char dec[12]; int di = 0; unsigned int v = (unsigned int)flen;
+            if (!v) dec[di++] = '0';
+            while (v) { dec[di++] = (char)('0' + v % 10); v /= 10; }
+            for (int a = 0, b = di - 1; a < b; a++, b--) { char t = dec[a]; dec[a] = dec[b]; dec[b] = t; }
+            for (int i = 0; i < di; i++) header[hlen++] = dec[i];
+        }
+        const char *h2 = "\r\nConnection: close\r\n\r\n";
+        for (const char *p = h2; *p; p++) header[hlen++] = *p;
+
+        tcp_mux_send(idx, header, (unsigned int)hlen);
+        int sent = 0;
+        while (sent < flen) {
+            int chunk = flen - sent;
+            if (chunk > 512) chunk = 512;
+            tcp_mux_send(idx, filebuf + sent, (unsigned int)chunk);
+            sent += chunk;
+        }
+        ax_printf("httpsrv: 200 OK, sent %d bytes\n", flen);
+    } else {
+        static const char not_found[] =
+            "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found\n";
+        tcp_mux_send(idx, not_found, sizeof(not_found) - 1);
+        ax_print("httpsrv: 404 Not Found\n");
+    }
+    tcp_mux_close(idx);
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
 
@@ -37,69 +98,20 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    ax_print("httpsrv: serving FAT12 files on port 80 (\"/\" -> INDEX.HTM)\n");
+    ax_printf("httpsrv: serving FAT12 files on port 80 (\"/\" -> INDEX.HTM), up to %d concurrent connections\n",
+              TCP_MAX_CONNS);
+    tcp_mux_listen(80);
 
     for (;;) {
-        static tcp_conn_t conn;
-        if (!tcp_accept(&conn, 80, 30000)) continue;   // никто не подключился за 30с - слушаем дальше
+        int idx = tcp_mux_poll();
+        if (idx < 0) { ax_sleep_ms(5); continue; }   // ничего не готово в этот раз - короткая пауза
 
         ax_print("httpsrv: client connected from ");
-        print_ip(conn.remote_ip);
+        print_ip(tcp_slots[idx].conn.remote_ip);
         ax_print("\n");
 
-        static unsigned char req[512];
-        int n = tcp_recv(&conn, req, sizeof(req) - 1, 3000);
-        if (n > 0) {
-            static char path[64];
-            if (parse_request_path(req, (unsigned int)n, path, sizeof(path))) {
-                ax_printf("httpsrv: GET %s\n", path);
-
-                const char *fname = (path[0] == '\0' || (path[0] == '/' && path[1] == '\0'))
-                                     ? "INDEX.HTM" : path + 1;
-
-                int fd = ax_open((char*)fname, 0);
-                if (fd >= 0) {
-                    static unsigned char filebuf[8192];
-                    int flen = 0, r;
-                    while (flen < (int)sizeof(filebuf) &&
-                           (r = ax_fread(fd, filebuf + flen, sizeof(filebuf) - (unsigned int)flen)) > 0) {
-                        flen += r;
-                    }
-                    ax_close(fd);
-
-                    static char header[128];
-                    int hlen = 0;
-                    const char *h1 = "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nContent-Length: ";
-                    for (const char *p = h1; *p; p++) header[hlen++] = *p;
-                    {
-                        char dec[12]; int di = 0; unsigned int v = (unsigned int)flen;
-                        if (!v) dec[di++] = '0';
-                        while (v) { dec[di++] = (char)('0' + v % 10); v /= 10; }
-                        for (int a = 0, b = di - 1; a < b; a++, b--) { char t = dec[a]; dec[a] = dec[b]; dec[b] = t; }
-                        for (int i = 0; i < di; i++) header[hlen++] = dec[i];
-                    }
-                    const char *h2 = "\r\nConnection: close\r\n\r\n";
-                    for (const char *p = h2; *p; p++) header[hlen++] = *p;
-
-                    tcp_send(&conn, header, (unsigned int)hlen);
-                    int sent = 0;
-                    while (sent < flen) {
-                        int chunk = flen - sent;
-                        if (chunk > 512) chunk = 512;
-                        tcp_send(&conn, filebuf + sent, (unsigned int)chunk);
-                        sent += chunk;
-                    }
-                    ax_printf("httpsrv: 200 OK, sent %d bytes\n", flen);
-                } else {
-                    static const char not_found[] =
-                        "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found\n";
-                    tcp_send(&conn, not_found, sizeof(not_found) - 1);
-                    ax_print("httpsrv: 404 Not Found\n");
-                }
-            }
-        }
-        tcp_close(&conn);
-        ax_print("httpsrv: connection closed\n\n");
+        handle_request(idx);
+        ax_print("httpsrv: connection closing\n\n");
     }
     return 0;
 }
