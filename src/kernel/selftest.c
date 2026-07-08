@@ -50,13 +50,31 @@ static int test_paging() {
         return 0;
     }
 
-    // Куча ядра с 32МБ-расширения живёт в 2МБ huge pages в PD (не 4КБ
-    // страницах PT0) - раньше (128КБ, VA 0x60000) она действительно была
-    // внутри первых 2МБ, отсюда и старая проверка PT0[0x60]; с тех пор
-    // не обновлялась. Теперь ещё и KASLR-lite (см. paging.h) - проверяем
-    // фактическую PD-запись кучи по её текущему (случайному) индексу.
-    unsigned int kheap_pd_index = (unsigned int)(g_kheap_base / 0x200000ULL);
-    unsigned long long heap_pde = GLOBAL_PD[kheap_pd_index];
+    // Куча ядра теперь живёт за отдельной случайной PML4->PDPT->PD цепочкой
+    // (настоящий 64-битный KASLR, см. paging.h/paging.c), а не в GLOBAL_PD -
+    // g_kheap_base больше не "PD-индекс × 2МБ", а полноценный 4-уровневый
+    // виртуальный адрес. Раскладываем его на индексы ТЕМ ЖЕ способом, каким
+    // это делает сам MMU (9+9+9 бит), и обходим таблицы по-настоящему -
+    // не полагаемся на знание, КАК paging.c выбрал индексы, только на
+    // формат самого адреса.
+    unsigned long long va = g_kheap_base;
+    unsigned int kheap_pml4_idx = (unsigned int)((va >> 39) & 0x1FFULL);
+    unsigned int kheap_pdpt_idx = (unsigned int)((va >> 30) & 0x1FFULL);
+    unsigned int kheap_pd_idx   = (unsigned int)((va >> 21) & 0x1FFULL);
+
+    unsigned long long pml4e = GLOBAL_PML4[kheap_pml4_idx];
+    if (!(pml4e & 1)) {
+        print_string("\033[31mPaging: FAIL (heap PML4 entry not present)\033[0m\n");
+        return 0;
+    }
+    unsigned long long* kheap_pdpt = (unsigned long long*)(pml4e & ~0xFFFULL);
+    unsigned long long pdpte = kheap_pdpt[kheap_pdpt_idx];
+    if (!(pdpte & 1)) {
+        print_string("\033[31mPaging: FAIL (heap PDPT entry not present)\033[0m\n");
+        return 0;
+    }
+    unsigned long long* kheap_pd = (unsigned long long*)(pdpte & ~0xFFFULL);
+    unsigned long long heap_pde = kheap_pd[kheap_pd_idx];
     if (!(heap_pde & 1) || !(heap_pde & 2)) {
         print_string("\033[31mPaging: FAIL (heap page not writable)\033[0m\n");
         return 0;

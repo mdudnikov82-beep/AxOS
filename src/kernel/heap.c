@@ -95,11 +95,17 @@ extern void print_string(char* str);
 extern volatile unsigned long timer_ticks; // kernel.c, IRQ0 (100 Гц) - энтропия для тега
 
 // Only needed to print the (now randomized) heap base at init_heap() -
-// same approach as kcfi.c's own local hex helper.
-static void print_hex32(unsigned int val) {
+// same approach as kcfi.c's own local hex helper. 64-bit, not 32: since
+// the heap moved to a genuinely random high virtual address (real
+// 64-bit KASLR, see paging.h), a 32-bit print would silently truncate
+// away the very bits that make it random (the PML4/PDPT index live way
+// above bit 31) - caught exactly this while testing the first version
+// of this change, which printed a plausible-looking but wrong
+// low-32-bit alias of the real address.
+static void print_hex64(unsigned long long val) {
     const char hx[16] = "0123456789ABCDEF";
-    char buf[9]; buf[8] = 0;
-    for (int i = 7; i >= 0; i--) { buf[i] = hx[val & 0xF]; val >>= 4; }
+    char buf[17]; buf[16] = 0;
+    for (int i = 15; i >= 0; i--) { buf[i] = hx[val & 0xF]; val >>= 4; }
     print_string(buf);
 }
 
@@ -242,7 +248,7 @@ void init_heap() {
     quarantine_pos = 0;
 
     print_string("[heap] kmalloc arena: 32MB at 0x");
-    print_hex32((unsigned int)HEAP_START);   // was a hardcoded "0x400000" - wrong since KASLR-lite
+    print_hex64((unsigned long long)HEAP_START);
     print_string("\n");
 }
 

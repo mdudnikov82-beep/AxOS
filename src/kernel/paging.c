@@ -9,14 +9,13 @@
 // Структура (после init_paging):
 //   CR3 → PML4 (0x9C000) → PDPT (0x9D000) → PD (0x9E000)
 //   PD[0] → PT0 (0x9F000): 4КБ-страницы VA 0..2МБ
-//   PD[1] = 2МБ huge page: VA 2..4МБ (ядро-only)
+//   PD[1]/[2] = 2МБ huge pages: VA 2..6МБ (ядро-only)
 //   PD[g_kheap_pd_index..+KHEAP_PAGES-1] = 2МБ huge pages: куча ядра
-//   (KASLR-lite - индекс случайный каждую загрузку, см. g_kheap_base
-//   comment ниже) - тот же PDPT[0]/PML4[0] уже покрывают этот диапазон,
-//   отдельных таблиц не нужно.
-//   PD[g_pool_pd_index] = 2МБ huge page: пул приватных таблиц изолированных
-//   задач (тоже KASLR-lite, см. g_pool_base в paging.h) - отдельный слот,
-//   не пересекается по построению с диапазоном кандидатов кучи.
+//   (KASLR, индекс случайный каждую загрузку, см. g_kheap_base comment
+//   ниже) - тот же PDPT[0]/PML4[0] уже покрывают этот диапазон.
+//   PD[g_pool_pd_index] = 2МБ huge page: пул приватных таблиц
+//   изолированных задач (тоже KASLR, отдельный диапазон, не пересекается
+//   с диапазоном кандидатов кучи по построению)
 //
 // W^X: бит 63 PTE = XD (Execute-Disable) при EFER.NXE=1.
 
@@ -45,40 +44,62 @@ static unsigned int g_kheap_pd_index;
 unsigned long long g_pool_base;      // set once, randomly, below - see paging.h
 static unsigned int g_pool_pd_index;
 
-// KASLR-lite: which PD slot the kernel heap's 16 huge pages start at.
-// RDTSC, not timer_ticks: init_paging() runs before init_idt(), so the
-// PIT/IRQ0 tick counter doesn't exist yet - same reasoning as
-// stack_chk.c's kernel_init_stack_guard() (called even earlier, for the
-// same reason: no timer to seed from yet at that point either). Range
-// [3,34): PD[0]/[1] are always identity-map/user-program-slots, PD[2] is
-// now ALSO fixed (2МБ huge page, 4-6МБ) - FAT12 grew to 2МБ (см.
-// FAT12_BASE/FAT12_TOTAL_SECTORS в fat12.c) and now spans past the old
-// 4МБ boundary into what used to be the heap's lowest candidate slot.
-// Floor moved from 2 to 3 (one candidate lost, 32->31 - "lite"
-// randomization was never meant to be cryptographically precise about
-// the exact count). Even the highest start (33) plus 32MB of heap stays
-// inside QEMU's default 128MB RAM.
-static unsigned int kheap_pick_pd_index(void) {
+// RDRAND (CPUID.1:ECX[30]), если проц поддерживает - иначе RDTSC. Раньше
+// сид был ТОЛЬКО RDTSC (предсказуемее для соседней VM/атакующего с точным
+// таймингом) - RDRAND, где есть, даёт настоящую аппаратную энтропию.
+// RDTSC-фоллбэк оставлен по той же причине, что и раньше: init_paging()
+// исполняется до init_idt(), тикового счётчика (timer_ticks) ещё нет.
+static unsigned long long early_random64(void) {
+    unsigned int max_basic = 0, ecx1 = 0;
+    __asm__ volatile("cpuid" : "=a"(max_basic) : "a"(0u) : "ebx", "ecx", "edx");
+    if (max_basic >= 1u) {
+        unsigned int eax1, ebx1, edx1;
+        __asm__ volatile("cpuid" : "=a"(eax1), "=b"(ebx1), "=c"(ecx1), "=d"(edx1) : "a"(1u));
+    }
+    if ((ecx1 >> 30) & 1u) {
+        unsigned long long val = 0;
+        unsigned char ok = 0;
+        for (int tries = 0; tries < 10 && !ok; tries++) {
+            __asm__ volatile("rdrand %0\n\tsetc %1" : "=r"(val), "=qm"(ok));
+        }
+        if (ok) return val;
+    }
     unsigned int lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    unsigned long long seed = (((unsigned long long)hi << 32) | lo) ^ 0x9E3779B97F4A7C15ULL;
-    return 3 + (unsigned int)(seed % 31);
+    return ((unsigned long long)hi << 32) | lo;
 }
 
-// Same idea for the isolated-task page-table pool (1 PD slot, 2MB - the
-// pool itself is only 64KB, the rest of the huge page is just unused
-// padding, cheap to spend for the address-space spread). Range [50,64):
-// disjoint from the heap's OWN OCCUPIED footprint by construction - heap
-// candidates start at [3,34) (floor moved from 2 - see kheap_pick_pd_index)
-// and each occupies 16 CONSECUTIVE slots, so the heap can occupy at most
-// [3,49) - starting the pool's range at 50 keeps collision impossible
-// without needing to check for one at runtime. Top of range (63) plus
-// its 2MB stays under 128MB RAM.
+// KASLR: какой PD-слот занимает куча ядра (16 huge pages подряд).
+//
+// ВАЖНО (реальный вывод из отладки этой самой функции): куча ОСТАЁТСЯ
+// identity-mapped (VA==PA) - разводить их было соблазнительно ради куда
+// большей энтропии (адрес куда угодно в 64-битном пространстве, не
+// только в первых 128МБ), но за одну сессию отладки нашёлся реальный
+// double fault при переключении задач (schedule() падает на чтении
+// current_task->rsp - сам current_task живёт в этой же куче), причину
+// которого не удалось надёжно локализовать в разумное время. Раз
+// физическая RAM всё равно ограничена QEMU-шными 128МБ по умолчанию (см.
+// коммент у KHEAP_PAGES ниже), а identity-mapping требует VA==PA -
+// реальный потолок энтропии тут максимум ~6 бит (число 2МБ-выровненных
+// стартов в 128МБ) НЕЗАВИСИМО от того, сколько уровней таблиц
+// использовать - гнаться за "настоящим 64-битным" адресом означало бы
+// либо разводить VA/PA (см. риск выше), либо расширять RAM за пределы
+// принятого по умолчанию (отдельное решение, тут не делается). Вместо
+// этого - используем ПОЧТИ ВЕСЬ доступный диапазон (было [3,34), стало
+// [3,48) - на 14 больше кандидатов) и берём RDRAND вместо чистого RDTSC
+// для сида - и то, и другое безопасно, без разводки VA/PA и её сюрпризов.
+//
+// Range [3,48): PD[0]/[1] всегда identity-map/user-program-slots, PD[2]
+// тоже фиксирован (FAT12, см. fat12.c). Верхняя граница 48 (не 64) -
+// оставляет [48,64) под пул (см. kpool_pick_pd_index) без пересечения.
+static unsigned int kheap_pick_pd_index(void) {
+    return 3 + (unsigned int)(early_random64() % 45ULL);
+}
+
+// Пул изолированных задач - тот же приём, [48,64): 16 вариантов,
+// disjoint от кучи по построению (куча max занимает [3,48), см. выше).
 static unsigned int kpool_pick_pd_index(void) {
-    unsigned int lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    unsigned long long seed = (((unsigned long long)hi << 32) | lo) ^ 0xC2B2AE3D27D4EB4FULL;
-    return 50 + (unsigned int)(seed % 14);
+    return 48 + (unsigned int)(early_random64() % 16ULL);
 }
 
 void init_paging() {
