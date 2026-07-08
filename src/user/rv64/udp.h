@@ -22,7 +22,7 @@ static int udp_send(unsigned int dst_ip, unsigned short dst_port, unsigned short
 
     unsigned char dst_mac[6], my_mac[6];
     if (!net_mac(my_mac)) return -1;
-    if (!arp_resolve(dst_ip, dst_mac, 2000)) return -1;
+    if (!arp_resolve_next_hop(dst_ip, dst_mac, 2000)) return -1;
 
     unsigned char *eth = udp_tx;
     for (int i = 0; i < 6; i++) eth[i] = dst_mac[i];

@@ -30,6 +30,14 @@
 static unsigned int g_my_ip = IP4(10, 0, 2, 15);
 #define MY_IP g_my_ip
 
+// Маска подсети и гейтвей - умолчания совпадают с тем, что реально
+// раздаёт QEMU SLIRP; dhcp.h (dhcp_client()) перезаписывает их настоящими
+// значениями из ACK, как и g_my_ip. Нужны исключительно для
+// arp_resolve_next_hop() ниже - без них нет способа отличить "адрес в
+// нашей локальной сети" от "адрес где-то в интернете".
+static unsigned int g_subnet_mask = IP4(255, 255, 255, 0);
+static unsigned int g_router_ip   = IP4(10, 0, 2, 2);
+
 #define ARP_CACHE_SIZE 8
 
 typedef struct {
@@ -177,4 +185,23 @@ static int arp_resolve(unsigned int ip, unsigned char mac_out[6], unsigned int t
         waited += 20;
     }
     return 0;
+}
+
+// Резолвит MAC для ОТПРАВКИ пакета на dst_ip: если dst_ip лежит в нашей
+// локальной подсети - резолвит его напрямую (как раньше); иначе резолвит
+// гейтвей (g_router_ip) - Ethernet-кадр идёт до гейтвея, а IP-заголовок
+// внутри всё равно адресован настоящему dst_ip, гейтвей сам разберётся,
+// куда слать дальше. Без этого шага ЛЮБОЙ реальный интернет-адрес был бы
+// недостижим - ARP на адрес за пределами локального сегмента никто и
+// никогда не ответит (гейтвей отвечает только за СВОЙ адрес, а настоящий
+// интернет-хост физически не увидит наш L2-broadcast). Все более ранние
+// ICMP/UDP-тесты этой сети везло - и гейтвей (10.0.2.2), и DNS (10.0.2.3)
+// сами лежат в локальной подсети, так что резолвились напрямую без
+// маршрутизации - этот пробел не проявлялся, пока не появился первый
+// тест на настоящий адрес в интернете (см. tcp.h/httpget.c).
+static int arp_resolve_next_hop(unsigned int dst_ip, unsigned char mac_out[6],
+                                 unsigned int timeout_ms) {
+    unsigned int local = ((dst_ip & g_subnet_mask) == (MY_IP & g_subnet_mask));
+    unsigned int next_hop = local ? dst_ip : g_router_ip;
+    return arp_resolve(next_hop, mac_out, timeout_ms);
 }

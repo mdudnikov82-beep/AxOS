@@ -387,6 +387,26 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\dhcptest_rv64.elf) do echo   dhcptest_rv64.elf: %%~zF bytes
 
+echo [U56] httpget.c...
+"%CC%" %UFLAGS% -c %USRC%\httpget.c -o %OUT%\uhttpget.o
+if %errorlevel% neq 0 goto :error
+
+echo [U57] Linking httpget...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\httpget_rv64.elf %OUT%\ucrt0.o %OUT%\uhttpget.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\httpget_rv64.elf) do echo   httpget_rv64.elf: %%~zF bytes
+
+echo [U58] tcptest.c...
+"%CC%" %UFLAGS% -c %USRC%\tcptest.c -o %OUT%\utcptest.o
+if %errorlevel% neq 0 goto :error
+
+echo [U59] Linking tcptest...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\tcptest_rv64.elf %OUT%\ucrt0.o %OUT%\utcptest.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\tcptest_rv64.elf) do echo   tcptest_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -418,6 +438,8 @@ copy /b %OUT%\arpserve_rv64.elf    rv64build\fs\rv64\ARPSERVE.ELF
 copy /b %OUT%\dnstest_rv64.elf     rv64build\fs\rv64\DNSTEST.ELF
 copy /b %OUT%\icmpsrv_rv64.elf     rv64build\fs\rv64\ICMPSRV.ELF
 copy /b %OUT%\dhcptest_rv64.elf    rv64build\fs\rv64\DHCPTEST.ELF
+copy /b %OUT%\httpget_rv64.elf     rv64build\fs\rv64\HTTPGET.ELF
+copy /b %OUT%\tcptest_rv64.elf     rv64build\fs\rv64\TCPTEST.ELF
 if %errorlevel% neq 0 goto :error
 
 python tools\make_fat12_rv64.py

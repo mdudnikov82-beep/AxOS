@@ -203,5 +203,10 @@ static int dhcp_client(unsigned int timeout_ms) {
     if (!dhcp_wait_for(DHCP_ACK, xid, timeout_ms, &acked_ip, 0)) return 0;
 
     g_my_ip = acked_ip;
+    // Так же обновляем g_subnet_mask/g_router_ip (arp.h) - без этого
+    // arp_resolve_next_hop() продолжал бы считать подсеть/гейтвей теми же,
+    // что были заданы статикой по умолчанию, даже если DHCP выдал другие.
+    if (dhcp_subnet_mask) g_subnet_mask = dhcp_subnet_mask;
+    if (dhcp_router_ip)   g_router_ip   = dhcp_router_ip;
     return 1;
 }

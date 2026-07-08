@@ -107,7 +107,7 @@ static int icmp_ping(unsigned int dst_ip, unsigned short seq,
                       unsigned int timeout_ms, unsigned long *rtt_ms_out) {
     unsigned char dst_mac[6], my_mac[6];
     if (!net_mac(my_mac)) return 0;
-    if (!arp_resolve(dst_ip, dst_mac, 2000)) return 0;
+    if (!arp_resolve_next_hop(dst_ip, dst_mac, 2000)) return 0;
 
     unsigned char *eth = icmp_tx;
     for (int i = 0; i < 6; i++) eth[i] = dst_mac[i];
