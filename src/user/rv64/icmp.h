@@ -55,7 +55,7 @@ static int icmp_ping(unsigned int dst_ip, unsigned short seq,
     ip[8] = 64;                              // TTL
     ip[9] = IP_PROTO_ICMP;
     ip[10] = 0; ip[11] = 0;                  // checksum - заполняется ниже
-    unsigned int my_ip = ARP_PLACEHOLDER_MY_IP;
+    unsigned int my_ip = MY_IP;
     ip[12] = (unsigned char)(my_ip >> 24); ip[13] = (unsigned char)(my_ip >> 16);
     ip[14] = (unsigned char)(my_ip >> 8);  ip[15] = (unsigned char)my_ip;
     ip[16] = (unsigned char)(dst_ip >> 24); ip[17] = (unsigned char)(dst_ip >> 16);

@@ -1,9 +1,10 @@
 #pragma once
 
-// Минимальный ARP поверх virtio-net (см. virtio_net.c/SYS_NET_*) - только
-// резолв "IPv4 -> MAC" исходящими запросами. Обработки ВХОДЯЩИХ ARP-запросов
-// (кто-то спрашивает НАШ IP) тут нет - у гостя пока нет настоящего IP
-// (ни статики, ни DHCP), это придёт вместе со слоем IPv4.
+// Минимальный ARP поверх virtio-net (см. virtio_net.c/SYS_NET_*): резолв
+// "IPv4 -> MAC" исходящими запросами (arp_resolve) и ответ на входящие
+// запросы, адресованные нашему собственному IP (arp_maybe_respond) - раз
+// гость теперь честно "владеет" MY_IP (см. ниже), отвечать на "кто держит
+// MY_IP?" правильно и обязательно, а не просто вежливо.
 //
 // Header-only библиотека в стиле malloc.h/gfx_ui.h этого же каталога:
 // подключается в один .c-файл, который линкуется в отдельный ELF - каждая
@@ -19,11 +20,15 @@
     (((unsigned int)(a) << 24) | ((unsigned int)(b) << 16) | \
      ((unsigned int)(c) << 8)  |  (unsigned int)(d))
 
-// Пока у гостя нет настоящего IP (ни DHCP, ни статики) - используем этот
-// как sender IP в исходящих ARP-запросах. QEMU SLIRP отвечает и без
-// предварительного "владения" этим адресом (в отличие от настоящей сети,
-// где ARP с чужим/поддельным sender IP может быть недружелюбно встречен).
-#define ARP_PLACEHOLDER_MY_IP IP4(10, 0, 2, 15)
+// Статический IP гостя. Не DHCP (DHCP-клиента в проекте пока нет - это
+// отдельный, больший кусок работы: UDP-слой плюс сам протокол DISCOVER/
+// OFFER/REQUEST/ACK) - просто зашитое здесь значение, которое QEMU SLIRP
+// готов маршрутизировать (тот же 10.0.2.0/24, что и гейтвей 10.0.2.2/DNS
+// 10.0.2.3). В отличие от прежней версии этого файла, теперь это не
+// "заглушка, которая случайно прокатывает" - arp_maybe_respond() ниже
+// реально отвечает на "кто держит MY_IP?", так что гость по-настоящему
+// достижим по этому адресу с точки зрения ARP.
+#define MY_IP IP4(10, 0, 2, 15)
 
 #define ARP_CACHE_SIZE 8
 
@@ -85,7 +90,7 @@ static void arp_send_request(unsigned int ip) {
     a[4] = 6; a[5] = 4;            // hlen/plen
     arp__put16be(a + 6, 1);        // oper = request
     for (int i = 0; i < 6; i++) a[8 + i] = arp_my_mac[i];
-    unsigned int my_ip = ARP_PLACEHOLDER_MY_IP;
+    unsigned int my_ip = MY_IP;
     a[14] = (unsigned char)(my_ip >> 24); a[15] = (unsigned char)(my_ip >> 16);
     a[16] = (unsigned char)(my_ip >> 8);  a[17] = (unsigned char)my_ip;
     for (int i = 0; i < 6; i++) a[18 + i] = 0;   // target MAC (неизвестен)
@@ -116,6 +121,44 @@ static int arp_handle_frame(const unsigned char *rx, unsigned int n,
     return 0;
 }
 
+// Проверяет, не входящий ли это ARP-запрос НАШЕГО MY_IP - и если да, шлёт
+// корректный ARP-ответ (unicast запросившему, а не broadcast). Возвращает
+// 1, если ответили (кадр обработан), 0 если это был не такой запрос (кадр
+// не наш - вызывающий может проверить его на что-то другое).
+static int arp_maybe_respond(const unsigned char *rx, unsigned int n) {
+    if (n < 42) return 0;
+    if (rx[12] != 0x08 || rx[13] != 0x06) return 0;   // ethertype != ARP
+    if (rx[20] != 0x00 || rx[21] != 0x01) return 0;   // oper != request
+
+    // ARP-payload с offset 14: htype(14-15) ptype(16-17) hlen(18) plen(19)
+    // oper(20-21) sha(22-27) spa(28-31) tha(32-37) tpa(38-41) - tpa (target
+    // IP), а НЕ 24-27 (это середина sha соседнего запроса).
+    unsigned int target_ip = ((unsigned int)rx[38] << 24) | ((unsigned int)rx[39] << 16) |
+                             ((unsigned int)rx[40] << 8)  |  (unsigned int)rx[41];
+    if (target_ip != MY_IP) return 0;   // не про нас
+
+    if (!arp_my_mac_ok) arp_my_mac_ok = net_mac(arp_my_mac);
+
+    unsigned char reply[42];
+    for (int i = 0; i < 6; i++) reply[i]     = rx[22 + i];    // dst = запросивший
+    for (int i = 0; i < 6; i++) reply[6 + i] = arp_my_mac[i]; // src = мы
+    arp__put16be(reply + 12, 0x0806);
+
+    unsigned char *a = reply + 14;
+    arp__put16be(a + 0, 1); arp__put16be(a + 2, 0x0800);
+    a[4] = 6; a[5] = 4;
+    arp__put16be(a + 6, 2);   // oper = reply
+    for (int i = 0; i < 6; i++) a[8 + i] = arp_my_mac[i];
+    unsigned int my_ip = MY_IP;
+    a[14] = (unsigned char)(my_ip >> 24); a[15] = (unsigned char)(my_ip >> 16);
+    a[16] = (unsigned char)(my_ip >> 8);  a[17] = (unsigned char)my_ip;
+    for (int i = 0; i < 6; i++) a[18 + i] = rx[22 + i];   // target MAC = запросивший (его sha)
+    a[24] = rx[28]; a[25] = rx[29]; a[26] = rx[30]; a[27] = rx[31]; // target IP = его spa (sender IP)
+
+    net_send(reply, sizeof(reply));
+    return 1;
+}
+
 // Резолвит ip -> MAC. Сначала смотрит в кэше; если нет - шлёт запрос и ждёт
 // до timeout_ms (поллинг net_recv() каждые 20мс). Возвращает 1/0.
 static int arp_resolve(unsigned int ip, unsigned char mac_out[6], unsigned int timeout_ms) {
@@ -126,7 +169,10 @@ static int arp_resolve(unsigned int ip, unsigned char mac_out[6], unsigned int t
     unsigned int waited = 0;
     while (waited < timeout_ms) {
         unsigned int n = net_recv(arp_rx_buf, sizeof(arp_rx_buf));
-        if (n > 0 && arp_handle_frame(arp_rx_buf, n, ip, mac_out)) return 1;
+        if (n > 0) {
+            if (arp_handle_frame(arp_rx_buf, n, ip, mac_out)) return 1;
+            arp_maybe_respond(arp_rx_buf, n);   // заодно отвечаем, если это спрашивали НАС
+        }
         sleep_ms(20);
         waited += 20;
     }
