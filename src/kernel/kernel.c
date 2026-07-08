@@ -54,9 +54,8 @@
 // и валит систему в #GP -> тройной сбой"). ~32 КБ static-буфера тут же
 // утащили __bss_end далеко за 0x7c00 - проверено на практике (boot
 // триггерил ровно это: #GP -> #DF -> Triple fault). Поэтому, как и
-// PAGE_DIRECTORY/PAGE_TABLE (paging.h) и PD_POOL_BASE/PT_POOL_BASE -
-// фиксированный физический адрес в свободной зоне сразу после пула
-// PD/PT (0x124000+0x4000=0x128000), а не часть кучи ядра.
+// PAGE_DIRECTORY (paging.h) - фиксированный физический адрес в свободной
+// зоне, а не часть кучи ядра.
 #define ELF_STAGING_SIZE (USER_ARGS_OFFSET + 0x200)
 #define ELF_STAGING_BASE 0x150000
 #define elf_staging_buf ((unsigned char*)ELF_STAGING_BASE)

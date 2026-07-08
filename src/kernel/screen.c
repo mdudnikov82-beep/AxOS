@@ -30,11 +30,11 @@ struct tty_state {
 // разрастался настолько, что заезжал на 0x7C00-0x7DFF - память загрузочного
 // сектора, где живёт GDT! init_ttys() тогда буквально затирал GDT пробелами,
 // и первое же обращение к сегментному регистру (ltr/смена CS) роняло систему
-// с #GP -> тройной сбой. См. тот же приём в paging.h (PAGE_DIRECTORY/
-// PAGE_TABLE) и tss.c (TSS_BASE) - оба по той же причине лежат в свободном
-// промежутке 0x130000+ (после пула PD/PT изолированных задач, kernel.c/
-// paging.h: PT_POOL_BASE=0x124000 + 4*0x1000 = заканчивается на 0x128000),
-// а не в .bss.
+// с #GP -> тройной сбой. См. тот же приём в paging.h (PAGE_DIRECTORY) и
+// tss.c (TSS_BASE) - оба по той же причине лежат по фиксированным
+// физическим адресам, а не в .bss. (Пул PD/PT изолированных задач с
+// KASLR-lite больше не фиксированный сосед в этом диапазоне - см.
+// g_pool_base в paging.h.)
 #define TTYS_BASE 0x158000
 static struct tty_state* const ttys = (struct tty_state*) TTYS_BASE;
 static int active_tty = 0;

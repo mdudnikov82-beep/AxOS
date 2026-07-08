@@ -14,6 +14,9 @@
 //   (KASLR-lite - индекс случайный каждую загрузку, см. g_kheap_base
 //   comment ниже) - тот же PDPT[0]/PML4[0] уже покрывают этот диапазон,
 //   отдельных таблиц не нужно.
+//   PD[g_pool_pd_index] = 2МБ huge page: пул приватных таблиц изолированных
+//   задач (тоже KASLR-lite, см. g_pool_base в paging.h) - отдельный слот,
+//   не пересекается по построению с диапазоном кандидатов кучи.
 //
 // W^X: бит 63 PTE = XD (Execute-Disable) при EFER.NXE=1.
 
@@ -39,6 +42,8 @@ static int g_smap = 0;
 
 unsigned long long g_kheap_base;     // set once, randomly, below - see paging.h
 static unsigned int g_kheap_pd_index;
+unsigned long long g_pool_base;      // set once, randomly, below - see paging.h
+static unsigned int g_pool_pd_index;
 
 // KASLR-lite: which PD slot the kernel heap's 16 huge pages start at.
 // RDTSC, not timer_ticks: init_paging() runs before init_idt(), so the
@@ -53,6 +58,21 @@ static unsigned int kheap_pick_pd_index(void) {
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     unsigned long long seed = (((unsigned long long)hi << 32) | lo) ^ 0x9E3779B97F4A7C15ULL;
     return 2 + (unsigned int)(seed % 32);
+}
+
+// Same idea for the isolated-task page-table pool (1 PD slot, 2MB - the
+// pool itself is only 64KB, the rest of the huge page is just unused
+// padding, cheap to spend for the address-space spread). Range [50,64):
+// disjoint from the heap's OWN OCCUPIED footprint by construction - heap
+// candidates start at [2,34) and each occupies 16 CONSECUTIVE slots, so
+// the heap can occupy at most [2,50) - starting the pool's range exactly
+// at 50 makes collision impossible without needing to check for one at
+// runtime. Top of range (63) plus its 2MB stays under 128MB RAM.
+static unsigned int kpool_pick_pd_index(void) {
+    unsigned int lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    unsigned long long seed = (((unsigned long long)hi << 32) | lo) ^ 0xC2B2AE3D27D4EB4FULL;
+    return 50 + (unsigned int)(seed % 14);
 }
 
 void init_paging() {
@@ -126,6 +146,13 @@ void init_paging() {
     for (unsigned int i = 0; i < KHEAP_PAGES; i++)
         pd[g_kheap_pd_index + i] = (pae_t)(g_kheap_base + i * 0x200000ULL) | kheap_flags;
 
+    // PD[g_pool_pd_index]: isolated-task PML4/PDPT/PD/PT pool (see
+    // g_pool_base comment in paging.h) - one huge page, same kernel-only
+    // NX flags as the heap (pure data, never code).
+    g_pool_pd_index = kpool_pick_pd_index();
+    g_pool_base = (unsigned long long)g_pool_pd_index * 0x200000ULL;
+    pd[g_pool_pd_index] = (pae_t)g_pool_base | kheap_flags;
+
     // PDPT и PML4 уже настроены boot.asm; проверяем/обновляем флаги.
     // boot ставил US=1 на оба, что нам и нужно.
     pdpt[0] = (pae_t)pd | PAE_P | PAE_RW | PAE_USER;
@@ -192,11 +219,14 @@ unsigned long long paging_create_user_directory(int user_slot_index,
                                                  unsigned int phys_slot_base,
                                                  unsigned int wx_delta,
                                                  unsigned int wx_data_off) {
-    // Пул: каждый слот (0..3) получает по одной 4КБ-странице на уровень.
-    pae_t* dst_pml4 = (pae_t*)(PML4_POOL_BASE + (unsigned int)user_slot_index * PAGE_SIZE);
-    pae_t* dst_pdpt = (pae_t*)(PDPT_POOL_BASE + (unsigned int)user_slot_index * PAGE_SIZE);
-    pae_t* dst_pd   = (pae_t*)(PD_POOL_BASE   + (unsigned int)user_slot_index * PAGE_SIZE);
-    pae_t* dst_pt   = (pae_t*)(PT_POOL_BASE   + (unsigned int)user_slot_index * PAGE_SIZE);
+    // Пул: каждый слот (0..3) получает по одной 4КБ-странице на уровень,
+    // внутри случайной (KASLR-lite, см. g_pool_base в paging.h) 2МБ huge
+    // page вместо старых фиксированных адресов.
+    unsigned long long slot_off = (unsigned long long)user_slot_index * PAGE_SIZE;
+    pae_t* dst_pml4 = (pae_t*)(g_pool_base + POOL_PML4_OFF + slot_off);
+    pae_t* dst_pdpt = (pae_t*)(g_pool_base + POOL_PDPT_OFF + slot_off);
+    pae_t* dst_pd   = (pae_t*)(g_pool_base + POOL_PD_OFF   + slot_off);
+    pae_t* dst_pt   = (pae_t*)(g_pool_base + POOL_PT_OFF   + slot_off);
 
     // Копируем GLOBAL_PT0 в dst_pt, убирая USER (ring3 не видит ядро).
     pae_t* src_pt = GLOBAL_PT0;
@@ -247,6 +277,16 @@ unsigned long long paging_create_user_directory(int user_slot_index,
     dst_pd[1] = pd1;
     for (unsigned int i = 0; i < KHEAP_PAGES; i++)
         dst_pd[g_kheap_pd_index + i] = GLOBAL_PD[g_kheap_pd_index + i] & ~PAE_USER;
+
+    // Пул тоже больше не часть первых 2МБ (см. g_pool_base в paging.h) -
+    // без этой записи ЛЮБОЙ следующий run() (например, изнутри SH.BIN,
+    // которая сама изолированная задача) поймал бы #PF в этой же функции
+    // при попытке записать в dst_pml4/pdpt/pd/pt СЛЕДУЮЩЕЙ создаваемой
+    // задачи, работая уже под CR3 этой задачи. Самоссылочно (dst_pd сам
+    // живёт внутри пула, чью запись мы тут копируем) - это нормально: мы
+    // просто пишем в память по текущему (ещё активному, вызывающему) CR3,
+    // а не под CR3 задачи, которую только что создаём.
+    dst_pd[g_pool_pd_index] = GLOBAL_PD[g_pool_pd_index] & ~PAE_USER;
 
     // dst_pdpt: [0] → dst_pd.
     dst_pdpt[0] = (pae_t)dst_pd | PAE_P | PAE_RW | PAE_USER;

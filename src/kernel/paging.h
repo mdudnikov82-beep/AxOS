@@ -2,11 +2,14 @@
 #define PAGING_H
 
 // 4-уровневая страничная адресация (PML4 → PDPT → PD → PT).
-// Глобальные таблицы (identity-map первых 4 МБ + 32 МБ кучи, см. ниже):
+// Глобальные таблицы (identity-map первых 4 МБ + 32 МБ кучи + пул
+// изолированных задач, см. ниже):
 //   0x9C000 - PML4 (512 × 8Б) — CR3 для ядровых задач
 //   0x9D000 - PDPT (512 × 8Б)
 //   0x9E000 - PD   (512 × 8Б): [0] → PT0, [1] = 2МБ huge page (2-4МБ),
-//                              [2..2+KHEAP_PAGES-1] = 2МБ huge pages кучи
+//                              [g_kheap_pd_index..+KHEAP_PAGES-1] = куча,
+//                              [g_pool_pd_index] = пул изолированных задач
+//                              (оба - KASLR-lite, случайные каждую загрузку)
 //   0x9F000 - PT0  (512 × 8Б, VA 0x000000-0x1FFFFF)
 #define GLOBAL_PML4 ((unsigned long long*)0x9C000)
 #define GLOBAL_PDPT ((unsigned long long*)0x9D000)
@@ -42,15 +45,34 @@ extern unsigned long long g_kheap_base;
 #define PAGE_DIRECTORY 0x9C000ULL
 
 // Пул приватных PML4/PDPT/PD/PT для изолированных ring3-задач (до 4 штук).
-// 0x140000-0x14FFFF: 4 слота × 4 таблицы × 4КБ = 64КБ.
-//   PML4_POOL: 0x140000-0x143FFF (4 × 4КБ)
-//   PDPT_POOL: 0x144000-0x147FFF
-//   PD_POOL:   0x148000-0x14BFFF
-//   PT_POOL:   0x14C000-0x14FFFF
-#define PML4_POOL_BASE 0x140000
-#define PDPT_POOL_BASE 0x144000
-#define PD_POOL_BASE   0x148000
-#define PT_POOL_BASE   0x14C000
+// Раньше жил на фиксированных 0x140000-0x14FFFF - внутри первых 2МБ,
+// которые целиком копируются (GLOBAL_PT0 -> dst_pt) в КАЖДУЮ изолированную
+// задачу, так что доступность пула под чужим CR3 доставалась "бесплатно",
+// как побочный эффект.
+//
+// KASLR-lite: пул переехал в свою собственную 2МБ huge page на случайном
+// PD-слоте (g_pool_base, выбирается в init_paging() отдельно от кучи -
+// см. её комментарий у g_kheap_base; кандидаты [PD[50], PD[64)) намеренно
+// НЕ пересекаются с диапазоном кандидатов кучи [PD[2], PD[34)), даже с
+// учётом того, что куча занимает 16 слотов подряд от своего старта - и то,
+// и другое остаётся внутри QEMU-шных 128МБ RAM по умолчанию). Раз пул
+// больше не часть первых 2МБ, его PD-запись теперь ЯВНО копируется в
+// каждую изолированную задачу в paging_create_user_directory() - иначе
+// первый же run() ИЗНУТРИ уже запущенной изолированной задачи (например,
+// `run X` в AxSH, а сам SH.BIN - тоже изолированная задача) поймал бы #PF
+// прямо в момент записи новых таблиц в пул.
+//
+// Слоты (4 штуки) размещены внутри этой 2МБ страницы по тем же смещениям,
+// что раньше были абсолютными адресами:
+//   PML4_POOL: +0x0000..+0x3FFF (4 × 4КБ)
+//   PDPT_POOL: +0x4000..+0x7FFF
+//   PD_POOL:   +0x8000..+0xBFFF
+//   PT_POOL:   +0xC000..+0xFFFF
+extern unsigned long long g_pool_base;
+#define POOL_PML4_OFF 0x0000ULL
+#define POOL_PDPT_OFF 0x4000ULL
+#define POOL_PD_OFF   0x8000ULL
+#define POOL_PT_OFF   0xC000ULL
 
 // Виртуальное окно пользователя [USER_WINDOW_BASE, +SIZE).
 // USER_SPIN_ADDR — последние 2 байта окна: "jmp $" (EB FE) для spin.
