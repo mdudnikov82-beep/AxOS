@@ -10,7 +10,7 @@
  * by owning non-overlapping screen rectangles. */
 
 #define WIN_TITLE_H 14
-#define WIN_RADIUS  4   /* see gfx_ui.h UI_MAX_R comment - keep this <= 4 */
+#define WIN_RADIUS  16   /* matches x86 gfx_shell.c's CARD_R - see gfx_ui.h UI_MAX_R */
 
 typedef struct {
     unsigned int x, y, w, h;

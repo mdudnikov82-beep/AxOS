@@ -13,7 +13,7 @@
 
 #define TOOLBAR_H    36  /* was a bare 20px strip of flat swatches */
 #define SWATCH_GAP   4
-#define SWATCH_R     4   /* see gfx_ui.h UI_MAX_R comment - keep this <= 4 */
+#define SWATCH_R     8   /* swatches are only ~32px tall - a bigger radius (like window.h's 16) would look like a blob */
 #define BRUSH        6
 
 static const unsigned int NUM_COLORS = 6;

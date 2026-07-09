@@ -49,8 +49,8 @@ int main(void) {
     for (unsigned int i = 0; i < n_icons; i++) {
         int x = (int)(start_x + i * (ICON_W + ICON_GAP));
         ui_shadow(x, ICON_TOP, ICON_W, ICON_H, 5, 90);
-        /* radius <= gfx_ui.h's UI_MAX_R (4) - see the comment there */
-        ui_round_rect(x, ICON_TOP, ICON_W, ICON_H, 4, gfx_rgb(255, 255, 255), icons[i].color);
+        /* matches x86 gfx_shell.c's ICON_R - see gfx_ui.h's UI_MAX_R comment */
+        ui_round_rect(x, ICON_TOP, ICON_W, ICON_H, 14, gfx_rgb(255, 255, 255), icons[i].color);
         gfx_draw_text((unsigned int)x + 6, ICON_TOP + ICON_H / 2 - 4, icons[i].label, gfx_rgb(0, 0, 0));
     }
     gfx_flush();

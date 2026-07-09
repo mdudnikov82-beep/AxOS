@@ -1,14 +1,19 @@
 #pragma once
 
-// Разрешение фреймбуфера. 640x480x32bpp = 1200 КБ — укладывается в наш
-// bump-аллокатор без проблем (RAM 128 МБ).
-#define GPU_FB_WIDTH  640
-#define GPU_FB_HEIGHT 480
+// Разрешение фреймбуфера. 800x600x32bpp = 1875 КБ — укладывается в наш
+// bump-аллокатор без проблем (RAM 128 МБ). Было 640x480 - поднято, чтобы
+// сравняться с x86-стороной (gfx_shell.c, тоже 800x600); все потребители
+// (console.c, kernel_main.c, syscall.c's SYS_GFX_INFO, virtio_input.c) и
+// все userspace GUI-программы уже параметризованы через эти константы
+// или читают их динамически через gfx_info() - менять больше нигде не
+// нужно.
+#define GPU_FB_WIDTH  800
+#define GPU_FB_HEIGHT 600
 
 // Инициализирует VirtIO-GPU (2D-режим, без 3D/virgl) по MMIO на QEMU virt:
-// сканирует 8 MMIO-слотов, создаёт resource 640x480 B8G8R8A8, аллоцирует
-// linear framebuffer в guest RAM, приаттачивает его как backing store и
-// назначает на scanout 0.
+// сканирует 8 MMIO-слотов, создаёт resource GPU_FB_WIDTH x GPU_FB_HEIGHT
+// B8G8R8A8, аллоцирует linear framebuffer в guest RAM, приаттачивает его
+// как backing store и назначает на scanout 0.
 // Возвращает 0 при успехе, -1 если устройство не найдено/init не удался.
 int virtio_gpu_init(void);
 

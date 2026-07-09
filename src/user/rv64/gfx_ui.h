@@ -71,19 +71,25 @@ static void ui_shadow(int x, int y, int w, int h, int off, unsigned char alpha) 
  * everything else, or a later flat draw over the title bar area would
  * re-square a corner the punch already rounded.
  *
- * UI_MAX_R MUST stay tiny: a RISC-V user process here gets exactly ONE
- * 4KB page of stack (elf_loader.h's USER_STACK_VA), for its ENTIRE call
- * chain - not just this header. A first attempt at UI_MAX_R=16 (4 corners
- * x 16x16 int = 4096 bytes, the save buffer ALONE) blew straight through
- * that page and store-page-faulted axdesk.elf on startup. UI_MAX_R=4 (4 x
- * 4x4 int = 256 bytes) is what's actually safe; the corner radius is
- * correspondingly small (a subtle rounding, not x86 gfx_shell's much
- * bigger 12-16px one - that side has a real multi-KB kernel stack per
- * task and draws straight into its own backbuf, no per-pixel syscalls or
- * save buffers needed at all). */
-#define UI_MAX_R 4
+ * UI_MAX_R used to be capped at 4: a RISC-V user process here gets
+ * exactly ONE 4KB page of stack (elf_loader.h's USER_STACK_VA), for its
+ * ENTIRE call chain - not just this header. A first attempt at
+ * UI_MAX_R=16 with the save buffer declared LOCAL (on that stack) blew
+ * straight through the page and store-page-faulted axdesk.elf on
+ * startup. Fixed by moving `save` to static storage (BSS) below - same
+ * trick the network stack already uses for its own oversized buffers
+ * (tcp_rx/tcp_tx/dns_cache/tcp_slots, see memory
+ * project_riscv_single_page_stack) - static data isn't bound by the
+ * single-page stack limit, so UI_MAX_R can now match x86 gfx_shell's
+ * radius (CARD_R=16/ICON_R=14) instead of being ~4x smaller. */
+#define UI_MAX_R 16
 static const int ui_corner_dx[4] = {0,1,0,1};   /* 1 = mirror this corner's dx */
 static const int ui_corner_dy[4] = {0,0,1,1};   /* 1 = mirror this corner's dy */
+
+/* static, not a local - see the UI_MAX_R comment above. Single global
+ * scratch buffer is fine: this UI is single-threaded/non-reentrant by
+ * construction (one window/icon drawn at a time, never mid-redraw). */
+static unsigned int ui_round_save_buf[4][UI_MAX_R*UI_MAX_R];
 
 static void ui_round_save(int x, int y, int w, int h, int r,
                           unsigned int save[4][UI_MAX_R*UI_MAX_R], int cx[4], int cy[4]) {
@@ -109,27 +115,27 @@ static void ui_round_punch(int x, int y, int r,
 /* Plain rounded card (icons): 2px border + inset body, corners rounded. */
 static void ui_round_rect(int x, int y, int w, int h, int r,
                           unsigned int border, unsigned int body) {
-    unsigned int save[4][UI_MAX_R*UI_MAX_R]; int cx[4], cy[4];
-    ui_round_save(x, y, w, h, r, save, cx, cy);
+    int cx[4], cy[4];
+    ui_round_save(x, y, w, h, r, ui_round_save_buf, cx, cy);
 
     gfx_fill_rect((unsigned int)x, (unsigned int)y, (unsigned int)w, (unsigned int)h, border);
     gfx_fill_rect((unsigned int)(x+2), (unsigned int)(y+2), (unsigned int)(w-4), (unsigned int)(h-4), body);
 
-    ui_round_punch(x, y, r, save, cx, cy);
+    ui_round_punch(x, y, r, ui_round_save_buf, cx, cy);
 }
 
 /* Rounded window with a gradient title bar + label (window.h's chrome). */
 static void ui_round_window(int x, int y, int w, int h, int r, int title_h,
                             unsigned int border, unsigned int body, const char *title) {
-    unsigned int save[4][UI_MAX_R*UI_MAX_R]; int cx[4], cy[4];
-    ui_round_save(x, y, w, h, r, save, cx, cy);
+    int cx[4], cy[4];
+    ui_round_save(x, y, w, h, r, ui_round_save_buf, cx, cy);
 
     gfx_fill_rect((unsigned int)x, (unsigned int)y, (unsigned int)w, (unsigned int)h, border);
     gfx_fill_rect((unsigned int)(x+2), (unsigned int)(y+2), (unsigned int)(w-4), (unsigned int)(h-4), body);
     ui_vgrad((unsigned int)(x+2), (unsigned int)(y+2), (unsigned int)(w-4), (unsigned int)title_h,
             ui_blend(border, 0xFFFFFFFFu, 50), border);
 
-    ui_round_punch(x, y, r, save, cx, cy);
+    ui_round_punch(x, y, r, ui_round_save_buf, cx, cy);
 
     /* Text drawn LAST, after the corner punch, and nudged in from the
      * very corner so the rounding curve never clips a letter. */
