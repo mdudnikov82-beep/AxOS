@@ -397,6 +397,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\httpget_rv64.elf) do echo   httpget_rv64.elf: %%~zF bytes
 
+echo [U57b] dnscachet.c...
+"%CC%" %UFLAGS% -c %USRC%\dnscachet.c -o %OUT%\udnscachet.o
+if %errorlevel% neq 0 goto :error
+
+echo [U57c] Linking dnscachet...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\dnscachet_rv64.elf %OUT%\ucrt0.o %OUT%\udnscachet.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\dnscachet_rv64.elf) do echo   dnscachet_rv64.elf: %%~zF bytes
+
 echo [U58] tcptest.c...
 "%CC%" %UFLAGS% -c %USRC%\tcptest.c -o %OUT%\utcptest.o
 if %errorlevel% neq 0 goto :error
@@ -459,6 +469,7 @@ copy /b %OUT%\dnstest_rv64.elf     rv64build\fs\rv64\DNSTEST.ELF
 copy /b %OUT%\icmpsrv_rv64.elf     rv64build\fs\rv64\ICMPSRV.ELF
 copy /b %OUT%\dhcptest_rv64.elf    rv64build\fs\rv64\DHCPTEST.ELF
 copy /b %OUT%\httpget_rv64.elf     rv64build\fs\rv64\HTTPGET.ELF
+copy /b %OUT%\dnscachet_rv64.elf   rv64build\fs\rv64\DNSCACHE.ELF
 copy /b %OUT%\tcptest_rv64.elf     rv64build\fs\rv64\TCPTEST.ELF
 copy /b %OUT%\tcpserve_rv64.elf    rv64build\fs\rv64\TCPSERVE.ELF
 copy /b %OUT%\httpsrv_rv64.elf     rv64build\fs\rv64\HTTPSRV.ELF
