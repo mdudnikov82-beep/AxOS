@@ -42,20 +42,24 @@ static int parse_request_path(const unsigned char *req, unsigned int len,
     return 1;
 }
 
-// Шлёт len байт слоту idx, разбивая на куски по 512Б (сетевой предел
-// сегмента) и, если очередь слота (TCP_MUX_OUT_BUF_SIZE) переполнена
-// (tcp_mux_send() вернул -1), крутит tcp_mux_poll() - обслуживая заодно и
-// ДРУГИЕ слоты, не блокируясь тупым ожиданием - пока в очереди не
-// освободится место. На RISC-V буфер (8320Б) и так покрывает самый
-// крупный сегодняшний ответ (filebuf 8192Б + заголовок), но эта же
-// обвязка (без неё tcp_mux_send() молча вернул бы -1, а вызывающий код
-// это не проверял) страхует на будущее и держит оба httpsrv.c идентичными.
+// Шлёт len байт слоту idx, разбивая на куски (сетевой предел сегмента -
+// 512Б, НО не больше TCP_MUX_OUT_BUF_SIZE - кусок крупнее целой очереди
+// никогда бы не поместился, и цикл ожидания ниже завис бы навсегда) и,
+// если очередь слота переполнена (tcp_mux_send() вернул -1), крутит
+// tcp_mux_poll() - обслуживая заодно и ДРУГИЕ слоты, не блокируясь тупым
+// ожиданием - пока в очереди не освободится место. На RISC-V буфер
+// (8320Б) и так покрывает самый крупный сегодняшний ответ (filebuf 8192Б
+// + заголовок), но эта же обвязка (без неё tcp_mux_send() молча вернул
+// бы -1, а вызывающий код это не проверял) страхует на будущее и держит
+// оба httpsrv.c идентичными (x86-стороне это ограничение уже реально
+// понадобилось - её буфер меньше 512Б, см. tcp.h там).
 static void mux_send_all(int idx, const unsigned char *data, unsigned int len) {
+    unsigned int max_chunk = (TCP_MUX_OUT_BUF_SIZE < 512) ? TCP_MUX_OUT_BUF_SIZE : 512;
     unsigned int sent = 0;
     while (sent < len) {
         if (tcp_slots[idx].state != TCP_SLOT_ESTABLISHED) return;   // соединение умерло (RTO исчерпан) - сдаёмся
         unsigned int chunk = len - sent;
-        if (chunk > 512) chunk = 512;
+        if (chunk > max_chunk) chunk = max_chunk;
         while (tcp_mux_send(idx, data + sent, chunk) != 0) {
             if (tcp_slots[idx].state != TCP_SLOT_ESTABLISHED) return;
             tcp_mux_poll();

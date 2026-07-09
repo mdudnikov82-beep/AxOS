@@ -30,21 +30,24 @@ static int parse_request_path(const unsigned char *req, unsigned int len,
     return 1;
 }
 
-// Шлёт len байт слоту idx, разбивая на куски по 512Б (сетевой предел
-// сегмента) и, если очередь слота (TCP_MUX_OUT_BUF_SIZE) переполнена
-// (tcp_mux_send() вернул -1), крутит tcp_mux_poll() - обслуживая заодно и
-// ДРУГИЕ слоты, не блокируясь тупым ожиданием - пока в очереди не
-// освободится место. Нужно, потому что TCP_MUX_OUT_BUF_SIZE на x86
-// намного меньше, чем максимальный размер файла из FAT12 (см. коммент
-// над TCP_MUX_OUT_BUF_SIZE в tcp.h) - без этой обвязки конец крупного
-// ответа тихо терялся бы (tcp_mux_send() молча возвращает -1 при
-// переполнении, а вызывающий код это не проверял).
+// Шлёт len байт слоту idx, разбивая на куски (сетевой предел сегмента -
+// 512Б, НО не больше TCP_MUX_OUT_BUF_SIZE - на x86 очередь слота МЕНЬШЕ
+// 512Б, см. коммент там; кусок крупнее целой очереди никогда бы не
+// поместился, и цикл ожидания ниже завис бы навсегда) и, если очередь
+// слота переполнена (tcp_mux_send() вернул -1), крутит tcp_mux_poll() -
+// обслуживая заодно и ДРУГИЕ слоты, не блокируясь тупым ожиданием - пока
+// в очереди не освободится место. Нужно, потому что TCP_MUX_OUT_BUF_SIZE
+// на x86 намного меньше, чем максимальный размер файла из FAT12 (см.
+// коммент над TCP_MUX_OUT_BUF_SIZE в tcp.h) - без этой обвязки конец
+// крупного ответа тихо терялся бы (tcp_mux_send() молча возвращает -1
+// при переполнении, а вызывающий код это не проверял).
 static void mux_send_all(int idx, const unsigned char *data, unsigned int len) {
+    unsigned int max_chunk = (TCP_MUX_OUT_BUF_SIZE < 512) ? TCP_MUX_OUT_BUF_SIZE : 512;
     unsigned int sent = 0;
     while (sent < len) {
         if (tcp_slots[idx].state != TCP_SLOT_ESTABLISHED) return;   // соединение умерло (RTO исчерпан) - сдаёмся
         unsigned int chunk = len - sent;
-        if (chunk > 512) chunk = 512;
+        if (chunk > max_chunk) chunk = max_chunk;
         while (tcp_mux_send(idx, data + sent, chunk) != 0) {
             if (tcp_slots[idx].state != TCP_SLOT_ESTABLISHED) return;
             tcp_mux_poll();
