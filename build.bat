@@ -654,6 +654,26 @@ echo Copying user program into fs/ for FAT12 image...
 copy /b build\httpget.elf fs\HTTPGET.BIN
 if %errorlevel% neq 0 goto :error
 
+echo Compiling user program (dnscachet.c)...
+gcc -m32 -ffreestanding -fstack-protector -finstrument-functions -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\dnscachet.c -o build\dnscachet.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\dnscachet.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o build\libaxiom\stack_chk.o build\libaxiom\cfi.o -o build\dnscachet.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\dnscachet.exe build\dnscachet.bin
+if %errorlevel% neq 0 goto :error
+
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\dnscachet.bin build\dnscachet.elf
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\dnscachet.elf fs\DNSCACHE.BIN
+if %errorlevel% neq 0 goto :error
+
 echo Compiling user program (httpsrv.c)...
 gcc -m32 -ffreestanding -fstack-protector -finstrument-functions -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\httpsrv.c -o build\httpsrv.o
 if %errorlevel% neq 0 goto :error
