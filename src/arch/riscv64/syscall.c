@@ -260,7 +260,13 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         unsigned int pages = ((unsigned int)n + PAGE_SIZE - 1) / PAGE_SIZE;
         unsigned long new_brk = old_brk + (unsigned long)pages * PAGE_SIZE;
 
-        if (new_brk > USER_STACK_VA) { ret = -1; break; }  /* would hit the stack */
+        /* Фиксированный потолок (USER_HEAP_CEILING), НЕ фактический
+         * stack_va этого процесса - стек теперь ASLR (см. elf_loader.c),
+         * сверяться с реальным его адресом на каждый sbrk() сложнее и не
+         * даёт ничего сверх того, что уже даёт единый жёсткий потолок:
+         * весь диапазон [USER_HEAP_CEILING, USER_VA_TOP) зарезервирован
+         * под возможные позиции стека, кучи там в принципе быть не может. */
+        if (new_brk > USER_HEAP_CEILING) { ret = -1; break; }  /* would hit the stack's reserved range */
 
         int ok = 1;
         for (unsigned int i = 0; i < pages; i++) {

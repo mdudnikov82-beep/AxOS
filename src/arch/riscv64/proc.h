@@ -27,6 +27,7 @@ typedef struct {
     unsigned long sepc;         /* saved user program counter */
     unsigned long *pagetable;   /* physical address of sv39 root (L2) */
     unsigned long heap_brk;     /* current end of the heap (VA, page-aligned) */
+    unsigned long stack_va;     /* this process's stack page VA (ASLR, see elf_loader.c) */
     int           priority;     /* 1..10, see PRIORITY_* above */
     int           slice_left;   /* ticks remaining in the current turn */
     unsigned long ticks;        /* total timer ticks this process has run for */

@@ -11,8 +11,18 @@
 #define USER_VA_BASE    0x40000000UL
 #define USER_VA_TOP     0x80000000UL
 
-/* Top of the per-process user stack page; the heap must never grow into it. */
-#define USER_STACK_VA   0x7F000000UL
+/* Раньше стек всегда сидел ровно на фиксированном 0x7F000000
+ * (детерминированный адрес каждую загрузку). Теперь стек каждого
+ * процесса - своя случайная страница внутри [USER_HEAP_CEILING,
+ * USER_VA_TOP) (см. pick_stack_va() в elf_loader.c) - ASLR, реальный
+ * адрес хранится в proc_t.stack_va, не в константе. USER_HEAP_CEILING -
+ * жёсткий потолок роста кучи (SYS_SBRK в syscall.c), ФИКСИРОВАННЫЙ
+ * независимо от того, куда конкретно уехал стек у этого процесса - проще
+ * и безопаснее, чем сверяться с фактическим stack_va при каждом sbrk().
+ * Зазор [USER_HEAP_CEILING, USER_VA_TOP) - 32МБ, из них под стек ASLR
+ * реально используется ~[0, 0x1FFF000) 4КБ-выровненных стартов (страница
+ * должна поместиться до USER_VA_TOP) - ~13 бит энтропии. */
+#define USER_HEAP_CEILING 0x7E000000UL
 
 /* Load an ELF64 RISC-V executable from FAT12, create a PCB, and return
  * the new process's pid (>=0).  Returns -1 on error.
