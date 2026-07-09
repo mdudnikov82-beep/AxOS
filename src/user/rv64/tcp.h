@@ -3,12 +3,13 @@
 // Минимальный TCP (RFC 793) поверх udp.h/arp.h - и клиент (активное
 // открытие, tcp_connect), и теперь сервер (пассивное открытие, tcp_accept).
 // Только "счастливый путь" одного соединения за раз: three-way handshake,
-// отправка/приём данных, four-way close. Сознательно НЕ реализовано (это
-// уже принципиально другой, намного больший объём работы, если вообще
-// понадобится): ретрансмит по таймауту, управление окном/congestion
-// control, несколько ОДНОВРЕМЕННЫХ соединений/полноценный accept-backlog.
-// Локальный порт клиента зафиксирован (как xid в dhcp.h) - раз соединение
-// всегда одно, выделять его динамически незачем.
+// отправка/приём данных (с ретрансмитом по таймауту - см. TCP_RTO_MS
+// ниже), four-way close. Сознательно НЕ реализовано (это уже принципиально
+// другой, намного больший объём работы, если вообще понадобится):
+// управление окном/congestion control, переупорядочивание сегментов
+// (segment out of order), SACK. Локальный порт клиента зафиксирован (как
+// xid в dhcp.h) - раз соединение всегда одно, выделять его динамически
+// незачем.
 //
 // В отличие от UDP, TCP-чексумма ОБЯЗАТЕЛЬНА (RFC 793) - настоящий стек на
 // другом конце молча дропнет сегмент с неверной суммой. Считается по
@@ -24,6 +25,19 @@
 
 #define TCP_LOCAL_PORT 40000   // клиент: одно соединение за раз - фиксированный порт
 #define IP_PROTO_TCP   6
+
+// Ретрансмит по таймауту: RTO (retransmission timeout) стартует с
+// TCP_RTO_MS и УДВАИВАЕТСЯ после каждой неудачной попытки (классический
+// exponential backoff), с потолком TCP_RTO_MAX_MS - без потолка на
+// действительно плохой сети RTO быстро вырос бы до нескольких минут на
+// одну попытку. TCP_MAX_RETRIES - сколько раз повторить ПОСЛЕ первой
+// отправки, прежде чем сдаться (для tcp_send() - используется отдельно
+// от timeout_ms у tcp_connect()/tcp_accept(), у которых ретрансмит
+// происходит ВНУТРИ уже существующего общего окна ожидания, не поверх
+// него - число попыток там получается из timeout_ms/RTO само по себе).
+#define TCP_RTO_MS       300
+#define TCP_RTO_MAX_MS   2000
+#define TCP_MAX_RETRIES  5
 
 typedef struct {
     unsigned int   remote_ip;
@@ -178,24 +192,36 @@ static int tcp_connect(tcp_conn_t *c, unsigned int ip, unsigned short port,
     c->peer_closed = 0;
 
     unsigned int isn = c->snd_nxt;
+    unsigned int rto = TCP_RTO_MS;
+    unsigned int elapsed = 0;
     tcp_send_segment(c, TCP_FLAG_SYN, 0, 0);
 
-    unsigned int waited = 0;
-    while (waited < timeout_ms) {
-        unsigned int n = net_recv(tcp_rx, sizeof(tcp_rx));
-        tcp_seg_t seg;
-        if (n > 0 && tcp_parse_segment(n, &seg)) {
-            if (seg.src_ip == ip && seg.src_port == port && seg.dst_port == c->local_port &&
-                (seg.flags & TCP_FLAG_SYN) && (seg.flags & TCP_FLAG_ACK)) {
-                c->rcv_nxt = seg.seq + 1;   // SYN потребляет один номер последовательности
-                c->snd_nxt = isn + 1;
-                tcp_send_segment(c, TCP_FLAG_ACK, 0, 0);
-                c->connected = 1;
-                return 1;
+    while (elapsed < timeout_ms) {
+        unsigned int waited = 0;
+        while (waited < rto && elapsed < timeout_ms) {
+            unsigned int n = net_recv(tcp_rx, sizeof(tcp_rx));
+            tcp_seg_t seg;
+            if (n > 0 && tcp_parse_segment(n, &seg)) {
+                if (seg.src_ip == ip && seg.src_port == port && seg.dst_port == c->local_port &&
+                    (seg.flags & TCP_FLAG_SYN) && (seg.flags & TCP_FLAG_ACK)) {
+                    c->rcv_nxt = seg.seq + 1;   // SYN потребляет один номер последовательности
+                    c->snd_nxt = isn + 1;
+                    tcp_send_segment(c, TCP_FLAG_ACK, 0, 0);
+                    c->connected = 1;
+                    return 1;
+                }
             }
+            sleep_ms(10);
+            waited += 10;
+            elapsed += 10;
         }
-        sleep_ms(10);
-        waited += 10;
+        // RTO истёк, а SYN+ACK не пришёл - возможно, наш SYN потерялся:
+        // повторяем его (общий бюджет timeout_ms не расширяется).
+        if (elapsed < timeout_ms) {
+            tcp_send_segment(c, TCP_FLAG_SYN, 0, 0);
+            rto *= 2;
+            if (rto > TCP_RTO_MAX_MS) rto = TCP_RTO_MAX_MS;
+        }
     }
     return 0;
 }
@@ -240,25 +266,37 @@ static int tcp_accept(tcp_conn_t *c, unsigned short local_port, unsigned int tim
 
             // Ждём финальный ACK клиента отдельным (более коротким) таймаутом -
             // клиент, только что получивший наш SYN-ACK, отвечает почти сразу.
+            // Если наш SYN-ACK потерялся, клиент никогда не увидит его и не
+            // ответит - повторяем SYN-ACK по RTO, пока не истёк общий w2-бюджет.
+            unsigned int rto = TCP_RTO_MS;
             unsigned int w2 = 0;
             while (w2 < 3000) {
-                unsigned int n2 = net_recv(tcp_rx, sizeof(tcp_rx));
-                if (n2 > 0) {
-                    arp_maybe_respond(tcp_rx, n2);
-                    tcp_seg_t seg2;
-                    if (tcp_parse_segment(n2, &seg2) &&
-                        seg2.src_ip == c->remote_ip && seg2.src_port == c->remote_port &&
-                        seg2.dst_port == local_port &&
-                        (seg2.flags & TCP_FLAG_ACK) && seg2.ack == isn + 1) {
-                        c->snd_nxt = isn + 1;
-                        c->connected = 1;
-                        return 1;
+                unsigned int inner = 0;
+                while (inner < rto && w2 < 3000) {
+                    unsigned int n2 = net_recv(tcp_rx, sizeof(tcp_rx));
+                    if (n2 > 0) {
+                        arp_maybe_respond(tcp_rx, n2);
+                        tcp_seg_t seg2;
+                        if (tcp_parse_segment(n2, &seg2) &&
+                            seg2.src_ip == c->remote_ip && seg2.src_port == c->remote_port &&
+                            seg2.dst_port == local_port &&
+                            (seg2.flags & TCP_FLAG_ACK) && seg2.ack == isn + 1) {
+                            c->snd_nxt = isn + 1;
+                            c->connected = 1;
+                            return 1;
+                        }
                     }
+                    sleep_ms(10);
+                    inner += 10;
+                    w2 += 10;
                 }
-                sleep_ms(10);
-                w2 += 10;
+                if (w2 < 3000) {
+                    tcp_send_segment(c, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, 0);
+                    rto *= 2;
+                    if (rto > TCP_RTO_MAX_MS) rto = TCP_RTO_MAX_MS;
+                }
             }
-            return 0;   // SYN-ACK ушёл, но клиент не завершил handshake вовремя
+            return 0;   // SYN-ACK ушёл (и был повторён), но клиент не завершил handshake вовремя
         }
         sleep_ms(10);
         waited += 10;
@@ -266,13 +304,46 @@ static int tcp_accept(tcp_conn_t *c, unsigned short local_port, unsigned int tim
     return 0;
 }
 
-// Шлёт данные (PSH+ACK) одним сегментом, макс. 512 байт. 0/-1.
+// Шлёт данные (PSH+ACK) одним сегментом, макс. 512 байт, и ждёт ACK,
+// повторяя отправку (тот же уже собранный tcp_tx, просто ещё раз net_send())
+// по RTO с exponential backoff до TCP_MAX_RETRIES раз. 0 - подтверждено,
+// -1 - собеседник не подключен/данные слишком длинные/ACK так и не пришёл
+// (соединение, скорее всего, мертво - c->snd_nxt НЕ продвигается в этом
+// случае, чтобы не расходиться с тем, что реально видел собеседник).
+//
+// ПРИМЕЧАНИЕ: пока идёт это ожидание, входящие сегменты С ДАННЫМИ (не
+// ACK для нас) молча отбрасываются - как и раньше, эта "happy path"
+// реализация подразумевает строгий request/response (никто не шлёт нам
+// данные, пока мы не получили ответ на свои), это верно для всех
+// сегодняшних потребителей (tcptest.c/httpget.c/tcpserve.c).
 static int tcp_send(tcp_conn_t *c, const void *data, unsigned int len) {
     if (!c->connected) return -1;
     if (len > 512) return -1;
-    tcp_send_segment(c, TCP_FLAG_PSH | TCP_FLAG_ACK, data, len);
-    c->snd_nxt += len;
-    return 0;
+
+    unsigned int expect_ack = c->snd_nxt + len;
+    unsigned int rto = TCP_RTO_MS;
+
+    for (int attempt = 0; attempt <= TCP_MAX_RETRIES; attempt++) {
+        tcp_send_segment(c, TCP_FLAG_PSH | TCP_FLAG_ACK, data, len);
+
+        unsigned int waited = 0;
+        while (waited < rto) {
+            unsigned int n = net_recv(tcp_rx, sizeof(tcp_rx));
+            tcp_seg_t seg;
+            if (n > 0 && tcp_parse_segment(n, &seg) &&
+                seg.src_ip == c->remote_ip && seg.src_port == c->remote_port &&
+                seg.dst_port == c->local_port && (seg.flags & TCP_FLAG_ACK) &&
+                (int)(seg.ack - expect_ack) >= 0) {   // seg.ack >= expect_ack, safe через переполнение seq
+                c->snd_nxt = expect_ack;
+                return 0;
+            }
+            sleep_ms(10);
+            waited += 10;
+        }
+        rto *= 2;
+        if (rto > TCP_RTO_MAX_MS) rto = TCP_RTO_MAX_MS;
+    }
+    return -1;
 }
 
 // Поллит до timeout_ms. >0 - байт скопировано в buf; 0 - таймаут (ничего в
@@ -313,17 +384,23 @@ static int tcp_recv(tcp_conn_t *c, void *buf, unsigned int max_len, unsigned int
 }
 
 // Four-way close: шлём FIN+ACK, недолго слушаем финальный ACK/FIN
-// собеседника (без повторной отправки при таймауте - минимальное
-// упрощение, обычно собеседник и так уже закрыл свою половину к этому
-// моменту).
+// собеседника. Один ретрансмит FIN на середине окна на случай, если
+// первый потерялся - дальше уже не так критично (обычно собеседник и так
+// уже закрыл свою половину к этому моменту), поэтому без полного
+// RTO-backoff, как у tcp_send()/tcp_connect().
 static void tcp_close(tcp_conn_t *c) {
     if (!c->connected) return;
     tcp_send_segment(c, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0);
     c->snd_nxt += 1;   // FIN потребляет один номер последовательности
 
     unsigned int waited = 0;
+    int resent = 0;
     while (waited < 500) {
         net_recv(tcp_rx, sizeof(tcp_rx));   // дренируем эфир недолго, не разбираем детально
+        if (!resent && waited >= 250) {
+            tcp_send_segment(c, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0);
+            resent = 1;
+        }
         sleep_ms(10);
         waited += 10;
     }
@@ -347,9 +424,17 @@ static void tcp_close(tcp_conn_t *c) {
 // вызывающий код сам гоняет цикл, вызывая poll() снова и снова (как и
 // весь остальной этот "стек" - однопоточный, кооперативный, без реальных
 // прерываний на уровне TCP). Как и everywhere else в tcp.h - только
-// "счастливый путь": ни ретрансмита, ни переупорядочивания сегментов,
-// ни SYN-flood защиты - только таймаут на подвисшие полуоткрытые/
-// закрывающиеся слоты, чтобы они не отъедали слот навсегда.
+// "счастливый путь": handshake ретранслирует SYN-ACK при повторном SYN
+// от клиента (см. TCP_SLOT_SYN_RCVD ниже), но данные после установления
+// соединения (tcp_mux_send()) НЕ ждут ACK и не повторяются - в отличие от
+// однослотового tcp_send() выше, это осталось бы БЛОКИРУЮЩИМ ожиданием
+// внутри tcp_mux_send(), а единственный tcp_mux_poll() обслуживает ВСЕ
+// слоты по очереди - блокировка на одном клиенте держала бы остальных.
+// Нужен настоящий неблокирующий per-slot retransmit-таймер внутри
+// tcp_mux_poll(), это отдельная, ещё не сделанная работа. Также нет ни
+// переупорядочивания сегментов, ни SYN-flood защиты - только таймаут на
+// подвисшие полуоткрытые/закрывающиеся слоты, чтобы они не отъедали слот
+// навсегда.
 #define TCP_MAX_CONNS 4
 
 typedef enum {
@@ -451,6 +536,13 @@ static int tcp_mux_poll(void) {
             s->conn.snd_nxt  += 1;
             s->conn.connected = 1;
             s->state = TCP_SLOT_ESTABLISHED;
+        } else if ((seg.flags & TCP_FLAG_SYN) && !(seg.flags & TCP_FLAG_ACK)) {
+            // Клиент повторил SYN (не увидел наш SYN-ACK, потерянный в
+            // одну сторону) - слот для него уже нашёлся выше по
+            // remote_ip/port, просто шлём SYN-ACK ещё раз, не заводя
+            // новый слот и не трогая deadline (тот же 3с бюджет на весь
+            // handshake, включая ретраи).
+            tcp_send_segment(&s->conn, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, 0);
         }
         return -1;
     }
