@@ -1,6 +1,7 @@
 #include "syscall.h"
 #include "cursor.h"
 #include "gfx_ui.h"
+#include "bmp.h"
 
 /* AxDesktop — a minimal point-and-click desktop: draws icons, and a left
  * click on one launches the corresponding program via exec() directly
@@ -21,6 +22,7 @@
 typedef struct {
     const char   *label;
     const char   *file;    /* NULL for the built-in shutdown action */
+    const char   *icon_bmp; /* NULL if no icon art - card+text fallback used */
     unsigned int  color;
 } icon_t;
 
@@ -32,10 +34,10 @@ int main(void) {
     }
 
     icon_t icons[4];
-    icons[0].label = "AxTerminal"; icons[0].file = "AXTERM.ELF";  icons[0].color = gfx_rgb(0, 150, 255);
-    icons[1].label = "AxAbout";    icons[1].file = "AXABOUT.ELF"; icons[1].color = gfx_rgb(255, 140, 0);
-    icons[2].label = "AxPaint";    icons[2].file = "AXPAINT.ELF"; icons[2].color = gfx_rgb(0, 200, 120);
-    icons[3].label = "Shutdown";   icons[3].file = 0;             icons[3].color = gfx_rgb(220, 30, 30);
+    icons[0].label = "AxTerminal"; icons[0].file = "AXTERM.ELF";  icons[0].icon_bmp = "TERM.BMP";  icons[0].color = gfx_rgb(0, 150, 255);
+    icons[1].label = "AxAbout";    icons[1].file = "AXABOUT.ELF"; icons[1].icon_bmp = "ABOUT.BMP"; icons[1].color = gfx_rgb(255, 140, 0);
+    icons[2].label = "AxPaint";    icons[2].file = "AXPAINT.ELF"; icons[2].icon_bmp = "PAINT.BMP"; icons[2].color = gfx_rgb(0, 200, 120);
+    icons[3].label = "Shutdown";   icons[3].file = 0;             icons[3].icon_bmp = "POWER.BMP"; icons[3].color = gfx_rgb(220, 30, 30);
     unsigned int n_icons = 4;
 
     unsigned int total_w = n_icons * ICON_W + (n_icons - 1) * ICON_GAP;
@@ -46,12 +48,25 @@ int main(void) {
     ui_vgrad(0, 0, w, 28, gfx_rgb(20, 20, 45), gfx_rgb(10, 10, 25));
     gfx_draw_text(8, 10, "AxOS Desktop  --  click an icon to launch", gfx_rgb(200, 200, 255));
 
+    /* Один переиспользуемый буфер декодирования - иконки рисуются по
+     * очереди, ни одна не должна пережить следующий bmp_load(). */
+    static bmp_image_t icon_img;
+
     for (unsigned int i = 0; i < n_icons; i++) {
         int x = (int)(start_x + i * (ICON_W + ICON_GAP));
         ui_shadow(x, ICON_TOP, ICON_W, ICON_H, 5, 90);
         /* matches x86 gfx_shell.c's ICON_R - see gfx_ui.h's UI_MAX_R comment */
         ui_round_rect(x, ICON_TOP, ICON_W, ICON_H, 14, gfx_rgb(255, 255, 255), icons[i].color);
-        gfx_draw_text((unsigned int)x + 6, ICON_TOP + ICON_H / 2 - 4, icons[i].label, gfx_rgb(0, 0, 0));
+
+        /* Настоящая иконка (BMP) поверх карточки, если файл нашёлся и
+         * декодировался - иначе просто остаётся цветная карточка с
+         * подписью (fallback, не крашимся на отсутствующем/битом файле). */
+        if (icons[i].icon_bmp && bmp_load(icons[i].icon_bmp, &icon_img)) {
+            unsigned int icon_x = (unsigned int)x + (ICON_W - icon_img.width) / 2;
+            bmp_draw(&icon_img, icon_x, (unsigned int)ICON_TOP + 6);
+        }
+
+        gfx_draw_text((unsigned int)x + 6, ICON_TOP + ICON_H - 16, icons[i].label, gfx_rgb(0, 0, 0));
     }
     gfx_flush();
 

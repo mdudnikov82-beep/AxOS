@@ -474,6 +474,10 @@ copy /b %OUT%\tcptest_rv64.elf     rv64build\fs\rv64\TCPTEST.ELF
 copy /b %OUT%\tcpserve_rv64.elf    rv64build\fs\rv64\TCPSERVE.ELF
 copy /b %OUT%\httpsrv_rv64.elf     rv64build\fs\rv64\HTTPSRV.ELF
 copy /b %USRC%\index.htm           rv64build\fs\rv64\INDEX.HTM
+copy /b %USRC%\term.bmp            rv64build\fs\rv64\TERM.BMP
+copy /b %USRC%\about.bmp           rv64build\fs\rv64\ABOUT.BMP
+copy /b %USRC%\paint.bmp           rv64build\fs\rv64\PAINT.BMP
+copy /b %USRC%\power.bmp           rv64build\fs\rv64\POWER.BMP
 if %errorlevel% neq 0 goto :error
 
 python tools\make_fat12_rv64.py
