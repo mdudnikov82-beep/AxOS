@@ -409,20 +409,38 @@ static void tcp_close(tcp_conn_t *c) {
 //
 // Модель: TCP_MAX_CONNS слотов, каждый - свой tcp_conn_t + маленький
 // стейт-машин (SYN_RCVD -> ESTABLISHED -> CLOSING -> FREE). Один вызов
-// tcp_mux_poll() = одна попытка ax_net_recv() (один входящий кадр) -
-// вызывающий код сам гоняет цикл, вызывая poll() снова и снова (как и
-// весь остальной этот "стек" - однопоточный, кооперативный, без реальных
-// прерываний на уровне TCP). Как и everywhere else в tcp.h - только
-// "счастливый путь": handshake ретранслирует SYN-ACK при повторном SYN
-// от клиента (см. TCP_SLOT_SYN_RCVD ниже), но данные после установления
-// соединения (tcp_mux_send()) НЕ ждут ACK и не повторяются - блокировка
-// внутри tcp_mux_send() держала бы остальных клиентов, единственный
-// tcp_mux_poll() обслуживает ВСЕ слоты по очереди. Нужен настоящий
-// неблокирующий per-slot retransmit-таймер, это отдельная, ещё не
-// сделанная работа. Также нет ни переупорядочивания сегментов, ни
-// SYN-flood защиты - только таймаут на подвисшие полуоткрытые/
-// закрывающиеся слоты, чтобы они не отъедали слот навсегда.
+// tcp_mux_poll() = одна попытка ax_net_recv() (один входящий кадр) плюс
+// проверка таймеров ретрансмита ВСЕХ слотов (не только того, кого
+// затронул пришедший кадр, если он вообще пришёл) - вызывающий код сам
+// гоняет цикл, вызывая poll() снова и снова (как и весь остальной этот
+// "стек" - однопоточный, кооперативный, без реальных прерываний на
+// уровне TCP). Как и everywhere else в tcp.h - только "счастливый путь":
+// handshake ретранслирует SYN-ACK при повторном SYN от клиента (см.
+// TCP_SLOT_SYN_RCVD ниже), а данные после установления соединения
+// (tcp_mux_send()) идут через собственную НЕБЛОКИРУЮЩУЮ очередь на слот
+// (outbuf/out_* поля tcp_slot_t, см. tcp_mux_pump() ниже) с тем же RTO-
+// ретрансмитом, что и у однослотового tcp_send() - разница в том, что
+// ожидание ACK и повтор происходят МЕЖДУ вызовами tcp_mux_poll(), а не
+// внутри одного блокирующего вызова, иначе один медленный/потерянный
+// клиент держал бы все остальные слоты. Также нет ни переупорядочивания
+// сегментов, ни SYN-flood защиты - только таймаут на подвисшие
+// полуоткрытые/закрывающиеся слоты, чтобы они не отъедали слот навсегда.
 #define TCP_MAX_CONNS 4
+
+// Размер исходящей очереди на слот. НАМНОГО меньше, чем на RISC-V стороне
+// (там 8320Б - там ELF грузится "по-настоящему", .bss не занимает места
+// в файле на диске) - на x86 плоский флэт-бинарник (build.bat's `objcopy
+// -O binary`) прописывает ВЕСЬ .bss нулями прямо В ФАЙЛ, а каждая
+// пользовательская программа обязана целиком поместиться в один слот
+// USER_PROGRAM_SLOT_SIZE=0x10000 (64КБ, kernel.c) - argv живёt сразу за
+// концом легального размера программы (USER_ARGS_OFFSET=0xF800). Взяли
+// TCP_MUX_OUT_BUF_SIZE=8320, как на RISC-V - httpsrv.bin разросся до
+// 90748Б, что уже само по себе НЕ помещается в 0xF800=63488Б бюджет (даже
+// до soon-to-be-exceeded ELF_STAGING_SIZE=0xFA00) - "sh: not a valid
+// executable" при попытке запуска. httpsrv.c поэтому ждёт свободного
+// места в очереди через tcp_mux_poll() вместо one-shot отправки, если
+// ответ крупнее этого буфера - см. mux_send_all() там.
+#define TCP_MUX_OUT_BUF_SIZE 1024
 
 typedef enum {
     TCP_SLOT_FREE = 0,
@@ -437,6 +455,20 @@ typedef struct {
     unsigned char    reqbuf[512];
     unsigned int     reqlen;
     unsigned int     deadline;   // ax_get_ticks() - для SYN_RCVD/CLOSING, тайм-аут очистки
+
+    // Исходящая очередь для неблокирующего tcp_mux_send() - см. коммент
+    // выше tcp_mux_pump(). Инвариант: outbuf[0..out_acked) уже подтверждено
+    // ACK-ом, outbuf[out_acked..out_acked+out_inflight) - текущий сегмент
+    // в полёте (ждёт ACK), outbuf[out_acked+out_inflight..out_len) - ещё
+    // не отправлено.
+    unsigned char  outbuf[TCP_MUX_OUT_BUF_SIZE];
+    unsigned int   out_len;
+    unsigned int   out_acked;
+    unsigned int   out_inflight;
+    unsigned int   out_retries;
+    unsigned int   out_rto;
+    unsigned int   out_rto_deadline;   // ax_get_ticks()
+    int            close_after;   // 1 = tcp_mux_close() вызван, пока очередь не опустела - FIN отложен
 } tcp_slot_t;
 
 static tcp_slot_t     tcp_slots[TCP_MAX_CONNS];
@@ -465,6 +497,41 @@ static int tcp_mux_find_free(void) {
     return -1;
 }
 
+// Пытается протолкнуть следующий кусок исходящей очереди слота idx, если
+// сейчас ничего не в полёте. НЕ блокирует - если предыдущий сегмент ещё
+// не подтверждён ACK-ом, просто выходит (ретрансмит/следующий кусок
+// произойдёт позже через tcp_mux_poll()). Если очередь опустела и было
+// запрошено закрытие (tcp_mux_close() при непустой очереди - см. ниже),
+// шлёт отложенный FIN и переводит слот в CLOSING. Вызывается и из
+// tcp_mux_send() (чтобы первый кусок ушёл сразу же, без задержки до
+// следующего poll()), и из tcp_mux_poll() (когда пришёл ACK за текущий
+// сегмент - сразу пробуем следующий, не дожидаясь ещё одного poll()).
+static void tcp_mux_pump(int idx) {
+    tcp_slot_t *s = &tcp_slots[idx];
+    if (s->state != TCP_SLOT_ESTABLISHED) return;
+    if (s->out_inflight > 0) return;   // уже что-то ждёт ACK - не начинаем новый сегмент
+
+    unsigned int remaining = s->out_len - s->out_acked;
+    if (remaining == 0) {
+        if (s->close_after) {
+            tcp_send_segment(&s->conn, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0);
+            s->conn.snd_nxt += 1;
+            s->state    = TCP_SLOT_CLOSING;
+            s->deadline = ax_get_ticks() + 50;   // 500мс (100Гц)
+            s->close_after = 0;
+        }
+        return;
+    }
+
+    unsigned int chunk = remaining;
+    if (chunk > 512) chunk = 512;
+    tcp_send_segment(&s->conn, TCP_FLAG_PSH | TCP_FLAG_ACK, s->outbuf + s->out_acked, chunk);
+    s->out_inflight     = chunk;
+    s->out_retries      = 0;
+    s->out_rto          = TCP_RTO_MS;
+    s->out_rto_deadline = ax_get_ticks() + TCP_RTO_MS / 10;   // мс -> тики (100Гц)
+}
+
 // Один шаг обслуживания: один ax_net_recv(), разбор и продвижение стейт-
 // машины ОДНОГО затронутого слота. Возвращает индекс слота, для которого
 // только что стал готов ПОЛНЫЙ запрос (reqbuf[0..reqlen) можно разбирать -
@@ -477,6 +544,21 @@ static int tcp_mux_poll(void) {
         if ((tcp_slots[i].state == TCP_SLOT_SYN_RCVD || tcp_slots[i].state == TCP_SLOT_CLOSING) &&
             now >= tcp_slots[i].deadline) {
             tcp_slots[i].state = TCP_SLOT_FREE;
+        }
+        if (tcp_slots[i].state == TCP_SLOT_ESTABLISHED && tcp_slots[i].out_inflight > 0 &&
+            now >= tcp_slots[i].out_rto_deadline) {
+            if (tcp_slots[i].out_retries >= TCP_MAX_RETRIES) {
+                // Собеседник не отвечает на исходящие данные - считаем
+                // соединение мёртвым, освобождаем слот для новых клиентов.
+                tcp_slots[i].state = TCP_SLOT_FREE;
+            } else {
+                tcp_send_segment(&tcp_slots[i].conn, TCP_FLAG_PSH | TCP_FLAG_ACK,
+                                  tcp_slots[i].outbuf + tcp_slots[i].out_acked, tcp_slots[i].out_inflight);
+                tcp_slots[i].out_retries++;
+                tcp_slots[i].out_rto *= 2;
+                if (tcp_slots[i].out_rto > TCP_RTO_MAX_MS) tcp_slots[i].out_rto = TCP_RTO_MAX_MS;
+                tcp_slots[i].out_rto_deadline = now + tcp_slots[i].out_rto / 10;   // мс -> тики (100Гц)
+            }
         }
     }
 
@@ -509,6 +591,11 @@ static int tcp_mux_poll(void) {
             s->conn.connected   = 0;
             s->conn.peer_closed = 0;
             s->reqlen  = 0;
+            s->out_len       = 0;
+            s->out_acked     = 0;
+            s->out_inflight  = 0;
+            s->out_retries   = 0;
+            s->close_after   = 0;
             s->state   = TCP_SLOT_SYN_RCVD;
             s->deadline = now + 300;   // 3с на завершение handshake
             tcp_send_segment(&s->conn, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, 0);
@@ -533,7 +620,31 @@ static int tcp_mux_poll(void) {
     }
 
     if (s->state == TCP_SLOT_ESTABLISHED) {
-        if (seg.seq != s->conn.rcv_nxt) return -1;   // не тот сегмент - игнорируем (без ретрансмита/переупорядочивания)
+        // ACK за наш текущий исходящий сегмент (если есть) - обрабатывается
+        // НЕЗАВИСИМО от seg.seq ниже (ack/seq - разные направления одного
+        // соединения; устаревший/непорядковый seq входящих данных не
+        // должен блокировать зачёт валидного ACK за то, что отправили мы).
+        if (s->out_inflight > 0 && (seg.flags & TCP_FLAG_ACK) &&
+            (int)(seg.ack - (s->conn.snd_nxt + s->out_inflight)) >= 0) {
+            s->conn.snd_nxt += s->out_inflight;
+            s->out_acked    += s->out_inflight;
+            s->out_inflight  = 0;
+            // Компактируем буфер - сдвигаем ещё не отправленный хвост к
+            // началу. outbuf НЕ кольцевой, out_len/out_acked иначе росли
+            // бы монотонно всю жизнь соединения - без этого сдвига после
+            // TCP_MUX_OUT_BUF_SIZE суммарно отправленных+подтверждённых
+            // байт ЛЮБОЙ новый tcp_mux_send() отказывал бы НАВСЕГДА, даже
+            // если реального свободного места в буфере полно.
+            if (s->out_acked > 0) {
+                unsigned int remaining_len = s->out_len - s->out_acked;
+                for (unsigned int i = 0; i < remaining_len; i++) s->outbuf[i] = s->outbuf[s->out_acked + i];
+                s->out_len   = remaining_len;
+                s->out_acked = 0;
+            }
+            tcp_mux_pump(idx);   // сразу пробуем следующий кусок/отложенный FIN
+        }
+
+        if (seg.seq != s->conn.rcv_nxt) return -1;   // не тот сегмент - игнорируем (без переупорядочивания входящих)
 
         unsigned int room = sizeof(s->reqbuf) - s->reqlen;
         unsigned int copy_len = (seg.data_len > room) ? room : seg.data_len;
@@ -564,29 +675,45 @@ static int tcp_mux_poll(void) {
     return -1;
 }
 
-// Шлёт данные клиенту слота idx (может быть длиннее 512 - разобьётся на
-// несколько сегментов сама, как и обычный tcp_send() в цикле вручную).
+// Ставит данные в очередь на отправку слоту idx (может быть длиннее 512 -
+// уйдёт несколькими сегментами). НЕ БЛОКИРУЕТ и не ждёт ACK здесь: данные
+// копируются в собственный буфер слота (outbuf) и уходят кусками по мере
+// подтверждения предыдущих через tcp_mux_poll() (см. tcp_mux_pump() выше),
+// с ретрансмитом по RTO при потере - тот же паттерн, что и у однослотового
+// tcp_send(), только растянутый на несколько вызовов poll() вместо одного
+// блокирующего ожидания, чтобы не задерживать остальные слоты. Первый
+// кусок уходит сразу же (если слот сейчас ничем не занят), остальные - по
+// мере продвижения очереди. Возвращает 0, если данные приняты в очередь,
+// -1 если слот не в ESTABLISHED или очередь переполнена
+// (TCP_MUX_OUT_BUF_SIZE).
 static int tcp_mux_send(int idx, const void *data, unsigned int len) {
     tcp_slot_t *s = &tcp_slots[idx];
     if (s->state != TCP_SLOT_ESTABLISHED) return -1;
+    if (s->out_len + len > TCP_MUX_OUT_BUF_SIZE) return -1;
+
     const unsigned char *p = (const unsigned char *)data;
-    unsigned int sent = 0;
-    while (sent < len) {
-        unsigned int chunk = len - sent;
-        if (chunk > 512) chunk = 512;
-        tcp_send_segment(&s->conn, TCP_FLAG_PSH | TCP_FLAG_ACK, p + sent, chunk);
-        s->conn.snd_nxt += chunk;
-        sent += chunk;
-    }
+    for (unsigned int i = 0; i < len; i++) s->outbuf[s->out_len + i] = p[i];
+    s->out_len += len;
+
+    tcp_mux_pump(idx);
     return 0;
 }
 
-// Инициирует закрытие слота idx (шлёт FIN, переводит в CLOSING - слот
-// освободится либо когда придёт ACK/FIN клиента через tcp_mux_poll(),
-// либо по тайм-ауту в 500мс, как и однослотовый tcp_close()).
+// Инициирует закрытие слота idx. Если исходящая очередь уже пуста и
+// ничего не ждёт ACK - шлёт FIN сразу же (как раньше). Если ещё остались
+// неотправленные/неподтверждённые данные - откладывает FIN до тех пор,
+// пока вся очередь не будет доставлена (tcp_mux_pump() отправит его сам,
+// когда out_acked догонит out_len) - иначе FIN обогнал бы данные и
+// оборвал бы ответ раньше времени.
 static void tcp_mux_close(int idx) {
     tcp_slot_t *s = &tcp_slots[idx];
     if (s->state != TCP_SLOT_ESTABLISHED) return;
+
+    if (s->out_inflight > 0 || s->out_acked < s->out_len) {
+        s->close_after = 1;
+        return;
+    }
+
     tcp_send_segment(&s->conn, TCP_FLAG_FIN | TCP_FLAG_ACK, 0, 0);
     s->conn.snd_nxt += 1;
     s->state    = TCP_SLOT_CLOSING;

@@ -42,6 +42,29 @@ static int parse_request_path(const unsigned char *req, unsigned int len,
     return 1;
 }
 
+// Шлёт len байт слоту idx, разбивая на куски по 512Б (сетевой предел
+// сегмента) и, если очередь слота (TCP_MUX_OUT_BUF_SIZE) переполнена
+// (tcp_mux_send() вернул -1), крутит tcp_mux_poll() - обслуживая заодно и
+// ДРУГИЕ слоты, не блокируясь тупым ожиданием - пока в очереди не
+// освободится место. На RISC-V буфер (8320Б) и так покрывает самый
+// крупный сегодняшний ответ (filebuf 8192Б + заголовок), но эта же
+// обвязка (без неё tcp_mux_send() молча вернул бы -1, а вызывающий код
+// это не проверял) страхует на будущее и держит оба httpsrv.c идентичными.
+static void mux_send_all(int idx, const unsigned char *data, unsigned int len) {
+    unsigned int sent = 0;
+    while (sent < len) {
+        if (tcp_slots[idx].state != TCP_SLOT_ESTABLISHED) return;   // соединение умерло (RTO исчерпан) - сдаёмся
+        unsigned int chunk = len - sent;
+        if (chunk > 512) chunk = 512;
+        while (tcp_mux_send(idx, data + sent, chunk) != 0) {
+            if (tcp_slots[idx].state != TCP_SLOT_ESTABLISHED) return;
+            tcp_mux_poll();
+            sleep_ms(5);
+        }
+        sent += chunk;
+    }
+}
+
 // Разбирает запрос слота idx и шлёт ответ (файл из FAT12 или 404),
 // затем инициирует закрытие. Вынесено в отдельную функцию, потому что
 // каждый вызов tcp_mux_poll() может вернуть готовность ЛЮБОГО из
@@ -85,21 +108,15 @@ static void handle_request(int idx) {
         const char *h2 = "\r\nConnection: close\r\n\r\n";
         for (const char *p = h2; *p; p++) header[hlen++] = *p;
 
-        tcp_mux_send(idx, header, (unsigned int)hlen);
-        int sent = 0;
-        while (sent < flen) {
-            int chunk = flen - sent;
-            if (chunk > 512) chunk = 512;
-            tcp_mux_send(idx, filebuf + sent, (unsigned int)chunk);
-            sent += chunk;
-        }
+        mux_send_all(idx, (unsigned char*)header, (unsigned int)hlen);
+        mux_send_all(idx, filebuf, (unsigned int)flen);
         puts_rv("httpsrv: 200 OK, sent ");
         print_udec((unsigned long)flen);
         puts_rv(" bytes\r\n");
     } else {
         static const char not_found[] =
             "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found\n";
-        tcp_mux_send(idx, not_found, sizeof(not_found) - 1);
+        mux_send_all(idx, (unsigned char*)not_found, sizeof(not_found) - 1);
         puts_rv("httpsrv: 404 Not Found\r\n");
     }
     tcp_mux_close(idx);
