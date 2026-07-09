@@ -1003,8 +1003,12 @@ echo Assembling shell IDT (keyboard IRQ1 + mouse IRQ12)...
 .\tools\nasm.exe -f elf32 src\kernel\idt_shell.asm -o build\idt_shell.o
 if %errorlevel% neq 0 goto :error
 
+echo Generating embedded icon data (BMP -^> C array)...
+python tools\bmp_to_c.py build\icons_data.h src\kernel\term.bmp term_bmp src\kernel\about.bmp about_bmp
+if %errorlevel% neq 0 goto :error
+
 echo Compiling graphical shell (C)...
-gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src\kernel\gfx_shell.c -o build\gfx_shell.o
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -I build -c src\kernel\gfx_shell.c -o build\gfx_shell.o
 if %errorlevel% neq 0 goto :error
 
 echo Compiling mouse driver for shell...

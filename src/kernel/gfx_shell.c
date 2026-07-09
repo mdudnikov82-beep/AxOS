@@ -365,6 +365,13 @@ static void card_round(int x, int y, int w, int h, int r, color_t body, color_t 
     fill_round(x+2, y+2, w-4, h-4, r>2?r-2:1, body);
 }
 
+/* Embedded icon BMPs (см. tools/bmp_to_c.py - конвертируется из
+ * src/kernel/term.bmp/about.bmp на этапе сборки, build.bat) + декодер
+ * (bmp.h - тот же формат, что и RISC-V-стороны, но без файлового
+ * ввода-вывода: gfx_shell.c не имеет доступа к диску вообще). */
+#include "icons_data.h"
+#include "bmp.h"
+
 /* Font rendered at 2x: each 1x1 source bit becomes a FONT_SCALE x
  * FONT_SCALE block. At native 8x8 pixels, text would be tiny/hard to
  * read on an 800x600 canvas (previously 320x200 - 2.5x-3x smaller). */
@@ -534,17 +541,19 @@ static void draw_icon(const struct icon *ic, int mx, int my) {
     shadow_round(ic->x, ic->y, ic->w, ic->h, ICON_R, hover ? 8 : 5);
     card_round(ic->x, ic->y, ic->w, ic->h, ICON_R, bg, brd);
 
-    /* Inner symbol: terminal = ">" arrow, about = "?" */
-    int sy = ic->y + 20;
-    int sx = ic->x + ic->w/2 - CHAR_W/2;
-    if (ic->dst == SCR_TERMINAL) {
-        glyph(sx-CHAR_W, sy,   '>', fg);
-        glyph(sx+CHAR_W, sy,   '_', fg);
-        glyph(sx-CHAR_W, sy+2*CHAR_W, '~', fg);
-    } else {
-        glyph(sx, sy,    '?', fg);
-        glyph(sx, sy+2*CHAR_W, 'i', fg);
+    /* Inner symbol: настоящая BMP-иконка (см. icons_data.h/bmp.h) вместо
+     * ASCII-символов ">"/"?", что рисовались тут раньше. Декодируется
+     * один раз (кэш в static bmp_image_t) - не при каждом кадре. */
+    static bmp_image_t icon_term_img, icon_about_img;
+    static int icons_ready = 0;
+    if (!icons_ready) {
+        bmp_decode(term_bmp_data, term_bmp_size, &icon_term_img);
+        bmp_decode(about_bmp_data, about_bmp_size, &icon_about_img);
+        icons_ready = 1;
     }
+    const bmp_image_t *icon_img = (ic->dst == SCR_TERMINAL) ? &icon_term_img : &icon_about_img;
+    bmp_draw(icon_img, ic->x + (ic->w - icon_img->width)/2, ic->y + 16);
+
     /* Label below icon */
     text_center(ic->x + ic->w/2, ic->y + ic->h - 20, ic->label, fg);
 }
