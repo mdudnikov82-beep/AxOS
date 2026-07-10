@@ -40,6 +40,8 @@
  *   mte_tag(ptr)                     — current generation's tag (0 if freed)
  *   mte_check(ptr, size)             — 1 if the whole range is live (OK)
  *   mte_check_tag(ptr, tag, size)    — 1 if live AND tag matches
+ *   mte_handle(ptr)                  — snapshot (addr, tag) into a checked handle
+ *   mte_resolve(handle, size)        — handle's ptr if still current gen, else 0
  *
  * Header-only (matches syscall.h's convention): each translation unit gets
  * its own private heap state, which is correct since each AxOS/RV64 process
@@ -140,6 +142,41 @@ static int mte_check_tag(const void *ptr, unsigned long expected_tag, unsigned i
     for (long i = i0; i <= i1; i++)
         if (__mte_state[i] != MTE_STATE_OK || __mte_tag[i] != expected_tag) return 0;
     return 1;
+}
+
+/* ---- checked handle: the "software TBI" stand-in ----
+ * A raw pointer returned by malloc() behaves exactly like a normal
+ * pointer always did - nothing about it changes. A handle is a SEPARATE,
+ * explicitly-opted-into reference: snapshot (address, generation tag)
+ * together, then later resolve() re-validates the tag against the
+ * block's CURRENT generation before handing back a usable pointer. This
+ * is the software analog of what real MTE's hardware does on every
+ * load/store (tag-in-pointer vs tag-in-memory compare) - done once,
+ * explicitly, at the point the caller chooses to check, since neither
+ * x86-64 nor RV64 sv39 have hardware support (LAM/Zjpm) to ignore tag
+ * bits packed into a real pointer's high bits and check them on every
+ * access transparently. */
+typedef struct { void *addr; unsigned long tag; } mte_handle_t;
+
+/* Snapshot ptr's CURRENT generation tag into a handle. ptr must be live
+ * (fresh from malloc()) - a handle taken from a dead/foreign pointer
+ * just carries tag=0 and will never resolve. */
+static mte_handle_t mte_handle(void *ptr) {
+    mte_handle_t h;
+    h.addr = ptr;
+    h.tag  = mte_tag(ptr);
+    return h;
+}
+
+/* Re-validates the handle's remembered tag against the block's CURRENT
+ * generation. Returns the usable pointer if still live and the SAME
+ * generation as when the handle was taken; 0 otherwise (freed, reused
+ * for a new generation, or never valid). Callers must check for 0 before
+ * dereferencing - this does not abort like heap_abort(), it's a
+ * legitimate "did my reference go stale" query, not corruption. */
+static void *mte_resolve(mte_handle_t h, unsigned int size) {
+    if (!h.tag) return 0;
+    return mte_check_tag(h.addr, h.tag, size) ? h.addr : 0;
 }
 
 /* ---- tag PRNG (xorshift64, never returns 0) ----

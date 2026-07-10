@@ -123,9 +123,14 @@ void  ax_free(void* ptr);               // освободить блок
 // ax_check      — 1 если [ptr,ptr+size) в состоянии OK (любой тег).
 // ax_alloc_tag  — тег текущего поколения блока (0 = freed/не выделен).
 // ax_check_tag  — 1 если OK И тег совпадает; ловит UAF после переиспользования.
+// ax_handle      — снимок (addr, тег) в "проверяемую ссылку" (software TBI stand-in).
+// ax_resolve     — указатель, если поколение всё ещё текущее; иначе 0.
 int                ax_check(void* ptr, unsigned int size);
 unsigned long long ax_alloc_tag(void* ptr);
 int                ax_check_tag(void* ptr, unsigned long long expected_tag, unsigned int size);
+typedef struct { void* addr; unsigned long long tag; } ax_handle_t;
+ax_handle_t        ax_handle(void* ptr);
+void*              ax_resolve(ax_handle_t h, unsigned int size);
 
 // Уровень stdio (реализован в stdio.c)
 void ax_putchar(char c);

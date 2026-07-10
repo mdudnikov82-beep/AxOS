@@ -133,6 +133,25 @@ int ax_check_tag(void* ptr, unsigned long long expected_tag, unsigned int size) 
     return 1;
 }
 
+// "Software TBI" stand-in: снимок (addr, поколение) в момент вызова -
+// resolve() позже перепроверяет тег против ТЕКУЩЕГО поколения блока,
+// программный аналог того, что настоящий MTE делает аппаратно на каждом
+// load/store (ни x86-64, ни RISC-V sv39 здесь этого не умеют - нет
+// LAM/Zjpm, тег в старших битах указателя железо бы просто не проигнорировало).
+ax_handle_t ax_handle(void* ptr) {
+    ax_handle_t h;
+    h.addr = ptr;
+    h.tag  = ax_alloc_tag(ptr);
+    return h;
+}
+
+// Указатель, если блок всё ещё того же поколения, что было при
+// ax_handle(); иначе 0 (freed / переиспользован / никогда не был живым).
+void* ax_resolve(ax_handle_t h, unsigned int size) {
+    if (h.tag == 0) return 0;
+    return ax_check_tag(h.addr, h.tag, size) ? h.addr : 0;
+}
+
 // --- PRNG: xorshift64, никогда не возвращает 0 ---
 // Канонические сдвиги для 64-битного слова (13, 7, 17) - не та тройка
 // (13, 17, 5), что была тут для 32-битной версии: она подобрана под 32

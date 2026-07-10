@@ -52,7 +52,11 @@ int main(void) {
         }
     }
 
+    // 8. Checked handle: resolves while live, fails after free (software TBI stand-in)
+    ax_handle_t h = ax_handle(p2);
+    if (ax_resolve(h, 64) != p2) { ax_print("FAIL: handle resolve while live\n"); return 1; }
     ax_free(p2);
+    if (ax_resolve(h, 64) != 0)  { ax_print("FAIL: handle resolve after free\n"); return 1; }
 
     ax_print("memtest: ALL PASS\n");
     return 0;

@@ -45,7 +45,10 @@ int main(void) {
           "old pointer + old tag still rejected (use-after-free caught)");
     CHECK(mte_check_tag(p2, tag2, 64), "new pointer + new tag accepted");
 
+    mte_handle_t h = mte_handle(p2);
+    CHECK(mte_resolve(h, 64) == p2, "handle resolves while generation is current");
     free(p2);
+    CHECK(mte_resolve(h, 64) == 0, "handle resolve fails after free (stale generation)");
     puts_rv(fail ? "\r\nmtetest: SOME CHECKS FAILED\r\n" : "\r\nmtetest: all checks passed\r\n");
     exit(fail);
     return fail;
