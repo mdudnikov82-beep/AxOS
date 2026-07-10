@@ -51,6 +51,14 @@ void ax_set_foreground(int slot);  // slot >= 0: Ctrl+C убьёт эту зад
 // (убита) или -1 (нет такого pid / не изолированная задача).
 int  ax_kill(int pid);
 
+// Клонирует текущую (изолированную) задачу - физическая память слота
+// копируется целиком, оба процесса продолжают выполнение с этой же
+// точки. Возвращает 0 в потомке, pid потомка (>0) в родителе, -1 при
+// ошибке (нет свободных слотов, вызов не из изолированной задачи).
+// Открытые fd и активный редирект вывода НЕ наследуются - потомок
+// стартует с чистого листа по обоим пунктам (см. SYS_FORK).
+int  ax_fork(void);
+
 // Системное время
 unsigned int ax_get_ticks(void);         // тики с момента загрузки (100 Гц)
 void         ax_sleep_ms(unsigned int ms); // sleep ms миллисекунд (другие задачи получают CPU)
@@ -191,6 +199,7 @@ void ax_printf(const char* fmt, ...);  // %s %d %u %x %c %%
 #define AX_SC_NET_RECV     AX_SC_BIT(0x27)  // ax_net_recv
 #define AX_SC_LAST_EXIT_CODE AX_SC_BIT(0x28)  // ax_exit_code
 #define AX_SC_KILL         AX_SC_BIT(0x29)  // ax_kill
+#define AX_SC_FORK         AX_SC_BIT(0x2A)  // ax_fork
 
 // Готовые профили:
 #define AX_SC_PRINT_ONLY  (AX_SC_PRINT | AX_SC_CLEAR | AX_SC_EXIT | AX_SC_SBRK)
@@ -199,9 +208,10 @@ void ax_printf(const char* fmt, ...);  // %s %d %u %x %c %%
 #define AX_SC_FILES       (AX_SC_WRITEFILE | AX_SC_READFILE | AX_SC_OPEN | \
                            AX_SC_FREAD     | AX_SC_FWRITE   | AX_SC_CLOSE | \
                            AX_SC_READDIR   | AX_SC_UNLINK   | AX_SC_MKDIR)
-// AX_SC_KILL сознательно НЕ входит сюда (как и AX_SC_REBOOT) - убийство
-// произвольной задачи по pid не относится к обычному жизненному циклу
-// "запустить и дождаться", включается явно, если действительно нужно.
+// AX_SC_KILL/AX_SC_FORK сознательно НЕ входят сюда (как и AX_SC_REBOOT) -
+// ни убийство произвольной задачи по pid, ни клонирование себя не
+// относятся к обычному жизненному циклу "запустить и дождаться",
+// включаются явно, если действительно нужно.
 #define AX_SC_EXEC_MASK   (AX_SC_EXEC | AX_SC_EXEC_REDIR | AX_SC_TASK_ALIVE | \
                            AX_SC_LAST_EXIT_CODE | \
                            AX_SC_SHELL_CLAIM | AX_SC_FOREGROUND)

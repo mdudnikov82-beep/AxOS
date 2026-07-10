@@ -332,6 +332,64 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     current_task->next = new_task;
 }
 
+// Клонирует ТЕКУЩУЮ задачу как потомка - см. tasking.h. Физическая
+// память слота уже скопирована вызывающим (sys_fork_impl, kernel.c) -
+// здесь только клонирование живого регистрового кадра + task_t.
+int task_fork_current(unsigned long long parent_rsp, unsigned int child_phys_base,
+                      int child_slot_index, unsigned int wx_delta, unsigned int wx_data_off) {
+    if (!current_task) return -1;
+
+    unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
+    if (!kstack) return -1;
+
+    task_t* new_task = (task_t*)malloc(sizeof(task_t));
+    if (!new_task) { free(kstack); return -1; }
+
+    // Копируем ЖИВОЙ кадр родителя (20 x 8 = 160Б: 15 GPR в порядке
+    // SAVE_REGS + 5 CPU-кадра SS/RSP/RFLAGS/CS/RIP) как есть - потомок
+    // должен продолжить выполнение РОВНО с той же точки (после int 0x80
+    // самого fork()), с теми же флагами/пользовательским стеком, что и
+    // родитель на этот момент. sp[0] = RAX (пушился последним = самый
+    // нижний адрес) - обнуляем: fork() возвращает 0 потомку, тогда как
+    // родительский кадр (parent_rsp) правит СВОЙ RAX отдельно
+    // (sys_fork_impl пишет pid потомка прямо в него).
+    unsigned long long* src = (unsigned long long*)parent_rsp;
+    unsigned long long* sp  = (unsigned long long*)(kstack + KSTACK_SIZE);
+    sp -= 20;
+    for (int i = 0; i < 20; i++) sp[i] = src[i];
+    sp[0] = 0;
+
+    new_task->rsp = (unsigned long long)sp;
+    new_task->kernel_stack_top = (unsigned long long)(kstack + KSTACK_SIZE);
+    new_task->id = next_id++;
+    copy_name(new_task->name, current_task->name);
+    new_task->ticks = 0;
+    new_task->page_directory = paging_create_user_directory(
+        child_slot_index, child_phys_base, wx_delta, wx_data_off);
+    new_task->user_slot_index = child_slot_index;
+    new_task->exiting = 0;
+    // Потомок - точный снимок состояния планировщика/безопасности
+    // родителя на момент fork(), не свежие значения по умолчанию.
+    new_task->mls_level = current_task->mls_level;
+    new_task->syscall_mask = current_task->syscall_mask;
+    new_task->priority = current_task->priority;
+    new_task->slice_left = new_task->priority;
+    new_task->exit_code = 0;
+    new_task->sleeping = 0;
+    new_task->wake_tick = 0;
+    new_task->waiting_pipe = -1;
+
+    // "jmp $" - см. идентичный комментарий в task_create_user_isolated выше.
+    unsigned char* spin = (unsigned char*)(child_phys_base + USER_WINDOW_SIZE - 2);
+    spin[0] = 0xEB;
+    spin[1] = 0xFE;
+
+    new_task->next = current_task->next;
+    current_task->next = new_task;
+
+    return new_task->id;
+}
+
 unsigned long long schedule(unsigned long long current_rsp) {
     if (!current_task) return current_rsp;
 

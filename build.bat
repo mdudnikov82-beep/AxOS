@@ -174,6 +174,26 @@ echo Copying user program into fs/ for FAT12 image...
 copy /b build\exitdemo.elf fs\EXIT.BIN
 if %errorlevel% neq 0 goto :error
 
+echo Compiling user program (forkdemo.c)...
+gcc -m32 -ffreestanding -fstack-protector -finstrument-functions -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\forkdemo.c -o build\forkdemo.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\forkdemo.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o build\libaxiom\stack_chk.o build\libaxiom\cfi.o -o build\forkdemo.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\forkdemo.exe build\forkdemo.bin
+if %errorlevel% neq 0 goto :error
+
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\forkdemo.bin build\forkdemo.elf
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\forkdemo.elf fs\FORKDEMO.BIN
+if %errorlevel% neq 0 goto :error
+
 echo Compiling user program (crashdemo.c)...
 gcc -m32 -ffreestanding -fstack-protector -finstrument-functions -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\crashdemo.c -o build\crashdemo.o
 if %errorlevel% neq 0 goto :error

@@ -16,6 +16,7 @@
 extern syscall_dispatch     ; void syscall_dispatch(unsigned char func, char* arg)
 extern task_current_wants_resched ; int task_current_wants_resched(void) - tasking.c
 extern schedule             ; unsigned long long schedule(unsigned long long current_rsp) - tasking.c
+extern sys_fork_impl        ; void sys_fork_impl(unsigned long long parent_rsp) - kernel.c
 
 global syscall_handler
 
@@ -42,12 +43,30 @@ syscall_handler:
     ;   arg2 (RDX) = аргумент (ESI user, ноль-расширен в RSI)
     ; Стек после pushes: [rsp+0]=rax [rsp+8]=rbx [rsp+16]=rcx [rsp+24]=rdx [rsp+32]=rsi
     movzx ecx, byte [rsp+1]   ; func code из AH: память-операнд, без REX-конфликта
+
+    ; SYS_FORK (0x2A) - особый случай, минуя syscall_dispatch: нужен
+    ; прямой доступ к живому регистровому кадру вызывающего (rsp прямо
+    ; сейчас указывает на его начало - тот же формат, что и current_rsp
+    ; у schedule()), чтобы клонировать его для потомка - обычные
+    ; обработчики видят только ESI-аргумент. Результат sys_fork_impl
+    ; пишет ПРЯМО в [rsp+0] (RAX-слот) сама - см. kernel.c.
+    cmp cl, 0x2A
+    jne .generic_dispatch
+
+    mov rcx, rsp        ; sys_fork_impl(current_rsp) - Windows ABI: arg в RCX
+    sub rsp, 32
+    call sys_fork_impl
+    add rsp, 32
+    jmp .check_resched
+
+.generic_dispatch:
     mov rdx, [rsp+32]          ; RSI = аргумент (сохранён выше в push rsi)
 
     sub rsp, 32         ; shadow space (Windows x64 ABI)
     call syscall_dispatch
     add rsp, 32
 
+.check_resched:
     ; Если обработчик попросил немедленное переключение (сейчас
     ; единственный случай - SYS_SLEEP -> task_sleep_current, см.
     ; tasking.c) - делаем тот же обмен RSP через schedule(), что и

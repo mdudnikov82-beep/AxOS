@@ -49,6 +49,7 @@ global _ax_set_priority
 global _ax_net_mac
 global _ax_net_send
 global _ax_net_recv
+global _ax_fork
 
 ; void ax_print(char* msg)
 _ax_print:
@@ -300,6 +301,16 @@ _ax_kill:
     add esp, 8
     pop ebx
     pop esi
+    ret
+
+; int ax_fork(void)
+; Особый случай - НЕТ struct-аргумента (SYS_FORK не проходит через
+; обычный syscall_dispatch, см. src/kernel/syscalls.asm/kernel.c) -
+; результат приходит напрямую в EAX: 0 в потомке, pid потомка (>0) в
+; родителе, -1 при ошибке.
+_ax_fork:
+    mov ah, 0x2A            ; SYS_FORK
+    int 0x80
     ret
 
 ; void ax_shell_claim(int claim)

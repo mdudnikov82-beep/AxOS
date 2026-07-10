@@ -40,6 +40,25 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
                                int argc, unsigned int argv_vaddr, unsigned int entry_vaddr,
                                unsigned int wx_delta, unsigned int wx_data_off);
 
+// Создаёт задачу-потомка как КЛОН текущей задачи в момент вызова SYS_FORK
+// (kernel.c::sys_fork_impl) - в отличие от task_create_user_isolated
+// (фабрикует свежий кадр с точкой входа ELF), эта функция копирует
+// ЖИВОЙ регистровый кадр родителя (parent_rsp - указывает на кадр,
+// сохранённый syscalls.asm перед вызовом sys_fork_impl, тот же формат,
+// что и task_t.rsp) - потомок продолжит выполнение ровно с той же точки
+// (после int 0x80 самого fork()), но с RAX=0 (свой кадр правится здесь),
+// пока родитель получает pid потомка (пишет sys_fork_impl отдельно, в
+// СВОЙ, родительский кадр). Физическая память слота уже должна быть
+// скопирована ДО вызова (см. sys_fork_impl) - здесь только клонирование
+// регистров + создание task_t. wx_delta/wx_data_off - те же значения,
+// которыми была построена директория родителя (см. slot_wx_delta/
+// slot_wx_data_off, kernel.c) - скопированная память имеет тот же
+// W^X-макет. Возвращает pid потомка (>=0) или -1 при нехватке памяти
+// под kstack/task_t (слот в этом случае НЕ помечается занятым - это
+// делает вызывающий, sys_fork_impl, только после успеха).
+int task_fork_current(unsigned long long parent_rsp, unsigned int child_phys_base,
+                      int child_slot_index, unsigned int wx_delta, unsigned int wx_data_off);
+
 // Вызывается из idt.asm при каждом IRQ0: сохраняет rsp текущей задачи,
 // переключается на следующую по кольцу и возвращает её rsp. Если
 // текущая задача помечена exiting (task_mark_current_exiting) - убирает

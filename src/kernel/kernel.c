@@ -86,6 +86,15 @@ static int slot_exit_code[USER_PROGRAM_SLOTS];
 // Инициализируется при запуске задачи (после загрузки кода), сбрасывается при выходе.
 static unsigned int slot_heap_brk[USER_PROGRAM_SLOTS];
 
+// wx_delta/wx_data_off, которыми была построена директория страниц
+// этого слота (см. task_create_user_isolated) - запоминаются здесь,
+// т.к. SYS_FORK (sys_fork_impl ниже) должен построить ТАКУЮ ЖЕ
+// директорию для потомка (скопированная физическая память имеет тот
+// же W^X-макет), а сами эти значения иначе нигде после создания
+// задачи не хранятся.
+static unsigned int slot_wx_delta[USER_PROGRAM_SLOTS];
+static unsigned int slot_wx_data_off[USER_PROGRAM_SLOTS];
+
 // Heap не должен перекрывать argv-блок. Оставляем 0x200 байт зазора.
 #define USER_HEAP_LIMIT (USER_ARGS_VADDR - 0x200)
 
@@ -1046,6 +1055,8 @@ static int do_exec(char* cmdline) {
         slot_tty[slot] = (caller_slot >= 0 && caller_slot < USER_PROGRAM_SLOTS)
             ? slot_tty[caller_slot] : tty_active();
     }
+    slot_wx_delta[slot]    = elf_res.aslr_delta;
+    slot_wx_data_off[slot] = elf_res.wx_data_offset;
     task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR, elf_res.entry,
                                elf_res.aslr_delta, elf_res.wx_data_offset);
     return slot;
@@ -1096,6 +1107,62 @@ void sys_exec_redir(char* arg) {
             }
         }
     }
+}
+
+// SYS_FORK (0x2A): особый случай, обрабатывается ЦЕЛИКОМ в syscalls.asm
+// в обход обычного syscall_dispatch (той же C-таблицы, что и все
+// остальные syscall'ы) - fork() нужен прямой доступ к живому
+// регистровому кадру родителя (parent_rsp), чтобы клонировать его для
+// потомка, а обычные обработчики видят только ESI-аргумент. Результат
+// пишется НАПРЯМУЮ в RAX-слот кадра ВЫЗЫВАЮЩЕГО (frame[0]) - родителю:
+// pid потомка или -1; потомок получает СВОЙ 0 в СВОЁМ клонированном
+// кадре отдельно (см. task_fork_current, tasking.c).
+//
+// В обход syscall_dispatch эта функция теряет и его автоматический
+// smap_allow()/smap_deny() (см. syscall_dispatch выше) - оборачивает
+// сама, тем же приёмом, что и запись argv в kernel-shell'овой команде
+// "run" (та тоже не идёт через syscall_dispatch).
+void sys_fork_impl(unsigned long long parent_rsp) {
+    unsigned long long* frame = (unsigned long long*)parent_rsp;
+
+    int parent_slot = task_current_slot_index();
+    if (parent_slot < 0) { frame[0] = (unsigned long long)-1LL; return; }
+
+    if (!ax_mac_check(AX_CLASS_EXEC)) { frame[0] = (unsigned long long)-1LL; return; }
+
+    int child_slot = -1;
+    for (int i = 0; i < USER_PROGRAM_SLOTS; i++) {
+        if (slot_free[i]) { child_slot = i; break; }
+    }
+    if (child_slot < 0) { frame[0] = (unsigned long long)-1LL; return; }
+
+    unsigned int parent_base = USER_PROGRAM_BASE + (unsigned int)parent_slot * USER_PROGRAM_SLOT_SIZE;
+    unsigned int child_base  = USER_PROGRAM_BASE + (unsigned int)child_slot  * USER_PROGRAM_SLOT_SIZE;
+
+    smap_allow();
+    unsigned char* src = (unsigned char*)(unsigned long long)parent_base;
+    unsigned char* dst = (unsigned char*)(unsigned long long)child_base;
+    for (unsigned int i = 0; i < USER_PROGRAM_SLOT_SIZE; i++) dst[i] = src[i];
+    smap_deny();
+
+    int child_pid = task_fork_current(parent_rsp, child_base, child_slot,
+                                      slot_wx_delta[parent_slot], slot_wx_data_off[parent_slot]);
+    if (child_pid < 0) { frame[0] = (unsigned long long)-1LL; return; }
+
+    slot_free[child_slot]      = 0;
+    slot_exit_code[child_slot] = 0;
+    // Наследует ТЕКУЩИЙ heap break родителя (sbrk() мог сдвинуть его с
+    // момента exec) - не пересчитывается заново из ELF.
+    slot_heap_brk[child_slot]  = slot_heap_brk[parent_slot];
+    slot_wx_delta[child_slot]    = slot_wx_delta[parent_slot];
+    slot_wx_data_off[child_slot] = slot_wx_data_off[parent_slot];
+    // Явно НЕ наследуется в этой версии (см. план/README): открытые fd
+    // (fd_table остаётся привязан к слоту родителя) и активный редирект
+    // вывода - потомок стартует с чистого листа по обоим пунктам.
+    slot_redir_pipe[child_slot] = -1;
+    slot_tty[child_slot] = slot_tty[parent_slot];
+
+    frame[0] = (unsigned long long)child_pid; // родителю: pid потомка
 }
 
 // SYS_TASK_ALIVE: неблокирующая проверка — завершена ли задача в слоте.
@@ -1860,6 +1927,8 @@ void execute_command(char* cmd) {
                     // на консоль) привязывается к консоли, с которой эта команда
                     // пришла - см. KERNEL_TTY_COUNT/slot_tty выше.
                     slot_tty[slot] = tty_active();
+                    slot_wx_delta[slot]    = elf_res.aslr_delta;
+                    slot_wx_data_off[slot] = elf_res.wx_data_offset;
                     task_create_user_isolated(filename, addr, slot, argc, USER_ARGS_VADDR, elf_res.entry,
                                                elf_res.aslr_delta, elf_res.wx_data_offset);
                     print_string("Started.\n");
