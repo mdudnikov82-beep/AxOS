@@ -76,3 +76,14 @@ void map_page_4k_pt(unsigned long *root, unsigned long va,
  * gigapage entries (MMIO L2[0], kernel RAM L2[2]) into it.
  * L2[1] (user VA 0x40000000–0x7FFFFFFF) is left zeroed. */
 unsigned long *paging_create_user_pt(void);
+
+/* fork(): walks src_root's user address space (L2[1] - the only root
+ * entry elf_loader.c ever populates, always as 4KB L0 leaves, never
+ * mega/gigapages) and, for every present page, allocates a fresh
+ * physical page, copies its contents, and maps it into dst_root at the
+ * SAME virtual address with the SAME PTE flags. dst_root must already
+ * exist (see paging_create_user_pt()) with L2[1] still zeroed.
+ * Returns 1 on success, 0 on OOM (partially-populated dst_root is left
+ * as-is - the bump allocator can't unwind individual pages anyway, and
+ * the caller abandons the whole fork attempt on failure). */
+int paging_fork_user_pages(unsigned long *src_root, unsigned long *dst_root);

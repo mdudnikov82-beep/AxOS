@@ -196,3 +196,33 @@ unsigned long *paging_create_user_pt(void) {
     /* pt[1] = 0: user space (0x40000000–0x7FFFFFFF) filled by ELF loader */
     return pt;
 }
+
+int paging_fork_user_pages(unsigned long *src_root, unsigned long *dst_root) {
+    unsigned long l2e = src_root[1];
+    if (!(l2e & PTE_V)) return 1;  /* нечего копировать - вырожденный, но валидный случай */
+    unsigned long *src_l1 = (unsigned long *)((l2e >> 10) << 12);
+
+    for (int i1 = 0; i1 < PT_ENTRIES; i1++) {
+        unsigned long l1e = src_l1[i1];
+        if (!(l1e & PTE_V)) continue;
+        if (l1e & (PTE_R | PTE_W | PTE_X)) continue;  /* мегастраница - elf_loader.c таких не строит, защитно пропускаем */
+        unsigned long *src_l0 = (unsigned long *)((l1e >> 10) << 12);
+
+        for (int i0 = 0; i0 < PT_ENTRIES; i0++) {
+            unsigned long l0e = src_l0[i0];
+            if (!(l0e & PTE_V)) continue;
+            if (!(l0e & (PTE_R | PTE_W | PTE_X))) continue;  /* не лист - на этом уровне не ожидается */
+
+            unsigned long va    = (1UL << 30) | ((unsigned long)i1 << 21) | ((unsigned long)i0 << 12);
+            unsigned long flags = l0e & 0x3FF;                  /* младшие 10 бит PTE - флаги, не PPN */
+            unsigned char *src  = (unsigned char *)((l0e >> 10) << 12);
+
+            void *dst = alloc_page();
+            if (!dst) return 0;  /* OOM - bump-аллокатор, откатывать нечего */
+            for (unsigned int b = 0; b < PAGE_SIZE; b++) ((unsigned char *)dst)[b] = src[b];
+
+            map_page_4k_pt(dst_root, va, (unsigned long)dst, flags);
+        }
+    }
+    return 1;
+}

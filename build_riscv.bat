@@ -447,6 +447,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\grep_rv64.elf) do echo   grep_rv64.elf: %%~zF bytes
 
+echo [U66] forktest.c...
+"%CC%" %UFLAGS% -c %USRC%\forktest.c -o %OUT%\uforktest.o
+if %errorlevel% neq 0 goto :error
+
+echo [U67] Linking forktest...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\forktest_rv64.elf %OUT%\ucrt0.o %OUT%\uforktest.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\forktest_rv64.elf) do echo   forktest_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -484,6 +494,7 @@ copy /b %OUT%\tcptest_rv64.elf     rv64build\fs\rv64\TCPTEST.ELF
 copy /b %OUT%\tcpserve_rv64.elf    rv64build\fs\rv64\TCPSERVE.ELF
 copy /b %OUT%\httpsrv_rv64.elf     rv64build\fs\rv64\HTTPSRV.ELF
 copy /b %OUT%\grep_rv64.elf        rv64build\fs\rv64\GREP.ELF
+copy /b %OUT%\forktest_rv64.elf    rv64build\fs\rv64\FORKTEST.ELF
 copy /b %USRC%\index.htm           rv64build\fs\rv64\INDEX.HTM
 copy /b %USRC%\term.bmp            rv64build\fs\rv64\TERM.BMP
 copy /b %USRC%\about.bmp           rv64build\fs\rv64\ABOUT.BMP

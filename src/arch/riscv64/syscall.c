@@ -512,6 +512,53 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         break;
     }
 
+    case SYS_FORK: {
+        /* Обычный case - в отличие от x86 (см. project_x86_fork), sepc/
+         * frame здесь и так параметры syscall_dispatch, обходить нечего.
+         * Родитель получает pid потомка через ret - обычный хвост этой
+         * функции сам запишет его в ЕГО frame[REG_A0] и продвинет ЕГО
+         * sepc, как у любого другого syscall'а. Потомок же не "return"'ит
+         * отсюда вообще - строим ему ОТДЕЛЬНЫЙ proc_t ниже, с СОБСТВЕННОЙ
+         * копией текущего кадра (a0=0 - fork() возвращает 0 потомку). */
+        int child_pid = -1;
+        for (int i = 0; i < MAX_PROCS; i++) {
+            if (procs[i].state == PROC_UNUSED) { child_pid = i; break; }
+        }
+        if (child_pid < 0) { ret = -1; break; }
+
+        unsigned long *child_pt = paging_create_user_pt();
+        if (!child_pt) { ret = -1; break; }
+        if (!paging_fork_user_pages(procs[current_pid].pagetable, child_pt)) { ret = -1; break; }
+
+        for (int r = 0; r < 32; r++) procs[child_pid].regs[r] = frame[r];
+        procs[child_pid].regs[REG_A0]   = 0;         /* fork() возвращает 0 потомку */
+        procs[child_pid].sepc           = sepc + 4;  /* резюмировать ПОСЛЕ этого ecall'а, как и родитель */
+        procs[child_pid].state          = PROC_RUNNABLE;
+        procs[child_pid].pid            = child_pid;
+        procs[child_pid].wait_pid       = -1;
+        procs[child_pid].exit_code      = 0;
+        procs[child_pid].wake_tick      = 0;
+        procs[child_pid].stdout_pipe_id = -1;  /* НЕ наследуется - как и на x86 */
+        procs[child_pid].stdin_pipe_id  = -1;
+        procs[child_pid].pagetable      = child_pt;
+        procs[child_pid].heap_brk       = procs[current_pid].heap_brk;
+        procs[child_pid].stack_va       = procs[current_pid].stack_va; /* тот же VA, отдельная физстраница (уже скопирована выше) */
+        procs[child_pid].priority       = procs[current_pid].priority;
+        procs[child_pid].slice_left     = procs[child_pid].priority;
+        procs[child_pid].ticks          = 0;
+        {
+            int k = 0;
+            while (procs[current_pid].name[k] && k < 12) {
+                procs[child_pid].name[k] = procs[current_pid].name[k];
+                k++;
+            }
+            procs[child_pid].name[k] = '\0';
+        }
+
+        ret = (long)child_pid;  /* родителю: pid потомка */
+        break;
+    }
+
     case SYS_WAIT: {
         int wpid = (int)arg0;
         if (wpid < 0 || wpid >= MAX_PROCS) { ret = -1; break; }

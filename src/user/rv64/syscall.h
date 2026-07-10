@@ -34,6 +34,7 @@
 #define SYS_NET_RECV      28
 #define SYS_SLEEP         29
 #define SYS_EXEC_PIPE     30
+#define SYS_FORK          31
 
 static inline long __syscall0(long nr) {
     register long _nr  __asm__("a7") = nr;
@@ -126,6 +127,15 @@ static inline int readdir(unsigned int index, char *name_buf, unsigned int *size
 
 static inline int getpid(void) {
     return (int)__syscall0(SYS_GETPID);
+}
+
+/* fork() → 0 in the child, new pid (>0) in the parent, -1 on error
+ * (no free process slot, or OOM copying the address space). Both
+ * processes continue executing right after this call, with independent
+ * copies of the whole address space - open fds and any active pipe
+ * redirect are NOT inherited by the child. */
+static inline int fork(void) {
+    return (int)__syscall0(SYS_FORK);
 }
 
 /* exec(path) → new pid (≥0) or -1 on error.
