@@ -467,6 +467,27 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\scdemo_rv64.elf) do echo   scdemo_rv64.elf: %%~zF bytes
 
+echo [U70] cfi.c (NOT -finstrument-functions - would self-instrument)...
+"%CC%" %UFLAGS% -fno-omit-frame-pointer -c %USRC%\cfi.c -o %OUT%\ucfi.o
+if %errorlevel% neq 0 goto :error
+
+echo [U71] cfidemo.c (WITH -finstrument-functions)...
+REM -fno-optimize-sibling-calls is required: without it, -Os tail-calls
+REM (jr, not call+ret) the exit-hook out of an instrumented function's
+REM epilogue, which collapses that function's OWN stack frame before the
+REM hook ever runs - the frame-walk then inspects the CALLER's frame
+REM instead, silently checking the wrong thing. x86's cfidemo never hits
+REM this because it builds at implicit -O0 (no -O flag), where GCC never
+REM performs sibling-call optimization at all.
+"%CC%" %UFLAGS% -fno-omit-frame-pointer -fno-optimize-sibling-calls -finstrument-functions -c %USRC%\cfidemo.c -o %OUT%\ucfidemo.o
+if %errorlevel% neq 0 goto :error
+
+echo [U72] Linking cfidemo...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\cfidemo_rv64.elf %OUT%\ucrt0.o %OUT%\ucfidemo.o %OUT%\ucfi.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\cfidemo_rv64.elf) do echo   cfidemo_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -506,6 +527,7 @@ copy /b %OUT%\httpsrv_rv64.elf     rv64build\fs\rv64\HTTPSRV.ELF
 copy /b %OUT%\grep_rv64.elf        rv64build\fs\rv64\GREP.ELF
 copy /b %OUT%\forktest_rv64.elf    rv64build\fs\rv64\FORKTEST.ELF
 copy /b %OUT%\scdemo_rv64.elf      rv64build\fs\rv64\SCDEMO.ELF
+copy /b %OUT%\cfidemo_rv64.elf     rv64build\fs\rv64\CFIDEMO.ELF
 copy /b %USRC%\index.htm           rv64build\fs\rv64\INDEX.HTM
 copy /b %USRC%\term.bmp            rv64build\fs\rv64\TERM.BMP
 copy /b %USRC%\about.bmp           rv64build\fs\rv64\ABOUT.BMP
