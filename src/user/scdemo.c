@@ -16,7 +16,7 @@ static void test_exec(void) {
     // Ядро должно напечатать "[seccomp] forbidden 0x0B" и убить задачу.
     // Если не убило — ax_exit() есть в AX_SC_STDIO, поэтому мы корректно завершимся.
     ax_exec("HELLO.BIN");
-    ax_exit();
+    ax_exit(0);
 }
 
 static void test_disk(void) {
@@ -26,7 +26,7 @@ static void test_disk(void) {
     // Ядро должно напечатать "[seccomp] forbidden 0x19" и убить задачу.
     unsigned char buf[512];
     ax_disk_read_sector(0, buf);
-    ax_exit();
+    ax_exit(0);
 }
 
 static void test_ok(void) {

@@ -62,8 +62,9 @@ static void cmd_help(void) {
     print("\r\nAxSH/RV64 built-in commands:\r\n");
     print("  ls              list files on disk\r\n");
     print("  cat <FILE>      print file contents\r\n");
-    print("  run <FILE>      run program (foreground, waits for exit)\r\n");
-    print("  run <FILE> &    run program in background\r\n");
+    print("  run <FILE> [args]  run program (foreground, waits for exit)\r\n");
+    print("  run <FILE> [args] &  run program in background\r\n");
+    print("  cmd1 | cmd2     stream cmd1's output into cmd2's stdin\r\n");
     print("  kill <PID>      terminate a background process\r\n");
     print("  nice <PID> <N>  set a task's scheduler priority (1-10)\r\n");
     print("  ps              list all processes\r\n");
@@ -199,18 +200,32 @@ static void cmd_run(const char *arg) {
     /* Strip spaces between filename and & */
     while (ti > 0 && tmp[ti-1] == ' ') { tmp[--ti] = '\0'; }
 
-    /* Upcase filename */
+    /* Разбиваем на имя файла (до первого пробела, приводим к верхнему
+     * регистру - FAT12) и остаток аргументов (БЕЗ приведения регистра -
+     * это пользовательские данные, например паттерн grep, портить их
+     * uppercase'ом нельзя). Раньше весь tmp целиком (включая любые
+     * аргументы) грузился в 13-байтный fname с uppercase - многословный
+     * run никогда не работал по-настоящему. */
     char fname[14]; int fi = 0;
     const char *p = tmp;
-    while (*p && fi < 13) {
+    while (*p && *p != ' ' && fi < 13) {
         char c = *p++;
         fname[fi++] = (c >= 'a' && c <= 'z') ? c - 32 : c;
     }
     fname[fi] = '\0';
+    while (*p == ' ') p++;
 
     if (!fname[0]) { print("Usage: run <FILE> [&]\r\n"); return; }
 
-    int pid = exec(fname);
+    char cmdline[80]; int ci = 0;
+    { const char *s = fname; while (*s && ci < 79) cmdline[ci++] = *s++; }
+    if (*p) {
+        cmdline[ci++] = ' ';
+        while (*p && ci < 79) cmdline[ci++] = *p++;
+    }
+    cmdline[ci] = '\0';
+
+    int pid = exec(cmdline);
     if (pid < 0) {
         print("run: failed to load ");
         print(fname);
@@ -236,6 +251,45 @@ static void cmd_run(const char *arg) {
         print_udec((unsigned long)(unsigned int)code);
         print("\r\n\r\n");
     }
+}
+
+/* "cmd1 | cmd2" - настоящий потоковый конвейер (см. exec_pipe(),
+ * syscall.h): оба запускаются СРАЗУ, cmd1's stdout течёт в pipe_bufs[0]
+ * (ядро, syscall.c), cmd2's stdin читает оттуда же - блокируется, пока
+ * пусто и cmd1 жив (см. PROC_WAITING_PIPE). foreground-ожидание только
+ * на cmd2 - cmd1's собственный SYS_EXIT сам выставит writer_done. Один
+ * уровень pipe, не цепочка - как и на x86. pipe_pos - индекс '|' в line. */
+static void cmd_pipe(const char *line, int pipe_pos) {
+    char cmd1[64], cmd2[64];
+    int k = 0;
+    while (k < pipe_pos && k < 63) { cmd1[k] = line[k]; k++; }
+    while (k > 0 && cmd1[k-1] == ' ') k--;
+    cmd1[k] = '\0';
+
+    int j = pipe_pos + 1;
+    while (line[j] == ' ') j++;
+    int m = 0;
+    while (line[j] && m < 63) cmd2[m++] = line[j++];
+    while (m > 0 && cmd2[m-1] == ' ') m--;
+    cmd2[m] = '\0';
+
+    if (!cmd1[0] || !cmd2[0]) { print("Usage: cmd1 | cmd2\r\n"); return; }
+
+    int pid1 = exec_pipe(cmd1, 0, -1);
+    if (pid1 < 0) { print("sh: pipe: left side not found\r\n"); return; }
+
+    int pid2 = exec_pipe(cmd2, -1, 0);
+    if (pid2 < 0) { print("sh: pipe: right side not found\r\n"); return; }
+
+    print("\r\n[pipe] pid=");
+    print_udec((unsigned long)pid2);
+    print(" started...\r\n");
+    int code = wait(pid2);
+    print("[pipe] pid=");
+    print_udec((unsigned long)pid2);
+    print(" exited, code=");
+    print_udec((unsigned long)(unsigned int)code);
+    print("\r\n\r\n");
 }
 
 static void cmd_kill(const char *arg) {
@@ -291,6 +345,12 @@ int main(void) {
 
         int len = readline(line, sizeof(line));
         if (len == 0) continue;
+
+        {
+            int pipe_pos = -1;
+            for (int i = 0; line[i]; i++) { if (line[i] == '|') { pipe_pos = i; break; } }
+            if (pipe_pos >= 0) { cmd_pipe(line, pipe_pos); continue; }
+        }
 
         if (seq(line, "exit") || seq(line, "quit")) {
             print("Goodbye.\r\n");

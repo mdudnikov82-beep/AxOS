@@ -7,9 +7,12 @@ int    current_pid = -1;
 
 void proc_init(void) {
     for (int i = 0; i < MAX_PROCS; i++) {
-        procs[i].state    = PROC_UNUSED;
-        procs[i].pid      = i;
-        procs[i].wait_pid = -1;
+        procs[i].state          = PROC_UNUSED;
+        procs[i].pid            = i;
+        procs[i].wait_pid       = -1;
+        procs[i].wake_tick      = 0;
+        procs[i].stdout_pipe_id = -1;
+        procs[i].stdin_pipe_id  = -1;
     }
 }
 
@@ -18,9 +21,12 @@ int proc_create(const char *name, unsigned long entry,
     for (int i = 0; i < MAX_PROCS; i++) {
         if (procs[i].state != PROC_UNUSED) continue;
 
-        procs[i].state       = PROC_RUNNABLE;
-        procs[i].exit_code   = 0;
-        procs[i].wait_pid    = -1;
+        procs[i].state          = PROC_RUNNABLE;
+        procs[i].exit_code      = 0;
+        procs[i].wait_pid       = -1;
+        procs[i].wake_tick      = 0;
+        procs[i].stdout_pipe_id = -1;
+        procs[i].stdin_pipe_id  = -1;
         procs[i].pagetable   = pt;
         procs[i].priority    = PRIORITY_DEFAULT;
         procs[i].slice_left  = PRIORITY_DEFAULT;
@@ -121,4 +127,25 @@ void proc_set_priority(int pid, int priority) {
     if (priority < PRIORITY_MIN) priority = PRIORITY_MIN;
     if (priority > PRIORITY_MAX) priority = PRIORITY_MAX;
     procs[pid].priority = priority;
+}
+
+extern int pipe_ready(int pipe_id); // syscall.c - 1 если у pipe'а есть данные или писатель закрылся
+
+/* Promotes any PROC_SLEEPING process whose wake_tick has passed, or any
+ * PROC_WAITING_PIPE process whose pipe is ready (see pipe_ready(),
+ * syscall.c), back to PROC_RUNNABLE - see proc.h. Must run every timer
+ * tick unconditionally (kernel_main.c calls this before the SPP-gated
+ * reschedule check) - neither a sleeper nor a pipe-blocked reader gets
+ * its own turn back on its own to notice the condition changed. */
+void proc_wake_sleepers(void) {
+    unsigned long now;
+    __asm__ volatile("csrr %0, time" : "=r"(now));
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (procs[i].state == PROC_SLEEPING && now >= procs[i].wake_tick) {
+            procs[i].state = PROC_RUNNABLE;
+        }
+        if (procs[i].state == PROC_WAITING_PIPE && pipe_ready(procs[i].stdin_pipe_id)) {
+            procs[i].state = PROC_RUNNABLE;
+        }
+    }
 }

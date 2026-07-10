@@ -74,6 +74,7 @@ int main(int argc, char** argv) {
             ax_print("  unlock / lock             unlock/lock the disk for writing\n");
             ax_print("  paste                     print the clipboard (clip get)\n");
             ax_print("  nice <pid> <1-10>         set a task's scheduler priority\n");
+            ax_print("  kill <pid>                terminate a task by pid\n");
             ax_print("  help                      show this message\n");
             ax_print("  exit                      quit AxSH\n");
             ax_print("\n");
@@ -111,6 +112,22 @@ int main(int argc, char** argv) {
             while (*p >= '0' && *p <= '9') prio = prio*10 + (*p++ - '0');
             ax_set_priority(pid, prio);
             ax_printf("\033[32mnice: pid %d -> priority %d\033[0m\n", pid, prio);
+            continue;
+        }
+
+        // "kill <pid>" - см. ax_kill (SYS_KILL). pid - как в колонке "ID"
+        // вывода `ps`, как и у nice. Может убить задачу с ЛЮБОЙ консоли,
+        // не только foreground-задачу активной (в отличие от Ctrl+C).
+        if (sh_strncmp(line, "kill ", 5) == 0) {
+            const char* p = line + 5;
+            int pid = 0;
+            while (*p == ' ') p++;
+            while (*p >= '0' && *p <= '9') pid = pid*10 + (*p++ - '0');
+            if (ax_kill(pid) == 0) {
+                ax_printf("\033[32mkill: pid %d terminated\033[0m\n", pid);
+            } else {
+                ax_printf("\033[31mkill: no such process: %d\033[0m\n", pid);
+            }
             continue;
         }
 
@@ -158,13 +175,16 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // Pipe: "cmd1 | cmd2". Планировщик здесь последовательный (см.
-        // ax_task_alive ниже), настоящего потокового конвейера нет - это
-        // "пакетный" pipe: cmd1 выполняется ПОЛНОСТЬЮ, его stdout целиком
-        // оседает во временном файле PIPE.TMP (через тот же механизм, что
-        // и обычный "> file"), и только после этого cmd2 запускается с
-        // именем PIPE.TMP, дописанным последним аргументом - имитация
-        // stdin без изменения ABI. Один уровень pipe, не цепочка.
+        // Pipe: "cmd1 | cmd2" - настоящий потоковый конвейер. cmd1's
+        // stdout течёт в pipe_bufs[0] (ядро, kernel.c) через тот же
+        // редирект-механизм, что и обычный "> file" (ax_exec_redir с
+        // "PIPE:0" вместо имени файла), cmd2 читает "PIPE:0" как обычное
+        // имя файла (ax_open/ax_fread - без изменений в cat.c/grep.c) -
+        // SYS_FREAD блокирует cmd2, пока данных нет и cmd1 ещё жив (см.
+        // task_wait_pipe_current, tasking.c). Оба запускаются СРАЗУ,
+        // работают конкурентно - foreground-ожидание только на cmd2,
+        // cmd1's собственный on_task_exit() выставит EOF пайпу сам. Один
+        // уровень pipe, не цепочка.
         {
             int pipe_pos = -1;
             for (int i = 0; line[i]; i++) { if (line[i] == '|') { pipe_pos = i; break; } }
@@ -182,19 +202,14 @@ int main(int argc, char** argv) {
                 while (m > 0 && cmd2[m-1] == ' ') m--;
                 cmd2[m] = '\0';
 
-                int slot1 = ax_exec_redir(cmd1, "PIPE.TMP");
+                int slot1 = ax_exec_redir(cmd1, "PIPE:0");
                 if (slot1 < 0) {
                     ax_print("\033[31msh: pipe: left side not found\033[0m\n");
                 } else {
-                    ax_set_foreground(slot1);
-                    while (ax_task_alive(slot1)) { ax_sleep_ms(10); }
-                    ax_set_foreground(-1);
-
-                    if (m > 0 && m < 54) {
+                    if (m > 0 && m < 58) {
                         cmd2[m] = ' ';
                         cmd2[m+1]='P'; cmd2[m+2]='I'; cmd2[m+3]='P'; cmd2[m+4]='E';
-                        cmd2[m+5]='.'; cmd2[m+6]='T'; cmd2[m+7]='M'; cmd2[m+8]='P';
-                        cmd2[m+9]='\0';
+                        cmd2[m+5]=':'; cmd2[m+6]='0'; cmd2[m+7]='\0';
                     }
                     int slot2 = ax_exec(cmd2);
                     if (slot2 == -1) {
@@ -209,7 +224,6 @@ int main(int argc, char** argv) {
                         ax_set_foreground(-1);
                     }
                 }
-                ax_unlink("PIPE.TMP");
                 continue;
             }
         }
@@ -263,6 +277,7 @@ int main(int argc, char** argv) {
             ax_set_foreground(slot);
             while (ax_task_alive(slot)) { ax_sleep_ms(10); }
             ax_set_foreground(-1);
+            ax_printf("\033[36m[exit code: %d]\033[0m\n", ax_exit_code(slot));
             if (has_redir && redir[0])
                 ax_printf("\033[32m-> %s\033[0m\n", redir);
         }

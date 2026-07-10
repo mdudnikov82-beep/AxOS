@@ -437,6 +437,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\httpsrv_rv64.elf) do echo   httpsrv_rv64.elf: %%~zF bytes
 
+echo [U64] grep.c...
+"%CC%" %UFLAGS% -c %USRC%\grep.c -o %OUT%\ugrep.o
+if %errorlevel% neq 0 goto :error
+
+echo [U65] Linking grep...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\grep_rv64.elf %OUT%\ucrt0.o %OUT%\ugrep.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\grep_rv64.elf) do echo   grep_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -473,6 +483,7 @@ copy /b %OUT%\dnscachet_rv64.elf   rv64build\fs\rv64\DNSCACHE.ELF
 copy /b %OUT%\tcptest_rv64.elf     rv64build\fs\rv64\TCPTEST.ELF
 copy /b %OUT%\tcpserve_rv64.elf    rv64build\fs\rv64\TCPSERVE.ELF
 copy /b %OUT%\httpsrv_rv64.elf     rv64build\fs\rv64\HTTPSRV.ELF
+copy /b %OUT%\grep_rv64.elf        rv64build\fs\rv64\GREP.ELF
 copy /b %USRC%\index.htm           rv64build\fs\rv64\INDEX.HTM
 copy /b %USRC%\term.bmp            rv64build\fs\rv64\TERM.BMP
 copy /b %USRC%\about.bmp           rv64build\fs\rv64\ABOUT.BMP

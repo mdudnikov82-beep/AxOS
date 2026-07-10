@@ -39,6 +39,8 @@ typedef struct {
 #define PT_LOAD    1
 #define ELFCLASS64 2
 
+#define ELF_ARGS_MAX 15 /* макс. число argv[] - см. запись в USER_ARGS_VA ниже */
+
 static void put_hex32(unsigned long v) {
     for (int s = 28; s >= 0; s -= 4)
         uart_putc("0123456789abcdef"[(v >> s) & 0xF]);
@@ -63,7 +65,11 @@ static unsigned long pick_stack_va(void) {
     unsigned long t;
     __asm__ volatile("csrr %0, time" : "=r"(t));
     unsigned long seed = t ^ 0xC2B2AE3D27D4EB4FUL;
-    unsigned long span_pages = (USER_VA_TOP - USER_HEAP_CEILING) / PAGE_SIZE - 1;
+    // -1 страница снизу (существующий зазор) - ещё -1 страница, чтобы
+    // никогда не попасть на USER_ARGS_VA (фиксированная страница argv
+    // на самом верху, см. elf_loader.h) - span считается от
+    // USER_ARGS_VA, а не от USER_VA_TOP.
+    unsigned long span_pages = (USER_ARGS_VA - USER_HEAP_CEILING) / PAGE_SIZE - 1;
     unsigned long page_off = seed % span_pages;
     return USER_HEAP_CEILING + page_off * PAGE_SIZE;
 }
@@ -81,7 +87,17 @@ static void *alloc_pages_raw(unsigned int n) {
 /* Load ELF from FAT12, map into a fresh per-process page table,
  * create a PCB entry.  Returns pid (≥0) or -1 on error.
  * Does NOT jump to U-mode; caller is responsible for that. */
-int elf_load(const char *filename) {
+int elf_load(const char *cmdline) {
+    /* Разбираем "FILENAME.ELF arg1 arg2..." - имя до первого пробела
+     * идёт в vfs_load(), остаток запоминаем как есть (без учёта
+     * регистра - см. USER_ARGS_VA ниже) для argv[1..] новой задачи. */
+    char filename[64]; int fi = 0;
+    const char *p = cmdline;
+    while (*p && *p != ' ' && fi < 63) filename[fi++] = *p++;
+    filename[fi] = '\0';
+    while (*p == ' ') p++;
+    const char *args_rest = p; /* может быть "" - тогда argc==1 */
+
     /* Read ELF file into a temporary buffer (up to 256 KB). */
     unsigned int maxsz  = 256 * 1024;
     unsigned char *buf  = (unsigned char *)alloc_pages_raw(maxsz / PAGE_SIZE);
@@ -207,6 +223,48 @@ int elf_load(const char *filename) {
     if (pid < 0) { uart_puts("[elf] no free process slot\r\n"); return -1; }
 
     procs[pid].stack_va = stack_va;
+
+    /* argv: одна страница на USER_ARGS_VA - массив указателей (argv[]),
+     * NULL-terminated, в начале страницы, сами строки следом. argv[0] =
+     * имя файла (filename, уже без пробелов), argv[1..] = args_rest,
+     * разбитый по пробелам - БЕЗ приведения регистра (пользовательские
+     * данные вроде паттерна grep не должны портиться). */
+    {
+        char full_args[192]; int fai = 0;
+        { const char *s = filename; while (*s && fai < 191) full_args[fai++] = *s++; }
+        if (args_rest[0]) {
+            full_args[fai++] = ' ';
+            const char *s = args_rest;
+            while (*s && fai < 191) full_args[fai++] = *s++;
+        }
+        full_args[fai] = '\0';
+
+        void *args_phys = alloc_page();
+        if (!args_phys) { uart_puts("[elf] OOM for argv\r\n"); return -1; }
+        unsigned long *argv_ptrs  = (unsigned long *)args_phys;
+        unsigned long  ptrs_bytes = (unsigned long)(ELF_ARGS_MAX + 1) * 8UL;
+        char          *str_area   = (char *)args_phys + ptrs_bytes;
+        unsigned long  str_va     = USER_ARGS_VA + ptrs_bytes;
+        unsigned int   str_off    = 0;
+        unsigned int   str_cap    = (unsigned int)(PAGE_SIZE - ptrs_bytes);
+        int argc = 0;
+
+        const char *q = full_args;
+        while (*q == ' ') q++;
+        while (*q && argc < ELF_ARGS_MAX) {
+            unsigned int start = str_off;
+            while (*q && *q != ' ' && str_off < str_cap - 1) str_area[str_off++] = *q++;
+            str_area[str_off++] = '\0';
+            argv_ptrs[argc++] = str_va + start;
+            while (*q == ' ') q++;
+        }
+        argv_ptrs[argc] = 0;
+
+        map_page_4k_pt(pt, USER_ARGS_VA, (unsigned long)args_phys,
+                       PTE_V | PTE_R | PTE_U | PTE_A);
+        procs[pid].regs[10] = (unsigned long)argc; /* a0 = argc */
+        procs[pid].regs[11] = USER_ARGS_VA;        /* a1 = argv */
+    }
 
     /* Heap starts on the page right after the highest loaded segment,
      * plus небольшой случайный сдвиг (ASLR, тот же приём, что и у x86

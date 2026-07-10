@@ -32,6 +32,8 @@
 #define SYS_NET_MAC       26
 #define SYS_NET_SEND      27
 #define SYS_NET_RECV      28
+#define SYS_SLEEP         29
+#define SYS_EXEC_PIPE     30
 
 static inline long __syscall0(long nr) {
     register long _nr  __asm__("a7") = nr;
@@ -127,9 +129,22 @@ static inline int getpid(void) {
 }
 
 /* exec(path) → new pid (≥0) or -1 on error.
- * The new process is immediately RUNNABLE; call wait(pid) to block until it exits. */
+ * The new process is immediately RUNNABLE; call wait(pid) to block until it exits.
+ * path may be "FILENAME.ELF arg1 arg2..." - argv[1..] reach the new
+ * process's main(int argc, char **argv). */
 static inline int exec(const char *path) {
     return (int)__syscall1(SYS_EXEC, (long)path);
+}
+
+/* exec_pipe(cmdline, stdout_pipe_id, stdin_pipe_id) → new pid or -1.
+ * stdout_pipe_id >= 0: the new process's write(1/2,...) goes to that
+ * pipe instead of UART (and resets the pipe fresh - only ever pass this
+ * for the WRITER side of a pipe). stdin_pipe_id >= 0: its read(0,...)
+ * blocks on that pipe instead of polling UART (READER side - the writer
+ * must already be running, same pipe id). Pass -1 for whichever side
+ * doesn't apply. */
+static inline int exec_pipe(const char *cmdline, int stdout_pipe_id, int stdin_pipe_id) {
+    return (int)__syscall3(SYS_EXEC_PIPE, (long)cmdline, stdout_pipe_id, stdin_pipe_id);
 }
 
 /* wait(pid) → exit code of the process; blocks until it exits. */
@@ -176,11 +191,12 @@ static inline void reboot(void) {
     __syscall1(SYS_POWER, 1);
 }
 
-/* sleep_ms(n) — busy-waits via yield(), giving other processes the CPU.
- * CLINT `time` CSR ticks at 10 MHz on QEMU virt. */
+/* sleep_ms(n) — real block via SYS_SLEEP: the kernel marks this process
+ * PROC_SLEEPING and switches to something else, waking it again once its
+ * deadline (CSR `time`, 10 MHz on QEMU virt) has passed. Not a busy-wait
+ * loop - see proc_wake_sleepers() (proc.c) and SYS_SLEEP (syscall.c). */
 static inline void sleep_ms(unsigned long ms) {
-    long end = gettime() + (long)ms * 10000L;
-    while (gettime() < end) yield();
+    __syscall1(SYS_SLEEP, (long)ms);
 }
 
 /* B8G8R8A8_UNORM packing: byte order in memory is B,G,R,A. On this

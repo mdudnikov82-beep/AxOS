@@ -17,5 +17,5 @@ void ax_init_stack_guard(void) {
 
 void __stack_chk_fail(void) {
     ax_print("\033[31m*** STACK SMASH DETECTED ***\033[0m\n");
-    ax_exit();
+    ax_exit(-1);
 }

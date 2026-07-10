@@ -55,6 +55,6 @@ void __cyg_profile_func_exit(void* this_fn, void* call_site) {
 
     if (actual != expected) {
         ax_print((char*)"\033[31m*** CFI: return address hijacked! ***\033[0m\n");
-        ax_exit();
+        ax_exit(-1);
     }
 }

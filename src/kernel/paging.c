@@ -383,6 +383,7 @@ void page_fault_handler_main(unsigned long long faulting_address,
         else if (err & (1ULL << 1))
             print_string(" [W^X write violation]");
         print_string(" - task killed ***\033[0m\n");
+        task_set_current_exit_code(-1); // аварийное завершение - как и kill
         task_mark_current_exiting();
         frame[PF_FRAME_RIP] = USER_SPIN_ADDR;
         return;

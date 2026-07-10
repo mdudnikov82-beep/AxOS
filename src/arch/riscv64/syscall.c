@@ -51,10 +51,48 @@ typedef struct {
 
 static fd_entry_t fds[MAX_FDS];
 
+/* ---- Pipes: pipe_bufs[] is shared between TWO different processes
+ * (a writer whose stdout_pipe_id points at it, a reader whose
+ * stdin_pipe_id does) - the only kernel-owned buffer on this platform
+ * visible to more than one process at once. No writer backpressure
+ * (overflow silently truncates) - same simplification the x86 port's
+ * streaming pipes made. */
+#define PIPE_MAX      2
+#define PIPE_BUF_SIZE 2048
+typedef struct {
+    unsigned char data[PIPE_BUF_SIZE];
+    unsigned int  len;
+    unsigned int  read_pos;
+    int           writer_done;
+    int           in_use;
+} pipe_buf_t;
+static pipe_buf_t pipe_bufs[PIPE_MAX];
+
+/* 1 если у pipe'а есть непрочитанные данные ИЛИ писатель уже закрылся
+ * (EOF читателю). Используется proc_wake_sleepers()'s wake-скан (proc.c). */
+int pipe_ready(int id) {
+    if (id < 0 || id >= PIPE_MAX) return 1; /* некорректный id - не блокируем вечно */
+    return pipe_bufs[id].read_pos < pipe_bufs[id].len || pipe_bufs[id].writer_done;
+}
+
+/* См. proc.h. Вызывается при выходе ЛЮБОГО процесса (SYS_EXIT, SYS_KILL,
+ * page-fault kill в kernel_main.c) - там, где известен pipe_id
+ * завершающегося процесса. */
+void pipe_mark_writer_done(int pipe_id) {
+    if (pipe_id >= 0 && pipe_id < PIPE_MAX) pipe_bufs[pipe_id].writer_done = 1;
+}
+
 /* ---- Syscall implementations ---- */
 
 static long sys_write(unsigned long fd, const char *buf, unsigned long len) {
     if (fd == 1 || fd == 2) {
+        int pipe_id = procs[current_pid].stdout_pipe_id;
+        if (pipe_id >= 0) {
+            pipe_buf_t *p = &pipe_bufs[pipe_id];
+            unsigned long n = 0;
+            while (n < len && p->len < PIPE_BUF_SIZE - 1) p->data[p->len++] = (unsigned char)buf[n++];
+            return (long)n;
+        }
         for (unsigned long i = 0; i < len; i++) uart_putc(buf[i]);
         /* Mirror stdout/stderr onto the graphical console too — every
          * program's normal write(1, ...) output shows up on screen, not
@@ -202,6 +240,31 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
 
     case SYS_READ:
         if (!user_range_ok(arg1, arg2)) { ret = -1; break; }
+        if (arg0 == 0 && procs[current_pid].stdin_pipe_id >= 0) {
+            int pipe_id = procs[current_pid].stdin_pipe_id;
+            pipe_buf_t *p = &pipe_bufs[pipe_id];
+            if (p->read_pos < p->len) {
+                unsigned long avail = (unsigned long)(p->len - p->read_pos);
+                if (avail > arg2) avail = arg2;
+                unsigned char *dst = (unsigned char *)arg1;
+                for (unsigned long i = 0; i < avail; i++) dst[i] = p->data[p->read_pos + i];
+                p->read_pos += (unsigned int)avail;
+                ret = (long)avail;
+                break;
+            }
+            if (p->writer_done) { ret = 0; break; } /* EOF */
+            /* Пусто, писатель ещё жив - настоящий блок (снимает задачу с
+             * ротации до pipe_ready(), см. proc_wake_sleepers в proc.c) -
+             * не busy-poll, в отличие от non-blocking-stdin retry ниже
+             * (там it's cheap enough to just re-check every turn; здесь
+             * ждём другой процесс, не человека за клавиатурой). */
+            for (int r = 1; r < 32; r++) procs[current_pid].regs[r] = frame[r];
+            procs[current_pid].sepc  = sepc;   /* retry ecall после пробуждения */
+            procs[current_pid].state = PROC_WAITING_PIPE;
+            schedule(frame, sepc);
+            user_access_disable();
+            return;
+        }
         if (arg0 == 0) {
             /* Non-blocking stdin: if no char is ready, yield CPU and retry
              * the same ecall (sepc NOT advanced).  On the next scheduling
@@ -229,6 +292,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         int epid = current_pid;
         procs[epid].state     = PROC_ZOMBIE;
         procs[epid].exit_code = (int)arg0;
+        pipe_mark_writer_done(procs[epid].stdout_pipe_id);
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_WAITING && procs[i].wait_pid == epid) {
                 procs[i].state        = PROC_RUNNABLE;
@@ -421,6 +485,33 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         ret = (long)elf_load((const char *)arg0);
         break;
 
+    case SYS_EXEC_PIPE: {
+        /* exec_pipe(cmdline, stdout_pipe_id, stdin_pipe_id) - как
+         * SYS_EXEC, но опционально подключает stdout/stdin новой задачи
+         * к pipe_bufs[N] вместо UART - см. sys_write/SYS_READ выше.
+         * Ровно один из двух id должен быть >=0 в реальном использовании
+         * (sh.c запускает писателя с stdout_pipe_id, читателя со
+         * stdin_pipe_id), но оба одновременно не запрещены явно. */
+        if (!user_string_ok(arg0)) { ret = -1; break; }
+        int out_id = (int)arg1;
+        int in_id  = (int)arg2;
+        if (in_id >= 0 && !pipe_bufs[in_id].in_use) { ret = -1; break; }
+        int pid = elf_load((const char *)arg0);
+        if (pid < 0) { ret = -1; break; }
+        if (out_id >= 0) {
+            /* Только писатель сбрасывает буфер - читатель НЕ должен
+             * затирать то, что писатель уже мог успеть произвести. */
+            pipe_bufs[out_id].len         = 0;
+            pipe_bufs[out_id].read_pos    = 0;
+            pipe_bufs[out_id].writer_done = 0;
+            pipe_bufs[out_id].in_use      = 1;
+        }
+        procs[pid].stdout_pipe_id = out_id;
+        procs[pid].stdin_pipe_id  = in_id;
+        ret = (long)pid;
+        break;
+    }
+
     case SYS_WAIT: {
         int wpid = (int)arg0;
         if (wpid < 0 || wpid >= MAX_PROCS) { ret = -1; break; }
@@ -439,6 +530,25 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[current_pid].regs[REG_A0] = 0;          /* overwritten on wake */
         procs[current_pid].state        = PROC_WAITING;
         procs[current_pid].wait_pid     = wpid;
+        schedule(frame, sepc + 4);
+        user_access_disable();
+        return;  /* frame now holds next process's state; skip sepc+4 */
+    }
+
+    case SYS_SLEEP: {
+        /* Blocks the current process for arg0 milliseconds - real block,
+         * not the old busy-yield loop (see src/user/rv64/syscall.h). CSR
+         * `time` ticks at 10MHz on QEMU virt (same conversion sleep_ms()'s
+         * removed userspace loop used to do itself). */
+        unsigned long ms = (unsigned long)arg0;
+        unsigned long now;
+        __asm__ volatile("csrr %0, time" : "=r"(now));
+
+        for (int r = 1; r < 32; r++) procs[current_pid].regs[r] = frame[r];
+        procs[current_pid].sepc      = sepc + 4;  /* resume after ecall */
+        procs[current_pid].regs[REG_A0] = 0;
+        procs[current_pid].state     = PROC_SLEEPING;
+        procs[current_pid].wake_tick = now + ms * 10000UL;
         schedule(frame, sepc + 4);
         user_access_disable();
         return;  /* frame now holds next process's state; skip sepc+4 */
@@ -466,6 +576,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
             procs[kpid].state == PROC_UNUSED) { ret = -1; break; }
         procs[kpid].state     = PROC_ZOMBIE;
         procs[kpid].exit_code = -1;
+        pipe_mark_writer_done(procs[kpid].stdout_pipe_id);
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_WAITING && procs[i].wait_pid == kpid) {
                 procs[i].state        = PROC_RUNNABLE;
@@ -479,7 +590,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
 
     case SYS_PS: {
         static const char *stnames[] =
-            {"unused", "runnable", "running", "waiting", "zombie"};
+            {"unused", "runnable", "running", "waiting", "zombie", "sleeping", "waitpipe"};
         uart_puts("PID  STATE     NAME          PRIO  TICKS\r\n");
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_UNUSED) continue;

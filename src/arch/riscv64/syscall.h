@@ -29,6 +29,8 @@
 #define SYS_NET_MAC       26  /* net_mac() -> packed 6-byte MAC in low 48 bits, or -1 if no device */
 #define SYS_NET_SEND      27  /* net_send(buf, len) -> 0 ok / -1 err (raw Ethernet frame, no header) */
 #define SYS_NET_RECV      28  /* net_recv(buf, max_len) -> bytes copied, 0 if none pending/no device */
+#define SYS_SLEEP         29  /* sleep_ms(ms) -> 0 (real block via PROC_SLEEPING, not a busy-loop) */
+#define SYS_EXEC_PIPE     30  /* exec_pipe(cmdline, stdout_pipe_id, stdin_pipe_id) -> new pid or -1 */
 
 /* Kernel-side entry point.
  * frame[] = saved registers from trap_entry (sd xN, N*8(sp)):

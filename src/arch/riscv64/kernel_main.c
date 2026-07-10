@@ -65,12 +65,22 @@ void trap_handler(unsigned long cause, unsigned long epc,
         tick_count++;
         sbi_set_timer(read_time() + TIMER_INTERVAL);
 
-        /* Preempt only when the interrupt came from U-mode (sstatus.SPP=0).
-         * If SPP=1 the kernel itself is running (e.g. spinning in sys_read)
-         * and touching the trap frame would corrupt the kernel stack. */
+        /* Must run every tick unconditionally, regardless of whose context
+         * got interrupted below - a PROC_SLEEPING process's own turn never
+         * comes around on its own to notice its deadline passed. */
+        proc_wake_sleepers();
+
+        /* Preempt when the interrupt came from U-mode (sstatus.SPP=0), OR
+         * when the CPU was idling (current_pid<0, i.e. no live process
+         * context to protect) - the latter is needed so a process just
+         * woken by proc_wake_sleepers() above actually gets picked up
+         * instead of waiting for some other unrelated event to call
+         * schedule() again. If SPP=1 AND a process IS current, the kernel
+         * itself is running on that process's behalf (e.g. spinning in
+         * sys_read) and touching the trap frame would corrupt its stack. */
         unsigned long sstatus_v;
         __asm__ volatile("csrr %0, sstatus" : "=r"(sstatus_v));
-        if (!(sstatus_v & (1UL << 8))) {   /* SPP=0 → came from U-mode */
+        if (!(sstatus_v & (1UL << 8)) || current_pid < 0) {
             schedule((unsigned long *)sp, epc);
         }
         return;
@@ -103,6 +113,7 @@ void trap_handler(unsigned long cause, unsigned long epc,
             int epid = current_pid;
             procs[epid].state     = PROC_ZOMBIE;
             procs[epid].exit_code = -1;
+            pipe_mark_writer_done(procs[epid].stdout_pipe_id);
             for (int i = 0; i < MAX_PROCS; i++) {
                 if (procs[i].state == PROC_WAITING && procs[i].wait_pid == epid) {
                     procs[i].state     = PROC_RUNNABLE;

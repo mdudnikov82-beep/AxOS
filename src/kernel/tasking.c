@@ -57,6 +57,10 @@ typedef struct task {
     unsigned long long syscall_mask; // seccomp: бит N = syscall N разрешён; 0 = нет фильтра
     int priority;         // 1..10, см. PRIORITY_* выше
     int slice_left;       // сколько тиков ещё осталось в текущем заходе
+    int exit_code;        // код выхода - см. task_set_current_exit_code/SYS_EXIT
+    int sleeping;          // 1 - задача заблокирована в SYS_SLEEP, снята с ротации
+    unsigned long long wake_tick; // timer_ticks, при котором проснуться (валиден только если sleeping)
+    int waiting_pipe;      // >= 0 - заблокирована в SYS_FREAD на "PIPE:N", снята с ротации так же, как sleeping
     struct task* next;
 } task_t;
 
@@ -65,7 +69,8 @@ typedef struct task {
 
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
-extern void on_task_exit(int user_slot_index); // kernel.c - освобождает слот run-задачи
+extern void on_task_exit(int user_slot_index, int exit_code); // kernel.c - освобождает слот run-задачи, сохраняет exit_code
+extern int pipe_ready(int pipe_id); // kernel.c - 1 если у pipe'а есть данные или писатель закрылся
 extern volatile unsigned long timer_ticks; // kernel.c, IRQ0 (100 Гц)
 
 // --- "ASLR-подобный" разброс начального стека изолированных run-задач ---
@@ -118,6 +123,10 @@ void init_tasking() {
     task0.syscall_mask = 0;
     task0.priority = PRIORITY_DEFAULT;
     task0.slice_left = PRIORITY_DEFAULT;
+    task0.exit_code = 0;
+    task0.sleeping = 0;
+    task0.wake_tick = 0;
+    task0.waiting_pipe = -1;
     task0.next = &task0;
 
     unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
@@ -172,6 +181,10 @@ void task_create(char* name, void (*entry)(void)) {
     new_task->syscall_mask = 0;
     new_task->priority = PRIORITY_DEFAULT;
     new_task->slice_left = PRIORITY_DEFAULT;
+    new_task->exit_code = 0;
+    new_task->sleeping = 0;
+    new_task->wake_tick = 0;
+    new_task->waiting_pipe = -1;
 
     unsigned char* kstack = (unsigned char*)malloc(KSTACK_SIZE);
     new_task->kernel_stack_top = (unsigned long long)(kstack + KSTACK_SIZE);
@@ -220,6 +233,10 @@ void task_create_user(char* name, void (*entry)(void)) {
     new_task->syscall_mask = 0;
     new_task->priority = PRIORITY_DEFAULT;
     new_task->slice_left = PRIORITY_DEFAULT;
+    new_task->exit_code = 0;
+    new_task->sleeping = 0;
+    new_task->wake_tick = 0;
+    new_task->waiting_pipe = -1;
 
     new_task->next = current_task->next;
     current_task->next = new_task;
@@ -296,6 +313,10 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
     new_task->syscall_mask = 0; // нет фильтра - задача устанавливает свой через SYS_SECCOMP
     new_task->priority = PRIORITY_DEFAULT;
     new_task->slice_left = PRIORITY_DEFAULT;
+    new_task->exit_code = 0;
+    new_task->sleeping = 0;
+    new_task->wake_tick = 0;
+    new_task->waiting_pipe = -1;
 
     // "jmp $" (EB FE) в последние 2 байта окна задачи - см. USER_SPIN_ADDR
     // (paging.h). Сюда page_fault_handler_main перенаправляет EIP этой
@@ -314,32 +335,76 @@ void task_create_user_isolated(char* name, unsigned int phys_slot_base, int user
 unsigned long long schedule(unsigned long long current_rsp) {
     if (!current_task) return current_rsp;
 
+    // Будим просроченных спящих ДО всего остального - иначе задача,
+    // проспавшая своё время, никогда сама не попросит проснуться (в
+    // отличие от busy-wait цикла, которым это раньше было). Должно
+    // выполняться на каждом заходе в schedule(), не только когда сама
+    // dying - спящая: иначе спящая задача, оставшаяся единственной не
+    // текущей в кольце, не проснётся, пока текущая не отдаст тик по
+    // другой причине.
+    {
+        task_t* t = current_task;
+        do {
+            if (t->sleeping && timer_ticks >= t->wake_tick) t->sleeping = 0;
+            if (t->waiting_pipe >= 0 && pipe_ready(t->waiting_pipe)) t->waiting_pipe = -1;
+            t = t->next;
+        } while (t != current_task);
+    }
+
     current_task->rsp = current_rsp;
     current_task->ticks++;
 
     task_t* dying = current_task;
 
-    // Приоритет = тайм-слайс: если задача не выходит И у неё ещё остались
-    // тики в текущем заходе - просто отдаём ей следующий тик без
-    // переключения (без смены CR3/TSS.ESP0 - дёшево). Переключение
-    // происходит только когда слайс исчерпан ИЛИ задача завершается.
-    if (!dying->exiting && --dying->slice_left > 0) {
+    // Приоритет = тайм-слайс: если задача не выходит, не спит и не ждёт
+    // pipe - у неё ещё остались тики в текущем заходе - просто отдаём ей
+    // следующий тик без переключения (без смены CR3/TSS.ESP0 - дёшево).
+    // Заблокированная задача никогда не сохраняет остаток слайса -
+    // task_sleep_current()/task_wait_pipe_current() уже попросили
+    // немедленное переключение (см. syscalls.asm), а если задача всё же
+    // дошла досюда через обычный таймерный тик - всё равно нельзя
+    // оставлять ей CPU.
+    if (!dying->exiting && !dying->sleeping && dying->waiting_pipe < 0 && --dying->slice_left > 0) {
         return dying->rsp;
     }
 
     unsigned long long prev_page_directory = dying->page_directory;
-    task_t* next = dying->next;
+
+    // immediate_next - ТОПОЛОГИЯ кольца вокруг dying, не выбор "кому
+    // отдать CPU". Unlink ниже должен обойти РОВНО dying, ни больше -
+    // раньше здесь ошибочно использовалась одна и та же переменная и для
+    // топологии, и для выбора следующей (пропускающего спящих), из-за
+    // чего pred->next = next при выходе задачи мог по пути "проглотить"
+    // и любую спящую задачу, случайно пропущенную тем же поиском -
+    // молча вышибало её из кольца (не освобождая память - утечка задачи,
+    // она просто переставала быть видна ps/schedule() навсегда). Поймано
+    // живым тестом: фоновые sleep.bin+top.bin оба бесследно исчезали.
+    task_t* immediate_next = dying->next;
 
     if (dying->exiting) {
-        task_t* pred = next;
+        task_t* pred = immediate_next;
         while (pred->next != dying) pred = pred->next;
-        pred->next = next;
+        pred->next = immediate_next;
 
         if (dying->user_slot_index >= 0)
-            on_task_exit(dying->user_slot_index);
+            on_task_exit(dying->user_slot_index, dying->exit_code);
 
         free((void*)(unsigned long long)(dying->kernel_stack_top - KSTACK_SIZE));
         free(dying);
+    }
+
+    // Кому отдать CPU - заблокированные (спящие или ждущие pipe)
+    // пропускаются (не участвуют в ротации, пока не разблокируются - см.
+    // скан вверху функции). Граница цикла - полный оборот обратно к
+    // immediate_next (НЕ dying - тот уже мог быть освобождён выше,
+    // сравнивать/бояться разыменовать нельзя), на случай (недостижимого
+    // на практике - task0 никогда не блокируется и всегда в кольце)
+    // сценария "заблокированы все остальные".
+    task_t* next = immediate_next;
+    while (next->sleeping || next->waiting_pipe >= 0) {
+        task_t* candidate = next->next;
+        if (candidate == immediate_next) break; // полный круг, никто не разблокировался
+        next = candidate;
     }
 
     next->slice_left = next->priority; // новой текущей задаче - полный тайм-слайс
@@ -462,10 +527,57 @@ void task_kill_by_slot(int slot) {
     do {
         if (t->user_slot_index == slot) {
             t->exiting = 1;
+            t->exit_code = -1; // kill = аварийное завершение
             return;
         }
         t = t->next;
     } while (t != current_task);
+}
+
+// Ищет изолированную задачу по pid и помечает её exiting - см. tasking.h.
+// Используется SYS_KILL (kernel.c, команда "kill <pid>" в sh.c).
+int task_kill_by_pid(int pid) {
+    if (!current_task) return 0;
+    task_t* t = current_task;
+    do {
+        if (t->id == pid && t->user_slot_index >= 0) {
+            t->exiting = 1;
+            t->exit_code = -1;
+            return 1;
+        }
+        t = t->next;
+    } while (t != current_task);
+    return 0;
+}
+
+// Записывает exit_code текущей задачи - см. tasking.h.
+void task_set_current_exit_code(int code) {
+    if (current_task) current_task->exit_code = code;
+}
+
+// Блокирует текущую задачу на ms миллисекунд - см. tasking.h. Сама по
+// себе НЕ переключает задачу (schedule() не вызывается отсюда) - только
+// помечает её; фактический обмен RSP делает syscalls.asm сразу после
+// возврата из syscall_dispatch, тем же способом, что и
+// timer_interrupt_handler (idt.asm) - см. task_current_wants_resched.
+void task_sleep_current(unsigned long ms) {
+    if (!current_task) return;
+    current_task->sleeping = 1;
+    current_task->wake_tick = timer_ticks + (unsigned long long)(ms / 10);
+}
+
+// Блокирует текущую задачу на чтении pipe_id - см. tasking.h. Тот же
+// приём, что и task_sleep_current: сама не переключает, только
+// помечает - см. task_current_wants_resched.
+void task_wait_pipe_current(int pipe_id) {
+    if (!current_task) return;
+    current_task->waiting_pipe = pipe_id;
+}
+
+// 1, если текущая задача только что запросила немедленное переключение -
+// см. tasking.h.
+int task_current_wants_resched(void) {
+    return current_task && (current_task->sleeping || current_task->waiting_pipe >= 0);
 }
 
 // Seccomp: устанавливает/сужает маску разрешённых syscall'ов текущей задачи.

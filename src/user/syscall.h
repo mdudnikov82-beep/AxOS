@@ -13,7 +13,7 @@
 #define SYS_READ_KEY     0x03 // ESI -> char: последний нажатый символ (0, если нет)
 #define SYS_WRITE_FILE   0x04 // ESI -> struct write_file_args
 #define SYS_READ_FILE    0x05 // ESI -> struct read_file_args
-#define SYS_EXIT         0x06 // ESI не используется - текущая задача завершается
+#define SYS_EXIT         0x06 // ESI = код выхода (int, прямое значение, не указатель)
 #define SYS_GET_TICKS    0x0F // ESI -> struct get_ticks_args
 
 // Аргумент SYS_WRITE_FILE: создаёт/перезаписывает файл filename
@@ -335,6 +335,25 @@ struct set_priority_args {
 #define SYS_NET_MAC  0x25  // ESI -> struct net_mac_args
 #define SYS_NET_SEND 0x26  // ESI -> struct net_send_args
 #define SYS_NET_RECV 0x27  // ESI -> struct net_recv_args
+
+// --- kill/wait (0x28-0x29) ---
+#define SYS_LAST_EXIT_CODE 0x28  // ESI -> struct exit_code_args
+#define SYS_KILL            0x29  // ESI -> struct kill_args
+
+// SYS_LAST_EXIT_CODE: код выхода последней задачи, завершившейся в
+// этом слоте (см. slot_exit_code, kernel.c). Спрашивать сразу после
+// того, как SYS_TASK_ALIVE впервые вернул 0 для этого слота.
+struct exit_code_args {
+    int slot;
+    int result;
+};
+
+// SYS_KILL: убить изолированную задачу по pid. result = 0 (убита) или
+// -1 (нет такого pid, или это не изолированная задача).
+struct kill_args {
+    int pid;
+    int result;
+};
 
 // SYS_NET_MAC: mac - буфер минимум 6 байт. result: 1 - найден NIC (mac
 // заполнен), 0 - нет.

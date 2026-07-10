@@ -73,8 +73,41 @@ char* task_current_name();
 int task_current_slot_index();
 
 // Находит изолированную задачу с user_slot_index == slot и помечает её
-// exiting. Используется для Ctrl+C из shell (kernel.c::keyboard_handler_main).
+// exiting (exit_code = -1 - аварийное завершение). Используется для
+// Ctrl+C из shell (kernel.c::keyboard_handler_main).
 void task_kill_by_slot(int slot);
+
+// Находит изолированную (user_slot_index >= 0) задачу с id == pid и
+// помечает её exiting (exit_code = -1). Ring0/builtin задачи (shell,
+// heartbeat) так не убить - у них user_slot_index == -1. Возвращает 1
+// если задача найдена и убита, 0 если нет такого pid или задача не
+// изолирована. Используется SYS_KILL (kernel.c) для команды "kill <pid>".
+int task_kill_by_pid(int pid);
+
+// Записывает exit_code ТЕКУЩЕЙ задачи (она сообщает о своём коде выхода
+// сама - см. SYS_EXIT, kernel.c). No-op, если планировщик не
+// инициализирован. Значение подхватывается on_task_exit() (kernel.c) в
+// момент реального реапа задачи в schedule() - см. комментарий там.
+void task_set_current_exit_code(int code);
+
+// Блокирует ТЕКУЩУЮ задачу на ms миллисекунд - настоящий блок (задача
+// снимается с ротации планировщика), не busy-wait. Используется SYS_SLEEP
+// (kernel.c); фактическое переключение происходит в syscalls.asm сразу
+// после возврата из syscall_dispatch - см. task_current_wants_resched.
+void task_sleep_current(unsigned long ms);
+
+// 1, если текущая задача только что запросила немедленное переключение
+// (сейчас единственная причина - task_sleep_current только что усыпила
+// её). syscalls.asm вызывает это сразу после syscall_dispatch: если 1 -
+// вместо обычного возврата к вызывающей задаче делает тот же обмен RSP
+// через schedule(), что и timer_interrupt_handler (idt.asm).
+int task_current_wants_resched(void);
+
+// Блокирует ТЕКУЩУЮ задачу до тех пор, пока pipe_id не станет "готов"
+// (см. pipe_ready, kernel.c) - настоящая читающая задача pipe'а (SYS_FREAD
+// на "PIPE:N", см. kernel.c) снимается с ротации так же, как и спящая -
+// та же машинерия task_current_wants_resched/syscalls.asm её пробуждает.
+void task_wait_pipe_current(int pipe_id);
 
 // Заполняет поля pid, name, ticks, slot, level для задачи с порядковым
 // номером index. Возвращает 1 если найдена, 0 если index >= числа задач

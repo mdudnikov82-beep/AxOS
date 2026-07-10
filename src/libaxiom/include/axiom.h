@@ -10,7 +10,7 @@ char         ax_readkey(void);
 // Возвращает 1 при успехе, 0 если диск не готов/заблокирован или нет места.
 int          ax_writefile(char* name, unsigned char* data, unsigned int size);
 unsigned int ax_readfile(char* name, unsigned char* buf, unsigned int max);
-void         ax_exit(void);
+void         ax_exit(int code);
 
 // Удалить файл с диска. Диск должен быть разблокирован.
 // Возвращает 1 при успехе, 0 если диск не готов/заблокирован,
@@ -41,8 +41,15 @@ void ax_close(int fd);
 int  ax_exec(char* cmdline);                        // запустить программу, вернуть slot или -1 (не найден) / -2 (нет слотов) / -3 (не валидный ELF)
 int  ax_exec_redir(char* cmdline, char* outfile);   // то же + перенаправить stdout в файл
 int  ax_task_alive(int slot);      // 1 = ещё работает, 0 = завершена
+// Код выхода последней задачи, завершившейся в этом слоте (см.
+// SYS_LAST_EXIT_CODE). Спрашивать сразу после того, как ax_task_alive
+// впервые вернул 0 для этого слота.
+int  ax_exit_code(int slot);
 void ax_shell_claim(int claim);    // 1 = захватить клавиатуру, 0 = вернуть ядру
 void ax_set_foreground(int slot);  // slot >= 0: Ctrl+C убьёт эту задачу; -1: сброс
+// Убить изолированную задачу по pid (см. SYS_KILL). Возвращает 0
+// (убита) или -1 (нет такого pid / не изолированная задача).
+int  ax_kill(int pid);
 
 // Системное время
 unsigned int ax_get_ticks(void);         // тики с момента загрузки (100 Гц)
@@ -182,6 +189,8 @@ void ax_printf(const char* fmt, ...);  // %s %d %u %x %c %%
 #define AX_SC_NET_MAC      AX_SC_BIT(0x25)  // ax_net_mac
 #define AX_SC_NET_SEND     AX_SC_BIT(0x26)  // ax_net_send
 #define AX_SC_NET_RECV     AX_SC_BIT(0x27)  // ax_net_recv
+#define AX_SC_LAST_EXIT_CODE AX_SC_BIT(0x28)  // ax_exit_code
+#define AX_SC_KILL         AX_SC_BIT(0x29)  // ax_kill
 
 // Готовые профили:
 #define AX_SC_PRINT_ONLY  (AX_SC_PRINT | AX_SC_CLEAR | AX_SC_EXIT | AX_SC_SBRK)
@@ -190,7 +199,11 @@ void ax_printf(const char* fmt, ...);  // %s %d %u %x %c %%
 #define AX_SC_FILES       (AX_SC_WRITEFILE | AX_SC_READFILE | AX_SC_OPEN | \
                            AX_SC_FREAD     | AX_SC_FWRITE   | AX_SC_CLOSE | \
                            AX_SC_READDIR   | AX_SC_UNLINK   | AX_SC_MKDIR)
+// AX_SC_KILL сознательно НЕ входит сюда (как и AX_SC_REBOOT) - убийство
+// произвольной задачи по pid не относится к обычному жизненному циклу
+// "запустить и дождаться", включается явно, если действительно нужно.
 #define AX_SC_EXEC_MASK   (AX_SC_EXEC | AX_SC_EXEC_REDIR | AX_SC_TASK_ALIVE | \
+                           AX_SC_LAST_EXIT_CODE | \
                            AX_SC_SHELL_CLAIM | AX_SC_FOREGROUND)
 #define AX_SC_ALL         (~0ULL)
 

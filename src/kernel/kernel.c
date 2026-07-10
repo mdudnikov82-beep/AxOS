@@ -74,6 +74,14 @@
 // tasking.c::schedule) on_task_exit() освобождает его обратно.
 static int slot_free[USER_PROGRAM_SLOTS] = {1, 1, 1, 1};
 
+// Код выхода последней завершившейся в этом слоте задачи - записывается
+// on_task_exit() в момент реапа (см. tasking.c::schedule), читается
+// SYS_LAST_EXIT_CODE. Переживает освобождение слота ровно до следующего
+// exec в этот же слот - этого достаточно для обычного случая "run"
+// (shell поллит ax_task_alive в тесном цикле и читает код сразу же
+// после того, как задача умерла - см. sh.c).
+static int slot_exit_code[USER_PROGRAM_SLOTS];
+
 // Виртуальный адрес текущего heap break для каждого слота.
 // Инициализируется при запуске задачи (после загрузки кода), сбрасывается при выходе.
 static unsigned int slot_heap_brk[USER_PROGRAM_SLOTS];
@@ -86,6 +94,48 @@ static unsigned int slot_heap_brk[USER_PROGRAM_SLOTS];
 static unsigned char* slot_redir_buf[USER_PROGRAM_SLOTS];
 static unsigned int   slot_redir_len[USER_PROGRAM_SLOTS];
 static char           slot_redir_file[USER_PROGRAM_SLOTS][13];
+
+// Потоковые pipe'ы: "PIPE:N" вместо реального имени файла узнаётся и
+// SYS_EXEC_REDIR (запись - см. slot_redir_pipe), и SYS_OPEN (чтение - см.
+// struct fd_entry.type ниже). Кольцевой буфер общий для ДВУХ разных
+// задач одновременно (писатель cmd1 + читатель cmd2) - единственное
+// такое место в ядре, всё остальное (TCP mux, редирект в файл) - буфер
+// только одной задачи. Без backpressure писателя (переполнение молча
+// обрезает - как и старый batch-редирект в файл), но с настоящим
+// блокирующим чтением - см. task_wait_pipe_current (tasking.c).
+#define PIPE_MAX      2
+#define PIPE_BUF_SIZE 2048
+struct pipe_buf {
+    unsigned char data[PIPE_BUF_SIZE];
+    unsigned int  len;          // байт записано всего
+    unsigned int  read_pos;     // байт прочитано всего
+    int           writer_done;  // 1 - задача-писатель завершилась (EOF для читателя)
+    int           in_use;
+};
+static struct pipe_buf pipe_bufs[PIPE_MAX];
+
+// slot_redir_pipe[slot] >= 0 - вывод этого слота идёт в pipe_bufs[N],
+// а не в slot_redir_buf[slot] (файловый батч-редирект) и не на экран.
+// USER_PROGRAM_SLOTS == 4 - см. #define выше в этом файле.
+static int slot_redir_pipe[USER_PROGRAM_SLOTS] = {-1, -1, -1, -1};
+
+// Разбирает "PIPE:N" (N - одна цифра, 0..PIPE_MAX-1). Возвращает id или
+// -1, если s не соответствует этому шаблону.
+static int pipe_id_from_name(const char* s) {
+    if (!s) return -1;
+    if (s[0]!='P'||s[1]!='I'||s[2]!='P'||s[3]!='E'||s[4]!=':') return -1;
+    if (s[5] < '0' || s[5] > '9' || s[6] != '\0') return -1;
+    int id = s[5] - '0';
+    return (id < PIPE_MAX) ? id : -1;
+}
+
+// 1, если у pipe'а есть непрочитанные данные ИЛИ писатель уже закрылся
+// (EOF читателю). Используется tasking.c::schedule()'s wake-скан
+// (extern hook, тот же приём, что и on_task_exit).
+int pipe_ready(int id) {
+    if (id < 0 || id >= PIPE_MAX) return 1; // некорректный id - не блокируем вечно
+    return pipe_bufs[id].read_pos < pipe_bufs[id].len || pipe_bufs[id].writer_done;
+}
 
 // Системный буфер обмена - один общий слот для всех задач (как и реальный
 // clipboard в однопользовательской системе). Переживает завершение задач.
@@ -106,11 +156,17 @@ static unsigned int clipboard_level = 0;
 static void fd_release_owner(int owner_slot);
 
 // Вызывается из tasking.c::schedule() при реапе изолированной run-задачи.
-void on_task_exit(int user_slot_index) {
+void on_task_exit(int user_slot_index, int exit_code) {
     slot_free[user_slot_index] = 1;
+    slot_exit_code[user_slot_index] = exit_code;
     slot_heap_brk[user_slot_index] = 0;
     fd_release_owner(user_slot_index);
-    if (slot_redir_buf[user_slot_index]) {
+    if (slot_redir_pipe[user_slot_index] >= 0) {
+        // Писатель pipe'а завершился - читателю (если он сейчас
+        // заблокирован в SYS_FREAD) нужно увидеть EOF, а не ждать вечно.
+        pipe_bufs[slot_redir_pipe[user_slot_index]].writer_done = 1;
+        slot_redir_pipe[user_slot_index] = -1;
+    } else if (slot_redir_buf[user_slot_index]) {
         vfs_write(slot_redir_file[user_slot_index],
                   slot_redir_buf[user_slot_index],
                   slot_redir_len[user_slot_index]);
@@ -427,6 +483,13 @@ static int validate_user_str(char* s);
 void sys_print_string(char* arg) {
     if (!validate_user_str(arg)) { print_string("[V?]"); return; }
     int slot = task_current_slot_index();
+    if (slot >= 0 && slot < USER_PROGRAM_SLOTS && slot_redir_pipe[slot] >= 0) {
+        struct pipe_buf* p = &pipe_bufs[slot_redir_pipe[slot]];
+        char* s = arg;
+        while (*s && p->len < PIPE_BUF_SIZE - 1)
+            p->data[p->len++] = *s++;
+        return;
+    }
     if (slot >= 0 && slot < USER_PROGRAM_SLOTS && slot_redir_buf[slot]) {
         char* s = arg;
         while (*s && slot_redir_len[slot] < REDIR_BUF_SIZE - 1)
@@ -675,8 +738,11 @@ void sys_read_file(char* arg) {
 
 // SYS_EXIT: текущая задача завершилась - schedule() уберёт её из кольца
 // планировщика и освободит её ресурсы (kernel-стек, task_t, слот run)
-// на следующем тике (см. tasking.c).
+// на следующем тике (см. tasking.c). arg (ESI) - код выхода как ПРЯМОЕ
+// значение int, не указатель (та же конвенция, что у SYS_SHELL_CLAIM) -
+// start.asm подставляет туда return-значение user_main().
 void sys_exit(char* arg) {
+    task_set_current_exit_code((int)(long)arg);
     task_mark_current_exiting();
 }
 
@@ -685,13 +751,18 @@ void sys_exit(char* arg) {
 #define MAX_FDS       4
 #define MAX_FILE_BUF  4096
 
+#define FD_TYPE_FILE 0
+#define FD_TYPE_PIPE 1
+
 struct fd_entry {
     int            valid;
+    int            type;  // FD_TYPE_FILE или FD_TYPE_PIPE - см. sys_fread/sys_close
     int            flags;
     char           name[13];
     unsigned char* buf;
     unsigned int   size;
     unsigned int   pos;
+    int            pipe_id; // валиден только если type == FD_TYPE_PIPE
     int            owner; // task_current_slot_index() задачи, открывшей fd (см. fd_owned_by_caller)
 };
 
@@ -723,6 +794,11 @@ static int fd_owned_by_caller(int fd) {
 static void fd_release_owner(int owner_slot) {
     for (int fd = 0; fd < MAX_FDS; fd++) {
         if (!fd_table[fd].valid || fd_table[fd].owner != owner_slot) continue;
+        if (fd_table[fd].type == FD_TYPE_PIPE) {
+            pipe_bufs[fd_table[fd].pipe_id].in_use = 0;
+            fd_table[fd].valid = 0;
+            continue;
+        }
         if (fd_table[fd].flags != O_RDONLY && fd_table[fd].size > 0) {
             vfs_write(fd_table[fd].name, fd_table[fd].buf, fd_table[fd].size);
         }
@@ -754,10 +830,28 @@ void sys_open(char* arg) {
     if (slot < 0) return;
 
     char* name = (char*)a->filename;
+
+    // "PIPE:N" - потоковый читатель, не файл. Ничего не грузим сейчас
+    // (данных может ещё не быть) - чтение идёт напрямую из pipe_bufs[id]
+    // в sys_fread(), см. там же для блокировки, пока пусто.
+    int pipe_id = pipe_id_from_name(name);
+    if (pipe_id >= 0) {
+        if (!pipe_bufs[pipe_id].in_use) return; // писатель ещё не запущен/уже закрыт
+        fd_table[slot].type    = FD_TYPE_PIPE;
+        fd_table[slot].pipe_id = pipe_id;
+        fd_table[slot].flags   = O_RDONLY;
+        fd_table[slot].owner   = task_current_slot_index();
+        fd_table[slot].buf     = 0;
+        fd_table[slot].valid   = 1;
+        a->result = slot;
+        return;
+    }
+
     int ni = 0;
     while (name[ni] && ni < 12) { fd_table[slot].name[ni] = name[ni]; ni++; }
     fd_table[slot].name[ni] = '\0';
 
+    fd_table[slot].type  = FD_TYPE_FILE;
     fd_table[slot].flags = a->flags;
     fd_table[slot].pos   = 0;
     fd_table[slot].size  = 0;
@@ -779,6 +873,10 @@ void sys_open(char* arg) {
 
 // SYS_FREAD: прочитать до count байт из fd в пользовательский buf.
 // fread_args.result = фактически прочитанные байты; 0 = EOF; -1 = ошибка.
+// result: >0 байт прочитано, 0 = EOF, -1 = реальная ошибка, -2 = "пусто,
+// повтори" - только для pipe-fd, читает libaxiom's _ax_fread (retry-цикл
+// вокруг int 0x80, см. syscalls.asm) - обычные файлы НИКОГДА не
+// возвращают -2, у них всё содержимое уже в памяти с open().
 void sys_fread(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct fread_args))) return;
     struct fread_args* a = (struct fread_args*)arg;
@@ -787,6 +885,24 @@ void sys_fread(char* arg) {
     if (!fd_owned_by_caller(fd)) return;
     if (fd_table[fd].flags != O_RDONLY) return;
     if (!validate_user_ptr((void*)a->buf, a->count)) return;
+
+    if (fd_table[fd].type == FD_TYPE_PIPE) {
+        struct pipe_buf* p = &pipe_bufs[fd_table[fd].pipe_id];
+        if (p->read_pos < p->len) {
+            unsigned int remaining = p->len - p->read_pos;
+            unsigned int to_copy   = a->count < remaining ? a->count : remaining;
+            unsigned char* src = p->data + p->read_pos;
+            unsigned char* dst = (unsigned char*)a->buf;
+            for (unsigned int i = 0; i < to_copy; i++) dst[i] = src[i];
+            p->read_pos += to_copy;
+            a->result = (int)to_copy;
+            return;
+        }
+        if (p->writer_done) { a->result = 0; return; } // EOF
+        task_wait_pipe_current(fd_table[fd].pipe_id);
+        a->result = -2; // "пусто, писатель ещё жив" - см. _ax_fread
+        return;
+    }
 
     unsigned int remaining = fd_table[fd].size - fd_table[fd].pos;
     unsigned int to_copy   = a->count < remaining ? a->count : remaining;
@@ -826,6 +942,13 @@ void sys_close(char* arg) {
     struct close_args* a = (struct close_args*)arg;
     int fd = a->fd;
     if (!fd_owned_by_caller(fd)) return;
+
+    if (fd_table[fd].type == FD_TYPE_PIPE) {
+        // Нет буфера файла - освобождаем слот pipe'а для следующей команды.
+        pipe_bufs[fd_table[fd].pipe_id].in_use = 0;
+        fd_table[fd].valid = 0;
+        return;
+    }
 
     if (fd_table[fd].flags != O_RDONLY && fd_table[fd].size > 0)
         vfs_write(fd_table[fd].name, fd_table[fd].buf, fd_table[fd].size);
@@ -954,14 +1077,23 @@ void sys_exec_redir(char* arg) {
     a->result = do_exec((char*)a->cmdline);
     if (a->result >= 0 && a->redir_out && ((char*)a->redir_out)[0]) {
         int slot = a->result;
-        unsigned char* buf = (unsigned char*)malloc(REDIR_BUF_SIZE);
-        if (buf) {
-            slot_redir_buf[slot] = buf;
-            slot_redir_len[slot] = 0;
-            int fi = 0;
-            char* fn = (char*)a->redir_out;
-            while (*fn && fi < 12) slot_redir_file[slot][fi++] = *fn++;
-            slot_redir_file[slot][fi] = '\0';
+        int pipe_id = pipe_id_from_name((char*)a->redir_out);
+        if (pipe_id >= 0) {
+            slot_redir_pipe[slot] = pipe_id;
+            pipe_bufs[pipe_id].len = 0;
+            pipe_bufs[pipe_id].read_pos = 0;
+            pipe_bufs[pipe_id].writer_done = 0;
+            pipe_bufs[pipe_id].in_use = 1;
+        } else {
+            unsigned char* buf = (unsigned char*)malloc(REDIR_BUF_SIZE);
+            if (buf) {
+                slot_redir_buf[slot] = buf;
+                slot_redir_len[slot] = 0;
+                int fi = 0;
+                char* fn = (char*)a->redir_out;
+                while (*fn && fi < 12) slot_redir_file[slot][fi++] = *fn++;
+                slot_redir_file[slot][fi] = '\0';
+            }
         }
     }
 }
@@ -1006,12 +1138,18 @@ void sys_get_ticks(char* arg) {
     a->result = (unsigned int)timer_ticks;
 }
 
-// SYS_SLEEP: блокирует вызывающую задачу на ms миллисекунд.
-// sleep_ms включает прерывания через sti — другие задачи получают CPU во время ожидания.
+// SYS_SLEEP: блокирует вызывающую задачу на ms миллисекунд - настоящий
+// блок (task_sleep_current снимает задачу с ротации планировщика), не
+// busy-wait через sleep_ms(). Фактическое переключение происходит в
+// syscalls.asm сразу после возврата отсюда - см.
+// task_current_wants_resched (tasking.h). sleep_ms() сама по себе
+// оставлена как есть - её всё ещё использует sys_beep() и приветственная
+// задержка (оба ring0-внутренние, короткие, синхронные вызовы, которым
+// не нужна настоящая приостановка задачи).
 void sys_sleep(char* arg) {
     if (!validate_user_ptr(arg, sizeof(struct sleep_args))) return;
     struct sleep_args* a = (struct sleep_args*)arg;
-    sleep_ms((unsigned long)a->ms);
+    task_sleep_current((unsigned long)a->ms);
 }
 
 void sys_readdir(char* arg) {
@@ -1303,6 +1441,26 @@ void sys_set_priority(char* arg) {
     task_set_priority(a->pid, a->priority);
 }
 
+// SYS_LAST_EXIT_CODE (0x28): код выхода последней задачи, завершившейся
+// в этом слоте (см. slot_exit_code выше). Вызывающий должен спросить
+// сразу после того, как SYS_TASK_ALIVE впервые вернул 0 - см. sh.c.
+void sys_get_exit_code(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct exit_code_args))) return;
+    struct exit_code_args* a = (struct exit_code_args*)arg;
+    a->result = (a->slot >= 0 && a->slot < USER_PROGRAM_SLOTS)
+        ? slot_exit_code[a->slot] : 0;
+}
+
+// SYS_KILL (0x29): убивает изолированную задачу по pid - см.
+// task_kill_by_pid (tasking.c). Ring0/builtin задачи не убить так же,
+// как их нельзя убить и через Ctrl+C. Без MAC-проверки - как и
+// SYS_SET_PRIORITY, любая задача может убить любую другую.
+void sys_kill(char* arg) {
+    if (!validate_user_ptr(arg, sizeof(struct kill_args))) return;
+    struct kill_args* a = (struct kill_args*)arg;
+    a->result = task_kill_by_pid(a->pid) ? 0 : -1;
+}
+
 syscall_fn syscall_table[] = {
     0,                 // 0x00 — не используется
     sys_print_string,  // 0x01
@@ -1344,6 +1502,8 @@ syscall_fn syscall_table[] = {
     sys_net_mac,           // 0x25
     sys_net_send,          // 0x26
     sys_net_recv,          // 0x27
+    sys_get_exit_code,     // 0x28
+    sys_kill,              // 0x29
 };
 
 #define SYSCALL_TABLE_SIZE (sizeof(syscall_table) / sizeof(syscall_table[0]))

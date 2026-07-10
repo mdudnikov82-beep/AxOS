@@ -20,6 +20,8 @@ global _ax_fwrite
 global _ax_close
 global _ax_exec
 global _ax_task_alive
+global _ax_exit_code
+global _ax_kill
 global _ax_shell_claim
 global _ax_set_foreground
 global _ax_get_ticks
@@ -121,9 +123,14 @@ _ax_readfile:
     pop esi
     ret
 
-; void ax_exit(void)
+; void ax_exit(int code)
+; code передаётся напрямую в ESI (не указатель - та же конвенция, что
+; и у ax_shell_claim). Обычные программы завершаются неявно через
+; start.asm (return N из main), ax_exit - для досрочного/явного выхода
+; (см. scdemo.c) c указанным кодом.
 _ax_exit:
-    mov ah, 0x06        ; SYS_EXIT
+    mov esi, [esp+4]    ; code - не восстанавливаем esi/не чистим стек, функция не возвращается
+    mov ah, 0x06         ; SYS_EXIT
     int 0x80
 .hang:
     jmp .hang
@@ -151,6 +158,14 @@ _ax_open:
 
 ; int ax_fread(int fd, void* buf, unsigned int n)
 ; Строит struct fread_args { fd, buf, count, result=-1 }.
+; result == -2 - особый случай, ТОЛЬКО для fd, открытого на "PIPE:N"
+; (см. sys_fread, kernel.c): pipe пуст, писатель ещё не закрылся - ядро
+; уже усыпило эту задачу (task_wait_pipe_current) и переключилось на
+; другую ДО возврата из этого же int 0x80 (см. task_current_wants_resched
+; в syscall_handler, src/kernel/syscalls.asm) - так что повторный int 0x80
+; здесь выполняется ТОЛЬКО после того, как задачу разбудили (данные
+; пришли или писатель закрылся), не в горячем цикле. Обычные файлы
+; никогда не возвращают -2 - для них это условие никогда не сработает.
 _ax_fread:
     push esi
     push ebx
@@ -163,8 +178,11 @@ _ax_fread:
     push ecx                ; struct.buf
     push eax                ; struct.fd  <- esp = &struct
     mov esi, esp
+.retry:
     mov ah, 0x08            ; SYS_FREAD
     int 0x80
+    cmp dword [esp+12], -2
+    je .retry
     mov eax, [esp+12]       ; result (offset 12)
     add esp, 16
     pop ebx
@@ -238,6 +256,45 @@ _ax_task_alive:
     push eax                ; struct.slot         (offset 0 = esp)
     mov esi, esp
     mov ah, 0x0C            ; SYS_TASK_ALIVE
+    int 0x80
+    mov eax, [esp+4]        ; result (offset 4)
+    add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; int ax_exit_code(int slot)
+; Строит struct exit_code_args { slot, result } на стеке.
+; Возвращает код выхода последней задачи, завершившейся в этом слоте.
+; Спрашивать сразу после того, как ax_task_alive впервые вернул 0.
+_ax_exit_code:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=slot
+    mov eax, [esp+12]
+    push dword 0            ; struct.result = 0  (offset 4)
+    push eax                ; struct.slot         (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x28            ; SYS_LAST_EXIT_CODE
+    int 0x80
+    mov eax, [esp+4]        ; result (offset 4)
+    add esp, 8
+    pop ebx
+    pop esi
+    ret
+
+; int ax_kill(int pid)
+; Строит struct kill_args { pid, result=-1 } на стеке.
+; Возвращает 0 (убита) или -1 (нет такого pid / не изолированная задача).
+_ax_kill:
+    push esi
+    push ebx
+    ; после двух push: [esp+12]=pid
+    mov eax, [esp+12]
+    push dword -1           ; struct.result = -1  (offset 4)
+    push eax                ; struct.pid           (offset 0 = esp)
+    mov esi, esp
+    mov ah, 0x29            ; SYS_KILL
     int 0x80
     mov eax, [esp+4]        ; result (offset 4)
     add esp, 8

@@ -24,10 +24,21 @@
  * должна поместиться до USER_VA_TOP) - ~13 бит энтропии. */
 #define USER_HEAP_CEILING 0x7E000000UL
 
+/* Один ФИКСИРОВАННЫЙ (не ASLR) страница под argv - строки + NULL-
+ * terminated массив char* (см. elf_load()). Сидит на самом верху
+ * пользовательского VA, за пределами диапазона ASLR стека -
+ * pick_stack_va() (elf_loader.c) уменьшает свой span на одну страницу,
+ * чтобы никогда сюда не попасть. */
+#define USER_ARGS_VA (USER_VA_TOP - 0x1000UL)
+
 /* Load an ELF64 RISC-V executable from FAT12, create a PCB, and return
  * the new process's pid (>=0).  Returns -1 on error.
+ * cmdline - "FILENAME.ELF arg1 arg2..." (как у x86 do_exec) - только
+ * имя до первого пробела грузится с диска, остаток становится argv[1..]
+ * новой задачи (см. USER_ARGS_VA выше). Простое "FILENAME.ELF" без
+ * пробелов - валидный cmdline с argc=1.
  * Does NOT jump to U-mode; call jump_to_umode() separately for the first process. */
-int elf_load(const char *filename);
+int elf_load(const char *cmdline);
 
 /* Switch to U-mode via sret.  Never returns.
  * Caller must switch satp to the process's page table BEFORE calling this. */

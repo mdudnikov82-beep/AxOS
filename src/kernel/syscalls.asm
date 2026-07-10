@@ -14,6 +14,8 @@
 [bits 64]
 
 extern syscall_dispatch     ; void syscall_dispatch(unsigned char func, char* arg)
+extern task_current_wants_resched ; int task_current_wants_resched(void) - tasking.c
+extern schedule             ; unsigned long long schedule(unsigned long long current_rsp) - tasking.c
 
 global syscall_handler
 
@@ -46,6 +48,26 @@ syscall_handler:
     call syscall_dispatch
     add rsp, 32
 
+    ; Если обработчик попросил немедленное переключение (сейчас
+    ; единственный случай - SYS_SLEEP -> task_sleep_current, см.
+    ; tasking.c) - делаем тот же обмен RSP через schedule(), что и
+    ; timer_interrupt_handler (idt.asm): кадр GPR здесь той же раскладки
+    ; (тот же порядок push выше = тот же порядок push в SAVE_REGS там).
+    ; Без этого спящая задача продолжила бы выполняться до следующего
+    ; таймерного тика вместо немедленной остановки.
+    sub rsp, 32
+    call task_current_wants_resched
+    add rsp, 32
+    test al, al
+    jz .normal_return
+
+    mov rcx, rsp        ; schedule(current_rsp) - Windows x64 ABI: arg в RCX
+    sub rsp, 32
+    call schedule
+    add rsp, 32
+    mov rsp, rax        ; RAX = RSP задачи, на которую переключились
+
+.normal_return:
     pop rax
     pop rbx
     pop rcx
