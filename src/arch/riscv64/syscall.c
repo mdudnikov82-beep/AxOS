@@ -231,6 +231,35 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
 
     user_access_enable();
 
+    /* Seccomp gate: SYS_SECCOMP itself always passes (a task must be able
+     * to install its first filter), everything else is checked against
+     * the calling process's mask. mask==0 means "no filter installed" -
+     * true no-op for every existing program that never calls seccomp().
+     * On a forbidden call, kill the CALLING process the same way
+     * SYS_EXIT/SYS_KILL already do (zombie + wake any waiter + schedule
+     * away) - no separate kill mechanism needed. */
+    if (nr != SYS_SECCOMP && procs[current_pid].syscall_mask != 0 &&
+        !((procs[current_pid].syscall_mask >> nr) & 1)) {
+        uart_puts("\r\n\033[33m[seccomp] forbidden syscall ");
+        put_udec(nr);
+        uart_puts(" in '"); uart_puts(procs[current_pid].name);
+        uart_puts("' - killed\033[0m\r\n");
+        int kpid = current_pid;
+        procs[kpid].state     = PROC_ZOMBIE;
+        procs[kpid].exit_code = -1;
+        pipe_mark_writer_done(procs[kpid].stdout_pipe_id);
+        for (int i = 0; i < MAX_PROCS; i++) {
+            if (procs[i].state == PROC_WAITING && procs[i].wait_pid == kpid) {
+                procs[i].state        = PROC_RUNNABLE;
+                procs[i].regs[REG_A0] = (unsigned long)-1UL;
+                procs[kpid].state     = PROC_UNUSED;
+            }
+        }
+        schedule(frame, sepc);
+        user_access_disable();
+        return;
+    }
+
     switch (nr) {
 
     case SYS_WRITE:
@@ -546,6 +575,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[child_pid].priority       = procs[current_pid].priority;
         procs[child_pid].slice_left     = procs[child_pid].priority;
         procs[child_pid].ticks          = 0;
+        procs[child_pid].syscall_mask   = procs[current_pid].syscall_mask; /* filtered parent -> filtered child, can't escape by forking */
         {
             int k = 0;
             while (procs[current_pid].name[k] && k < 12) {
@@ -631,6 +661,19 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
                 procs[kpid].state     = PROC_UNUSED;  /* collected synchronously */
             }
         }
+        ret = 0;
+        break;
+    }
+
+    case SYS_SECCOMP: {
+        /* First call sets the mask directly; every call after that only
+         * narrows it (AND) - a filter can never be widened once
+         * installed, same as x86's task_set_syscall_mask(). */
+        unsigned long mask = (unsigned long)arg0;
+        if (procs[current_pid].syscall_mask == 0)
+            procs[current_pid].syscall_mask = mask;
+        else
+            procs[current_pid].syscall_mask &= mask;
         ret = 0;
         break;
     }

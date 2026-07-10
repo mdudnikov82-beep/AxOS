@@ -36,6 +36,7 @@ typedef struct {
     unsigned long ticks;        /* total timer ticks this process has run for */
     int           stdout_pipe_id; /* >=0: write(1/2,...) goes to pipe_bufs[id] instead of UART - see syscall.c */
     int           stdin_pipe_id;  /* >=0: read(0,...) comes from pipe_bufs[id] instead of UART; also "which pipe am I blocked on" when state==PROC_WAITING_PIPE */
+    unsigned long syscall_mask;   /* seccomp: bit N = syscall N allowed; 0 = no filter (see syscall.c) */
 } proc_t;
 
 extern proc_t procs[MAX_PROCS];

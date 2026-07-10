@@ -35,6 +35,7 @@
 #define SYS_SLEEP         29
 #define SYS_EXEC_PIPE     30
 #define SYS_FORK          31
+#define SYS_SECCOMP       32
 
 static inline long __syscall0(long nr) {
     register long _nr  __asm__("a7") = nr;
@@ -175,6 +176,52 @@ static inline void ps(void) {
 static inline int kill(int pid) {
     return (int)__syscall1(SYS_KILL, (long)pid);
 }
+
+/* seccomp(mask) → 0 (narrows the calling process's syscall filter; the
+ * first call sets it directly, every call after only narrows it - a
+ * filter can never be widened once installed, matching x86's
+ * ax_seccomp()). Unlike x86 (32-bit ABI, needs a lo/hi split) the whole
+ * 64-bit mask fits in one a0 register natively here. */
+static inline long seccomp(unsigned long mask) {
+    return __syscall1(SYS_SECCOMP, (long)mask);
+}
+
+#define SC_BIT(n) (1UL << (unsigned)(n))
+#define SC_WRITE        SC_BIT(SYS_WRITE)
+#define SC_READ         SC_BIT(SYS_READ)
+#define SC_EXIT         SC_BIT(SYS_EXIT)
+#define SC_SBRK         SC_BIT(SYS_SBRK)
+#define SC_GETTIME      SC_BIT(SYS_GETTIME)
+#define SC_OPEN         SC_BIT(SYS_OPEN)
+#define SC_CLOSE        SC_BIT(SYS_CLOSE)
+#define SC_READDIR      SC_BIT(SYS_READDIR)
+#define SC_GETPID       SC_BIT(SYS_GETPID)
+#define SC_EXEC         SC_BIT(SYS_EXEC)
+#define SC_WAIT         SC_BIT(SYS_WAIT)
+#define SC_YIELD        SC_BIT(SYS_YIELD)
+#define SC_PS           SC_BIT(SYS_PS)
+#define SC_KILL         SC_BIT(SYS_KILL)
+#define SC_WRITEFILE    SC_BIT(SYS_WRITEFILE)
+#define SC_UNLINK       SC_BIT(SYS_UNLINK)
+#define SC_POWER        SC_BIT(SYS_POWER)
+#define SC_GFX_INFO     SC_BIT(SYS_GFX_INFO)
+#define SC_GFX_PUTPIXEL SC_BIT(SYS_GFX_PUTPIXEL)
+#define SC_GFX_FILLRECT SC_BIT(SYS_GFX_FILLRECT)
+#define SC_GFX_FLUSH    SC_BIT(SYS_GFX_FLUSH)
+#define SC_GFX_DRAWTEXT SC_BIT(SYS_GFX_DRAWTEXT)
+#define SC_MOUSE_STATE  SC_BIT(SYS_MOUSE_STATE)
+#define SC_GFX_GETPIXEL SC_BIT(SYS_GFX_GETPIXEL)
+#define SC_SET_PRIORITY SC_BIT(SYS_SET_PRIORITY)
+#define SC_NET_MAC      SC_BIT(SYS_NET_MAC)
+#define SC_NET_SEND     SC_BIT(SYS_NET_SEND)
+#define SC_NET_RECV     SC_BIT(SYS_NET_RECV)
+#define SC_SLEEP        SC_BIT(SYS_SLEEP)
+#define SC_EXEC_PIPE    SC_BIT(SYS_EXEC_PIPE)
+#define SC_FORK         SC_BIT(SYS_FORK)
+
+/* Baseline "can still talk to the user and exit cleanly" group -
+ * mirrors x86's AX_SC_STDIO. */
+#define SC_STDIO (SC_WRITE | SC_READ | SC_EXIT | SC_SBRK | SC_GETTIME | SC_SLEEP)
 
 /* set_priority(pid, priority) - priority clamped to [1,10] by the kernel;
  * how many consecutive timer ticks that process keeps the CPU per turn

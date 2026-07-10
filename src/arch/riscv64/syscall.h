@@ -32,6 +32,7 @@
 #define SYS_SLEEP         29  /* sleep_ms(ms) -> 0 (real block via PROC_SLEEPING, not a busy-loop) */
 #define SYS_EXEC_PIPE     30  /* exec_pipe(cmdline, stdout_pipe_id, stdin_pipe_id) -> new pid or -1 */
 #define SYS_FORK          31  /* fork() -> 0 in the child, new pid in the parent, -1 on error */
+#define SYS_SECCOMP       32  /* seccomp(mask) -> 0 (narrows the calling process's syscall filter; first call sets it) */
 
 /* Kernel-side entry point.
  * frame[] = saved registers from trap_entry (sd xN, N*8(sp)):
