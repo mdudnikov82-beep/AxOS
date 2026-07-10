@@ -36,6 +36,7 @@
 #define SYS_EXEC_PIPE     30
 #define SYS_FORK          31
 #define SYS_SECCOMP       32
+#define SYS_SET_LEVEL     33
 
 static inline long __syscall0(long nr) {
     register long _nr  __asm__("a7") = nr;
@@ -218,10 +219,18 @@ static inline long seccomp(unsigned long mask) {
 #define SC_SLEEP        SC_BIT(SYS_SLEEP)
 #define SC_EXEC_PIPE    SC_BIT(SYS_EXEC_PIPE)
 #define SC_FORK         SC_BIT(SYS_FORK)
+#define SC_SET_LEVEL    SC_BIT(SYS_SET_LEVEL)
 
 /* Baseline "can still talk to the user and exit cleanly" group -
  * mirrors x86's AX_SC_STDIO. */
 #define SC_STDIO (SC_WRITE | SC_READ | SC_EXIT | SC_SBRK | SC_GETTIME | SC_SLEEP)
+
+/* set_level(level) → 0 (raises the calling process's own MLS
+ * sensitivity level 0..15, clamped by the kernel; "no read up" gate -
+ * see mls_dominates() in syscall.c, currently applied to ps()). */
+static inline long set_level(unsigned int level) {
+    return __syscall1(SYS_SET_LEVEL, (long)level);
+}
 
 /* set_priority(pid, priority) - priority clamped to [1,10] by the kernel;
  * how many consecutive timer ticks that process keeps the CPU per turn

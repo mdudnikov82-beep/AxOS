@@ -488,6 +488,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\cfidemo_rv64.elf) do echo   cfidemo_rv64.elf: %%~zF bytes
 
+echo [U73] mlstest.c...
+"%CC%" %UFLAGS% -c %USRC%\mlstest.c -o %OUT%\umlstest.o
+if %errorlevel% neq 0 goto :error
+
+echo [U74] Linking mlstest...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\mlstest_rv64.elf %OUT%\ucrt0.o %OUT%\umlstest.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\mlstest_rv64.elf) do echo   mlstest_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -528,6 +538,7 @@ copy /b %OUT%\grep_rv64.elf        rv64build\fs\rv64\GREP.ELF
 copy /b %OUT%\forktest_rv64.elf    rv64build\fs\rv64\FORKTEST.ELF
 copy /b %OUT%\scdemo_rv64.elf      rv64build\fs\rv64\SCDEMO.ELF
 copy /b %OUT%\cfidemo_rv64.elf     rv64build\fs\rv64\CFIDEMO.ELF
+copy /b %OUT%\mlstest_rv64.elf     rv64build\fs\rv64\MLSTEST.ELF
 copy /b %USRC%\index.htm           rv64build\fs\rv64\INDEX.HTM
 copy /b %USRC%\term.bmp            rv64build\fs\rv64\TERM.BMP
 copy /b %USRC%\about.bmp           rv64build\fs\rv64\ABOUT.BMP

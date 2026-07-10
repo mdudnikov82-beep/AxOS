@@ -220,6 +220,21 @@ static int user_string_ok(unsigned long ptr) {
     return user_range_ok(ptr, USER_MAX_STRING);
 }
 
+/* MLS ("no read up", Bell-LaPadula): 1 if the CALLING process may see an
+ * object at object_level (its own level must be >= object_level).
+ * Every RV64 process goes through this uniformly - no ring0/ring3
+ * carve-out like x86's task_current_is_isolated(), same reasoning as
+ * the seccomp gate. */
+static int mls_dominates(unsigned int object_level) {
+    if (procs[current_pid].mls_level >= object_level) return 1;
+    uart_puts("\r\n\033[31mavc: denied { read } scontext=axos:user_t:s");
+    put_udec(procs[current_pid].mls_level);
+    uart_puts(" tcontext=axos:object_r:task:s");
+    put_udec(object_level);
+    uart_puts(" (MLS: no read up)\033[0m\r\n");
+    return 0;
+}
+
 /* ---- Kernel-side dispatch ---- */
 
 void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
@@ -576,6 +591,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[child_pid].slice_left     = procs[child_pid].priority;
         procs[child_pid].ticks          = 0;
         procs[child_pid].syscall_mask   = procs[current_pid].syscall_mask; /* filtered parent -> filtered child, can't escape by forking */
+        procs[child_pid].mls_level      = procs[current_pid].mls_level;
         {
             int k = 0;
             while (procs[current_pid].name[k] && k < 12) {
@@ -684,6 +700,12 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         uart_puts("PID  STATE     NAME          PRIO  TICKS\r\n");
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_UNUSED) continue;
+            /* MLS "no read up": existence/state/priority always visible,
+             * name/ticks redacted if the caller doesn't dominate this
+             * process's level - same property x86's sys_ps enforces,
+             * just applied inline since RV64 prints the whole table in
+             * one syscall instead of handing back one struct per call. */
+            int visible = mls_dominates(procs[i].mls_level);
             uart_putc('0' + i);
             uart_puts("    ");
             const char *st = stnames[procs[i].state];
@@ -692,13 +714,21 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
             for (int k = 0; st[k]; k++);
             for (int p = 0; stnames[procs[i].state][p]; p++);
             uart_puts("   ");
-            uart_puts(procs[i].name);
+            uart_puts(visible ? procs[i].name : "<hidden>");
             uart_puts("  ");
             put_udec((unsigned long)procs[i].priority);
             uart_puts("     ");
-            put_udec(procs[i].ticks);
+            put_udec(visible ? procs[i].ticks : 0);
             uart_puts("\r\n");
         }
+        ret = 0;
+        break;
+    }
+
+    case SYS_SET_LEVEL: {
+        unsigned int level = (unsigned int)arg0;
+        if (level > 15) level = 15;
+        procs[current_pid].mls_level = level;
         ret = 0;
         break;
     }

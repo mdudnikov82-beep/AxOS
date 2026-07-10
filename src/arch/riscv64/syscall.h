@@ -33,6 +33,7 @@
 #define SYS_EXEC_PIPE     30  /* exec_pipe(cmdline, stdout_pipe_id, stdin_pipe_id) -> new pid or -1 */
 #define SYS_FORK          31  /* fork() -> 0 in the child, new pid in the parent, -1 on error */
 #define SYS_SECCOMP       32  /* seccomp(mask) -> 0 (narrows the calling process's syscall filter; first call sets it) */
+#define SYS_SET_LEVEL     33  /* set_level(level) -> 0 (raises the calling process's own MLS sensitivity level, clamped [0,15]) */
 
 /* Kernel-side entry point.
  * frame[] = saved registers from trap_entry (sd xN, N*8(sp)):
