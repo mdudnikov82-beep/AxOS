@@ -54,7 +54,7 @@ int main(void) {
     for (unsigned int i = 0; i < NUM_COLORS; i++)
         draw_swatch(w, i, i == cur_idx);
     gfx_fill_rect(0, TOOLBAR_H, w, h - TOOLBAR_H, gfx_rgb(0, 0, 0));
-    gfx_draw_text(4, TOOLBAR_H + 4, "AxPaint: hold left button to draw, right to clear",
+    gfx_draw_text(4, TOOLBAR_H + 4, "Left=draw  Right=clear",
                  gfx_rgb(180, 180, 180));
     gfx_flush();
 

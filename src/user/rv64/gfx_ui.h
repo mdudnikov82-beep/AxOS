@@ -138,6 +138,8 @@ static void ui_round_window(int x, int y, int w, int h, int r, int title_h,
     ui_round_punch(x, y, r, ui_round_save_buf, cx, cy);
 
     /* Text drawn LAST, after the corner punch, and nudged in from the
-     * very corner so the rounding curve never clips a letter. */
-    gfx_draw_text((unsigned int)(x+8), (unsigned int)(y+5), title, gfx_rgb(255,255,255));
+     * very corner so the rounding curve never clips a letter. Vertical
+     * offset is centered within title_h (16px-tall glyph) rather than a
+     * hardcoded magic number, so it stays correct if title_h changes. */
+    gfx_draw_text((unsigned int)(x+8), (unsigned int)(y+2+(title_h-16)/2), title, gfx_rgb(255,255,255));
 }

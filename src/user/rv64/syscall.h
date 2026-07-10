@@ -247,8 +247,9 @@ static inline unsigned int gfx_getpixel(unsigned int x, unsigned int y) {
     return (unsigned int)__syscall2(SYS_GFX_GETPIXEL, x, y);
 }
 
-/* gfx_draw_text(x, y, str, bgra) — 8x8 bitmap font, 8px advance/char,
- * no line wrapping (split multi-line text yourself). */
+/* gfx_draw_text(x, y, str, bgra) — 8x8 bitmap font rendered at 2x
+ * (16x16 on screen), 16px advance/char, no line wrapping (split
+ * multi-line text yourself). */
 static inline void gfx_draw_text(unsigned int x, unsigned int y,
                                  const char *str, unsigned int bgra) {
     __syscall4(SYS_GFX_DRAWTEXT, x, y, (long)str, bgra);

@@ -683,19 +683,29 @@ static const unsigned char font8x8[96][8] = {
     {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, /* 7F   */
 };
 
+/* Rendered at 2x: each 1x1 source bit becomes a GFX_FONT_SCALE x
+ * GFX_FONT_SCALE block. Matches x86 gfx_shell.c's FONT_SCALE - at native
+ * 8x8 pixels, text is tiny/hard to read on an 800x600 canvas. */
+#define GFX_FONT_SCALE 2
+
 void virtio_gpu_draw_char(unsigned int x, unsigned int y, char ch, unsigned int bgra) {
     unsigned char u = (unsigned char)ch;
     if (u < 0x20 || u > 0x7F) return;
     const unsigned char *g = font8x8[u - 0x20];
     for (unsigned int r = 0; r < 8; r++) {
         unsigned char row = g[r];
-        for (unsigned int c = 0; c < 8; c++)
-            if (row & (1 << c)) virtio_gpu_putpixel(x + c, y + r, bgra);
+        for (unsigned int c = 0; c < 8; c++) {
+            if (!(row & (1 << c))) continue;
+            unsigned int px = x + c * GFX_FONT_SCALE, py = y + r * GFX_FONT_SCALE;
+            for (unsigned int dy = 0; dy < GFX_FONT_SCALE; dy++)
+                for (unsigned int dx = 0; dx < GFX_FONT_SCALE; dx++)
+                    virtio_gpu_putpixel(px + dx, py + dy, bgra);
+        }
     }
 }
 
 void virtio_gpu_draw_text(unsigned int x, unsigned int y, const char *s, unsigned int bgra) {
-    while (*s) { virtio_gpu_draw_char(x, y, *s++, bgra); x += 8; }
+    while (*s) { virtio_gpu_draw_char(x, y, *s++, bgra); x += 8 * GFX_FONT_SCALE; }
 }
 
 void *virtio_gpu_fb(void) { return fb; }

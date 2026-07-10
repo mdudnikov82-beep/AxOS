@@ -9,7 +9,7 @@
  * processes never tear/interleave mid-draw). Two windows coexist simply
  * by owning non-overlapping screen rectangles. */
 
-#define WIN_TITLE_H 14
+#define WIN_TITLE_H 28   /* 2x the old 14, matches the font's own 2x scale */
 #define WIN_RADIUS  16   /* matches x86 gfx_shell.c's CARD_R - see gfx_ui.h UI_MAX_R */
 
 typedef struct {
@@ -42,12 +42,12 @@ static void window_init(window_t *win, unsigned int x, unsigned int y,
  * the content area (not the whole window/screen) and restarts at the top. */
 static void window_println(window_t *win, const char *s, unsigned int color) {
     if (!win->content_h) return;
-    unsigned int rows = win->content_h / 8;
+    unsigned int rows = win->content_h / 16;
     if (win->cur_row >= rows) {
         gfx_fill_rect(win->x + 4, win->content_y, win->w - 8, win->content_h, win->bg);
         win->cur_row = 0;
     }
-    gfx_draw_text(win->x + 6, win->content_y + win->cur_row * 8, s, color);
+    gfx_draw_text(win->x + 6, win->content_y + win->cur_row * 16, s, color);
     win->cur_row++;
 }
 

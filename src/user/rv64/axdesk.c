@@ -14,8 +14,8 @@
  * overlapping AxSH's own console text). This only draws icons + dispatches
  * clicks; it doesn't try to track/composite the windows it launches. */
 
-#define ICON_W   90
-#define ICON_H   70
+#define ICON_W   112   /* matches x86 gfx_shell.c's icon card size - needed once labels render at 16px/char */
+#define ICON_H   96
 #define ICON_GAP 20
 #define ICON_TOP 70
 
@@ -26,6 +26,15 @@ typedef struct {
     unsigned int  color;
 } icon_t;
 
+/* Pixel width of a gfx_draw_text() string at the current 2x font scale
+ * (16px/char) - used to center variable-length labels in a fixed-width
+ * icon card. */
+static unsigned int text_px_w(const char *s) {
+    unsigned int n = 0;
+    while (*s++) n++;
+    return n * 16;
+}
+
 int main(void) {
     unsigned int w, h;
     if (!gfx_info(&w, &h)) {
@@ -34,10 +43,10 @@ int main(void) {
     }
 
     icon_t icons[4];
-    icons[0].label = "AxTerminal"; icons[0].file = "AXTERM.ELF";  icons[0].icon_bmp = "TERM.BMP";  icons[0].color = gfx_rgb(0, 150, 255);
-    icons[1].label = "AxAbout";    icons[1].file = "AXABOUT.ELF"; icons[1].icon_bmp = "ABOUT.BMP"; icons[1].color = gfx_rgb(255, 140, 0);
-    icons[2].label = "AxPaint";    icons[2].file = "AXPAINT.ELF"; icons[2].icon_bmp = "PAINT.BMP"; icons[2].color = gfx_rgb(0, 200, 120);
-    icons[3].label = "Shutdown";   icons[3].file = 0;             icons[3].icon_bmp = "POWER.BMP"; icons[3].color = gfx_rgb(220, 30, 30);
+    icons[0].label = "Term";  icons[0].file = "AXTERM.ELF";  icons[0].icon_bmp = "TERM.BMP";  icons[0].color = gfx_rgb(0, 150, 255);
+    icons[1].label = "About"; icons[1].file = "AXABOUT.ELF"; icons[1].icon_bmp = "ABOUT.BMP"; icons[1].color = gfx_rgb(255, 140, 0);
+    icons[2].label = "Paint"; icons[2].file = "AXPAINT.ELF"; icons[2].icon_bmp = "PAINT.BMP"; icons[2].color = gfx_rgb(0, 200, 120);
+    icons[3].label = "Power"; icons[3].file = 0;             icons[3].icon_bmp = "POWER.BMP"; icons[3].color = gfx_rgb(220, 30, 30);
     unsigned int n_icons = 4;
 
     unsigned int total_w = n_icons * ICON_W + (n_icons - 1) * ICON_GAP;
@@ -66,7 +75,9 @@ int main(void) {
             bmp_draw(&icon_img, icon_x, (unsigned int)ICON_TOP + 6);
         }
 
-        gfx_draw_text((unsigned int)x + 6, ICON_TOP + ICON_H - 16, icons[i].label, gfx_rgb(0, 0, 0));
+        unsigned int lw = text_px_w(icons[i].label);
+        gfx_draw_text((unsigned int)x + (ICON_W - lw) / 2, ICON_TOP + ICON_H - 20,
+                     icons[i].label, gfx_rgb(0, 0, 0));
     }
     gfx_flush();
 
