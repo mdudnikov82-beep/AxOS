@@ -498,6 +498,26 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\mlstest_rv64.elf) do echo   mlstest_rv64.elf: %%~zF bytes
 
+echo [U75] sectest.c (fork+seccomp+MLS integration probe)...
+"%CC%" %UFLAGS% -c %USRC%\sectest.c -o %OUT%\usectest.o
+if %errorlevel% neq 0 goto :error
+
+echo [U76] Linking sectest...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\sectest_rv64.elf %OUT%\ucrt0.o %OUT%\usectest.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\sectest_rv64.elf) do echo   sectest_rv64.elf: %%~zF bytes
+
+echo [U77] cfisectest.c (CFI+seccomp integration probe, WITH -finstrument-functions)...
+"%CC%" %UFLAGS% -fno-omit-frame-pointer -fno-optimize-sibling-calls -finstrument-functions -c %USRC%\cfisectest.c -o %OUT%\ucfisectest.o
+if %errorlevel% neq 0 goto :error
+
+echo [U78] Linking cfisectest...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\cfisectest_rv64.elf %OUT%\ucrt0.o %OUT%\ucfisectest.o %OUT%\ucfi.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\cfisectest_rv64.elf) do echo   cfisectest_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -539,6 +559,8 @@ copy /b %OUT%\forktest_rv64.elf    rv64build\fs\rv64\FORKTEST.ELF
 copy /b %OUT%\scdemo_rv64.elf      rv64build\fs\rv64\SCDEMO.ELF
 copy /b %OUT%\cfidemo_rv64.elf     rv64build\fs\rv64\CFIDEMO.ELF
 copy /b %OUT%\mlstest_rv64.elf     rv64build\fs\rv64\MLSTEST.ELF
+copy /b %OUT%\sectest_rv64.elf     rv64build\fs\rv64\SECTEST.ELF
+copy /b %OUT%\cfisectest_rv64.elf  rv64build\fs\rv64\CFISECTS.ELF
 copy /b %USRC%\index.htm           rv64build\fs\rv64\INDEX.HTM
 copy /b %USRC%\term.bmp            rv64build\fs\rv64\TERM.BMP
 copy /b %USRC%\about.bmp           rv64build\fs\rv64\ABOUT.BMP
