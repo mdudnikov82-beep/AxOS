@@ -108,3 +108,145 @@ static void bmp_draw(const bmp_image_t *img, unsigned int x, unsigned int y) {
         for (unsigned int dx = 0; dx < img->width; dx++)
             gfx_putpixel(x + dx, y + dy, img->pixels[dy * img->width + dx]);
 }
+
+/* ---- 8bpp-indexed encoder/decoder (added for AxPaint's save/load) ----
+ *
+ * sys_open() (syscall.c) deliberately caps any file READ at 32KB
+ * (8 pages, bump-allocated per fd - "avoids the kmalloc recursion issue
+ * for large buffers"). writefile() has no such cap, but a symmetric
+ * load does - so anything meant to be loadable back through open()/
+ * read() must stay under that ceiling. A full-resolution 800x564
+ * canvas at 1 byte/pixel alone is ~441KB - nowhere close. This format
+ * (8bpp indexed, a handful of palette colors) is for AxPaint's small
+ * thumbnail snapshot, not a full-screen picture. */
+
+static void bmp_wr32(unsigned char *p, unsigned int v) {
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+static void bmp_wr16(unsigned char *p, unsigned short v) {
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
+}
+
+/* idx[] is row-major TOP-DOWN (idx[0] = top-left) - flips to BMP's
+ * bottom-up storage order itself, same as bmp_load() does on the way
+ * in. palette[] holds n_colors gfx_rgb()-packed colors (index 0..
+ * n_colors-1). Returns 1 ok / 0 err (incl. "would exceed the 32KB read
+ * cap" - checked explicitly so a future resolution bump fails loudly
+ * instead of silently writing an unloadable file). */
+static int bmp_save_indexed(const char *filename, const unsigned char *idx,
+                            unsigned int w, unsigned int h,
+                            const unsigned int *palette, unsigned char n_colors) {
+    unsigned int row_bytes = (w + 3u) & ~3u;
+    unsigned int pal_bytes = (unsigned int)n_colors * 4u;
+    unsigned int off_bits  = 14u + 40u + pal_bytes;
+    unsigned int img_bytes = row_bytes * h;
+    unsigned int total     = off_bits + img_bytes;
+
+    static unsigned char buf[32 * 1024];   /* must stay under sys_open()'s 32KB read cap */
+    if (total > sizeof(buf)) return 0;
+
+    unsigned char *p = buf;
+    p[0] = 'B'; p[1] = 'M';
+    bmp_wr32(p + 2, total);
+    bmp_wr32(p + 6, 0);
+    bmp_wr32(p + 10, off_bits);
+
+    bmp_wr32(p + 14, 40);
+    bmp_wr32(p + 18, w);
+    bmp_wr32(p + 22, h);
+    bmp_wr16(p + 26, 1);
+    bmp_wr16(p + 28, 8);
+    bmp_wr32(p + 30, 0);
+    bmp_wr32(p + 34, img_bytes);
+    bmp_wr32(p + 38, 0);
+    bmp_wr32(p + 42, 0);
+    bmp_wr32(p + 46, n_colors);
+    bmp_wr32(p + 50, 0);
+
+    for (unsigned char c = 0; c < n_colors; c++) {
+        unsigned int col = palette[c];
+        unsigned char *e = p + 54 + (unsigned int)c * 4;
+        e[0] = (unsigned char)col;          /* B */
+        e[1] = (unsigned char)(col >> 8);   /* G */
+        e[2] = (unsigned char)(col >> 16);  /* R */
+        e[3] = 0;
+    }
+
+    unsigned char *pix = p + off_bits;
+    for (unsigned int y = 0; y < h; y++) {
+        unsigned int src_row = h - 1 - y;   /* flip to bottom-up */
+        for (unsigned int x = 0; x < w; x++)
+            pix[y * row_bytes + x] = idx[src_row * w + x];
+        for (unsigned int x = w; x < row_bytes; x++)
+            pix[y * row_bytes + x] = 0;     /* 4-byte row padding */
+    }
+
+    return writefile(filename, buf, (long)total);
+}
+
+/* Inverse of bmp_save_indexed() - rejects anything that doesn't match
+ * the expected w/h/bpp exactly (happy-path only, same discipline as
+ * bmp_load()). Caller sizes idx[] for w*h bytes, palette[] for >=8
+ * entries. Returns 1 ok / 0 err (not found / not BMP / unsupported
+ * variant / size mismatch). */
+static int bmp_load_indexed(const char *filename, unsigned char *idx,
+                            unsigned int w, unsigned int h,
+                            unsigned int *palette, unsigned char *n_colors_out) {
+    int fd = open(filename, 0);
+    if (fd < 0) return 0;
+
+    static unsigned char hdr[54];
+    if (read(fd, hdr, 54) != 54 || hdr[0] != 'B' || hdr[1] != 'M') {
+        close(fd);
+        return 0;
+    }
+
+    unsigned int   data_off = bmp_rd32(hdr + 10);
+    unsigned int   dib_size = bmp_rd32(hdr + 14);
+    unsigned int   fw       = bmp_rd32(hdr + 18);
+    unsigned int   fh       = bmp_rd32(hdr + 22);
+    unsigned short bpp      = bmp_rd16(hdr + 28);
+    unsigned int   clr_used = bmp_rd32(hdr + 46);
+
+    if (dib_size < 40 || bpp != 8 || fw != w || fh != h ||
+        clr_used == 0 || clr_used > 8) {
+        close(fd);
+        return 0;
+    }
+
+    static unsigned char pal_buf[8 * 4];
+    unsigned int pal_bytes = clr_used * 4u;
+    if (read(fd, pal_buf, pal_bytes) != (int)pal_bytes) { close(fd); return 0; }
+    for (unsigned int c = 0; c < clr_used; c++)
+        palette[c] = gfx_rgb(pal_buf[c * 4 + 2], pal_buf[c * 4 + 1], pal_buf[c * 4 + 0]);
+    *n_colors_out = (unsigned char)clr_used;
+
+    /* Gap between palette end and bfOffBits (rare, defensive) - no
+     * lseek() on this platform, discard via sequential read like
+     * bmp_load() already does. */
+    unsigned int consumed = 54u + pal_bytes;
+    if (data_off > consumed) {
+        unsigned int skip = data_off - consumed;
+        static unsigned char discard[64];
+        while (skip > 0) {
+            unsigned int chunk = skip > sizeof(discard) ? sizeof(discard) : skip;
+            if (read(fd, discard, chunk) != (int)chunk) { close(fd); return 0; }
+            skip -= chunk;
+        }
+    } else if (data_off < consumed) {
+        close(fd);
+        return 0;
+    }
+
+    unsigned int row_bytes = (w + 3u) & ~3u;
+    static unsigned char row_buf[256];
+    if (row_bytes > sizeof(row_buf)) { close(fd); return 0; }
+    for (unsigned int y = 0; y < h; y++) {
+        if (read(fd, row_buf, row_bytes) != (int)row_bytes) { close(fd); return 0; }
+        unsigned int dst_row = h - 1 - y;   /* bottom-up in file -> top-down in idx[] */
+        for (unsigned int x = 0; x < w; x++) idx[dst_row * w + x] = row_buf[x];
+    }
+    close(fd);
+    return 1;
+}

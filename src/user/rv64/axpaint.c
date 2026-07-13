@@ -1,6 +1,7 @@
 #include "syscall.h"
 #include "cursor.h"
 #include "gfx_ui.h"
+#include "bmp.h"
 
 /* AxPaint — simple finger-paint over the shared framebuffer, driven by the
  * virtio-input tablet (SYS_MOUSE_STATE). See cursor.h for why the cursor
@@ -9,15 +10,76 @@
  * Top strip = palette (click a swatch to select color).
  * Rest of the screen = canvas. Hold left button to paint, right to clear.
  * Meant to run in the background (`run AXPAINT.ELF &`); stop it with
- * `kill <pid>` from AxSH. */
+ * `kill <pid>` from AxSH.
+ *
+ * 's'/'l' (virtio-keyboard) save/load a small THUMBNAIL snapshot of the
+ * canvas as CANVAS.BMP - not the full-resolution drawing. sys_open()
+ * deliberately caps any file read at 32KB (see bmp.h's bmp_load_indexed
+ * comment); a full-resolution 800x564 canvas is ~441KB, nowhere close,
+ * so this saves/loads at THUMB_SCALE:1 instead. */
 
 #define TOOLBAR_H    36  /* was a bare 20px strip of flat swatches */
 #define SWATCH_GAP   4
 #define SWATCH_R     8   /* swatches are only ~32px tall - a bigger radius (like window.h's 16) would look like a blob */
 #define BRUSH        6
+#define THUMB_SCALE  5   /* 800/5=160, (600-36)/5=112.8->112 (4px remainder ignored) */
 
 static const unsigned int NUM_COLORS = 6;
 static unsigned int palette[6];
+static unsigned int save_palette[7];        /* [0]=background/black, [1..6]=palette[0..5] */
+static unsigned char thumb_idx[256 * 256];  /* generous fixed cap; actual w/h computed at runtime */
+
+static unsigned char color_to_index(unsigned int c) {
+    for (unsigned char i = 0; i < 7; i++) if (save_palette[i] == c) return i;
+    /* Defensive nearest-color fallback - shouldn't normally trigger,
+     * the canvas only ever contains flat palette fills or background,
+     * no blending happens below the toolbar. */
+    unsigned char best = 0;
+    unsigned int best_d = 0xFFFFFFFFu;
+    for (unsigned char i = 0; i < 7; i++) {
+        int dr = (int)((c >> 16) & 0xFF) - (int)((save_palette[i] >> 16) & 0xFF);
+        int dg = (int)((c >> 8) & 0xFF)  - (int)((save_palette[i] >> 8) & 0xFF);
+        int db = (int)(c & 0xFF)         - (int)(save_palette[i] & 0xFF);
+        unsigned int d = (unsigned int)(dr * dr + dg * dg + db * db);
+        if (d < best_d) { best_d = d; best = i; }
+    }
+    return best;
+}
+
+static void do_save(unsigned int w, unsigned int h) {
+    unsigned int tw = w / THUMB_SCALE, th = (h - TOOLBAR_H) / THUMB_SCALE;
+    for (unsigned int ty = 0; ty < th; ty++)
+        for (unsigned int tx = 0; tx < tw; tx++)
+            thumb_idx[ty * tw + tx] =
+                color_to_index(gfx_getpixel(tx * THUMB_SCALE, TOOLBAR_H + ty * THUMB_SCALE));
+    int ok = bmp_save_indexed("CANVAS.BMP", thumb_idx, tw, th, save_palette, 7);
+    /* gfx_draw_text() only sets "on" glyph pixels, it never clears
+     * behind itself - must blank the strip first or this overlaps
+     * whatever text (the original hint, or an earlier status message)
+     * was already there instead of replacing it. */
+    gfx_fill_rect(0, TOOLBAR_H, w, 16, gfx_rgb(0, 0, 0));
+    gfx_draw_text(4, TOOLBAR_H + 4, ok ? "Saved: CANVAS.BMP (thumbnail)" : "Save failed",
+                 gfx_rgb(255, 255, 0));
+}
+
+static void do_load(unsigned int w, unsigned int h) {
+    unsigned int tw = w / THUMB_SCALE, th = (h - TOOLBAR_H) / THUMB_SCALE;
+    unsigned int pal[8];
+    unsigned char n;
+    if (!bmp_load_indexed("CANVAS.BMP", thumb_idx, tw, th, pal, &n)) {
+        gfx_fill_rect(0, TOOLBAR_H, w, 16, gfx_rgb(0, 0, 0));
+        gfx_draw_text(4, TOOLBAR_H + 4, "No saved file", gfx_rgb(255, 80, 80));
+        return;
+    }
+    for (unsigned int ty = 0; ty < th; ty++)
+        for (unsigned int tx = 0; tx < tw; tx++)
+            gfx_fill_rect(tx * THUMB_SCALE, TOOLBAR_H + ty * THUMB_SCALE, THUMB_SCALE, THUMB_SCALE,
+                         pal[thumb_idx[ty * tw + tx]]);
+    /* Status line sits just below TOOLBAR_H, inside the canvas area
+     * that the load loop above already repainted - draw straight over
+     * the freshly-loaded pixels there, no separate clear needed. */
+    gfx_draw_text(4, TOOLBAR_H + 4, "Loaded: CANVAS.BMP (thumbnail)", gfx_rgb(0, 255, 120));
+}
 
 /* Redraws one swatch button - shadowed rounded card, white border if it's
  * the selected color, black otherwise. Canvas itself stays flat black on
@@ -46,6 +108,14 @@ int main(void) {
     palette[3] = gfx_rgb(255, 255, 0);
     palette[4] = gfx_rgb(255, 0, 255);
     palette[5] = gfx_rgb(0, 255, 255);
+
+    save_palette[0] = gfx_rgb(0, 0, 0);   /* background/unpainted */
+    save_palette[1] = palette[0];
+    save_palette[2] = palette[1];
+    save_palette[3] = palette[2];
+    save_palette[4] = palette[3];
+    save_palette[5] = palette[4];
+    save_palette[6] = palette[5];
 
     unsigned int swatch_w = w / NUM_COLORS;
 
@@ -87,6 +157,12 @@ int main(void) {
             }
         } else if (buttons & 2) {                /* right button: clear */
             gfx_fill_rect(0, TOOLBAR_H, w, h - TOOLBAR_H, gfx_rgb(0, 0, 0));
+        }
+
+        int c;
+        while ((c = kbd_getc()) >= 0) {
+            if (c == 's') do_save(w, h);
+            else if (c == 'l') do_load(w, h);
         }
 
         cursor_draw_at(mx, my);
