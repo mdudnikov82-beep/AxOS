@@ -1,5 +1,6 @@
 #include "syscall.h"
 #include "window.h"
+#include "cursor.h"
 
 /* AxTerminal — a real interactive terminal window, driven by
  * kbd_getc() (virtio-keyboard, see virtio_keyboard.c). Mirrors x86
@@ -78,6 +79,9 @@ static void run_command(window_t *win) {
 }
 
 int main(void) {
+    unsigned int screen_w = 800, screen_h = 600;
+    gfx_info(&screen_w, &screen_h);   /* runtime query, matches axdesk.c/axpaint.c's convention */
+
     window_t win;
     window_init(&win, 16, 40, 300, 424, gfx_rgb(0, 150, 255), gfx_rgb(10, 10, 30),
                "AxTerminal");
@@ -87,9 +91,40 @@ int main(void) {
     draw_input_line(&win, 0);
     gfx_flush();
 
+    int dragging = 0, prev_left = 0;
+    unsigned int drag_off_x = 0, drag_off_y = 0;
+
     unsigned long tick = 0;
     for (;;) {
         int changed = 0;
+
+        cursor_restore();
+        unsigned int mx = 0, my = 0, buttons = 0;
+        if (mouse_state(&mx, &my, &buttons)) {
+            int left = buttons & 1;
+            if (!dragging && left && !prev_left && window_hit_close(&win, mx, my)) {
+                gfx_flush();
+                exit(0);
+            } else if (!dragging && left && !prev_left && window_hit_titlebar(&win, mx, my)) {
+                dragging = 1;
+                drag_off_x = mx - win.x;
+                drag_off_y = my - win.y;
+            } else if (dragging && left) {
+                unsigned int nx = (mx > drag_off_x) ? mx - drag_off_x : 0;
+                unsigned int ny = (my > drag_off_y) ? my - drag_off_y : 0;
+                if (nx + win.w > screen_w) nx = screen_w - win.w;
+                if (ny + win.h > screen_h) ny = screen_h - win.h;
+                window_move(&win, nx, ny, screen_h);
+                changed = 1;
+            } else if (dragging && !left) {
+                dragging = 0;
+                window_redraw_chrome(&win, "AxTerminal");
+                win.cur_row = 0;   /* content lost on move - no retained scrollback buffer */
+                changed = 1;
+            }
+            prev_left = left;
+        }
+
         int c;
         while ((c = kbd_getc()) >= 0) {
             if (c == '\n') {
@@ -109,9 +144,13 @@ int main(void) {
         int cursor_on = (int)((tick / 15) & 1);   /* ~blink every ~300ms at a 20ms poll */
         if (changed || (tick % 15 == 0)) {
             draw_input_line(&win, cursor_on);
-            gfx_flush();
         }
 
+        /* Mouse cursor is drawn every tick regardless of "changed" (same
+         * convention as axpaint.c/axdesk.c) - gating it would make it
+         * flicker out on idle ticks instead of tracking smoothly. */
+        cursor_draw_at(mx, my);
+        gfx_flush();
         sleep_ms(20);
     }
 
