@@ -1,29 +1,119 @@
 #include "syscall.h"
 #include "window.h"
 
-/* AxTerminal — left-hand window with a live-updating tick log. Meant to
- * run as a background process (`run AXTERM.ELF &`) alongside AxAbout to
- * demonstrate real concurrent scheduling: both windows update
- * independently, interleaved by the round-robin scheduler. */
+/* AxTerminal — a real interactive terminal window, driven by
+ * kbd_getc() (virtio-keyboard, see virtio_keyboard.c). Mirrors x86
+ * gfx_shell.c's built-in terminal (help/ver/cls/exit) in spirit, but
+ * built on RV64's syscall-per-draw-call gfx API: the input line is
+ * redrawn on every keystroke (cheap, a few ecalls), scrollback only
+ * grows via window_println() on Enter, not every poll tick.
+ *
+ * Reuses window_init()/window_println() from window.h COMPLETELY
+ * UNMODIFIED (window.h is shared with axabout.c) via one trick: shrink
+ * win.content_h by exactly one row (16px) right after window_init() to
+ * reclaim a strip at the bottom of the content area for the input line
+ * - window_println()'s own row math (content_h/16) then transparently
+ * leaves that strip alone. */
+
+#define INPUT_MAX 40
+
+static char input[INPUT_MAX];
+static unsigned int input_len = 0;
+
+static int streq(const char *s) {
+    unsigned int i = 0;
+    while (s[i] && input[i] == s[i]) i++;
+    return s[i] == 0 && input[i] == 0;
+}
+
+static int starts_with(const char *s) {
+    unsigned int i = 0;
+    while (s[i]) {
+        if (input[i] != s[i]) return 0;
+        i++;
+    }
+    return 1;
+}
+
+static void draw_input_line(window_t *win, int cursor_on) {
+    unsigned int y = win->content_y + win->content_h;
+    gfx_fill_rect(win->x + 4, y, win->w - 8, 16, win->bg);
+    gfx_draw_text(win->x + 6, y, "> ", gfx_rgb(255, 255, 0));
+    if (input_len) gfx_draw_text(win->x + 6 + 32, y, input, gfx_rgb(255, 255, 255));
+    if (cursor_on)
+        gfx_fill_rect(win->x + 6 + 32 + input_len * 16, y, 10, 16, gfx_rgb(255, 255, 255));
+}
+
+static void run_command(window_t *win) {
+    /* echo "> <cmd>" into scrollback before dispatching */
+    char echo[INPUT_MAX + 4];
+    int i = 0;
+    echo[i++] = '>'; echo[i++] = ' ';
+    for (unsigned int k = 0; k < input_len; k++) echo[i++] = input[k];
+    echo[i] = '\0';
+    window_println(win, echo, gfx_rgb(0, 255, 120));
+
+    if (input_len == 0) {
+        /* nothing to do */
+    } else if (streq("help")) {
+        window_println(win, "help ver cls echo uptime exit", gfx_rgb(180, 180, 255));
+    } else if (streq("ver")) {
+        window_println(win, "AxOS/RV64 AxTerminal v1.0", gfx_rgb(180, 180, 255));
+    } else if (streq("cls")) {
+        gfx_fill_rect(win->x + 4, win->content_y, win->w - 8, win->content_h, win->bg);
+        win->cur_row = 0;
+    } else if (starts_with("echo ")) {
+        window_println(win, input + 5, gfx_rgb(180, 180, 255));
+    } else if (streq("uptime")) {
+        window_println_udec(win, "uptime (s): ", gettime() / 10000000UL, gfx_rgb(180, 180, 255));
+    } else if (streq("exit")) {
+        gfx_flush();
+        exit(0);
+    } else {
+        window_println(win, "Unknown. Try: help", gfx_rgb(255, 80, 80));
+    }
+
+    input_len = 0;
+    input[0] = '\0';
+}
+
 int main(void) {
     window_t win;
     window_init(&win, 16, 40, 300, 424, gfx_rgb(0, 150, 255), gfx_rgb(10, 10, 30),
                "AxTerminal");
+    win.content_h -= 16;   /* reserve the reclaimed bottom strip for the input line */
 
-    int pid = getpid();
-    window_println_udec(&win, "AxTerminal, pid=", (unsigned long)pid,
-                        gfx_rgb(255, 255, 255));
-    window_println(&win, "", 0);
+    window_println(&win, "AxOS/RV64 AxTerminal - type 'help'", gfx_rgb(255, 255, 0));
+    draw_input_line(&win, 0);
     gfx_flush();
 
-    for (unsigned long tick = 1; tick <= 200; tick++) {
-        window_println_udec(&win, "tick ", tick, gfx_rgb(0, 255, 120));
-        gfx_flush();
-        sleep_ms(500);
+    unsigned long tick = 0;
+    for (;;) {
+        int changed = 0;
+        int c;
+        while ((c = kbd_getc()) >= 0) {
+            if (c == '\n') {
+                run_command(&win);
+                draw_input_line(&win, 1);
+                changed = 1;
+            } else if (c == '\b') {
+                if (input_len) { input[--input_len] = '\0'; changed = 1; }
+            } else if (input_len < INPUT_MAX - 1) {
+                input[input_len++] = (char)c;
+                input[input_len] = '\0';
+                changed = 1;
+            }
+        }
+
+        tick++;
+        int cursor_on = (int)((tick / 15) & 1);   /* ~blink every ~300ms at a 20ms poll */
+        if (changed || (tick % 15 == 0)) {
+            draw_input_line(&win, cursor_on);
+            gfx_flush();
+        }
+
+        sleep_ms(20);
     }
 
-    window_println(&win, "-- done --", gfx_rgb(255, 255, 0));
-    gfx_flush();
-    exit(0);
     return 0;
 }

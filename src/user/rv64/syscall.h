@@ -37,6 +37,7 @@
 #define SYS_FORK          31
 #define SYS_SECCOMP       32
 #define SYS_SET_LEVEL     33
+#define SYS_KBD_GETC      34
 
 static inline long __syscall0(long nr) {
     register long _nr  __asm__("a7") = nr;
@@ -321,6 +322,14 @@ static inline int mouse_state(unsigned int *x, unsigned int *y, unsigned int *bu
     if (y)       *y       = (unsigned int)((v >> 16) & 0xFFFF);
     if (buttons) *buttons = (unsigned int)(v & 0xFF);
     return 1;
+}
+
+/* kbd_getc() -> next ASCII char from the keyboard, or -1 if none
+ * pending / no device. Non-blocking - call in a loop to drain
+ * everything typed since the last poll (real key events, incl. shift,
+ * see virtio_keyboard.c). */
+static inline int kbd_getc(void) {
+    return (int)__syscall0(SYS_KBD_GETC);
 }
 
 /* net_mac(mac[6]) -> 1 if a NIC is present (mac filled in), 0 if not. */

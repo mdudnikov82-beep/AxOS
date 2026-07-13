@@ -8,6 +8,7 @@
 #include "paging.h"
 #include "virtio_gpu.h"
 #include "virtio_input.h"
+#include "virtio_keyboard.h"
 #include "virtio_net.h"
 #include "console.h"
 
@@ -732,6 +733,10 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         ret = 0;
         break;
     }
+
+    case SYS_KBD_GETC:
+        ret = virtio_keyboard_ready() ? (long)virtio_keyboard_getc() : -1;
+        break;
 
     case SYS_SET_PRIORITY:
         proc_set_priority((int)arg0, (int)arg1);

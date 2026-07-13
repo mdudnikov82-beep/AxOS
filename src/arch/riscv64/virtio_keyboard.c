@@ -1,15 +1,13 @@
-#include "virtio_input.h"
-#include "virtio_gpu.h"
+#include "virtio_keyboard.h"
 #include "pmem.h"
 #include "drivers/uart.h"
 
-// VirtIO-input — тот же MMIO virtqueue-каркас, что и virtio_blk.c/virtio_gpu.c,
-// но eventq (queue 0) работает НАОБОРОТ: мы заранее выставляем пустые
-// device-writable буферы в avail-ring, устройство само заполняет их
-// событиями по мере их появления (клики/движение мыши), а мы читаем used-ring
-// по мере поступления и сразу возвращаем тот же буфер обратно в avail —
-// классическая "receive ring", просто опрашиваемая поллингом, как и весь
-// остальной ввод-вывод в этом ядре.
+// VirtIO-keyboard — same MMIO virtqueue framework as virtio_input.c's
+// tablet driver (eventq, receive-ring-via-polling), but translates
+// EV_KEY press events into ASCII (via the same scancode table x86's
+// gfx_shell.c already has, since Linux's KEY_* numbering for the base
+// US layout is bit-for-bit the AT Set-1 make codes) instead of tracking
+// a cursor/button state.
 
 #define VIRTIO_MMIO_BASE  0x10001000UL
 #define VIRTIO_MMIO_STEP  0x1000UL
@@ -50,7 +48,6 @@ static unsigned long input_base = 0;
 
 #define REG(off) (*(volatile unsigned int *)(input_base + (off)))
 #define CFGB(off) (*(volatile unsigned char *)(input_base + R_CONFIG + (off)))
-#define CFGU32(off) (*(volatile unsigned int *)(input_base + R_CONFIG + (off)))
 
 #define S_ACK       1
 #define S_DRIVER    2
@@ -95,27 +92,71 @@ static int ready = 0;
 
 static input_event_t *events;  /* QUEUE_SIZE slots, one page */
 
-/* Scaled screen cursor + button state, updated as events are drained. */
-static unsigned int cur_x = GPU_FB_WIDTH / 2;
-static unsigned int cur_y = GPU_FB_HEIGHT / 2;
-static unsigned int cur_buttons = 0;
-
-/* Raw ABS_X/ABS_Y ranges reported by the device (queried from config space). */
-static unsigned int abs_x_min = 0, abs_x_max = 0xFFFF;
-static unsigned int abs_y_min = 0, abs_y_max = 0xFFFF;
-
 /* ---- linux/input-event-codes.h subset we need ---- */
-#define EV_SYN 0x00
 #define EV_KEY 0x01
 #define EV_ABS 0x03
-#define ABS_X  0x00
-#define ABS_Y  0x01
-#define BTN_LEFT   0x110
-#define BTN_RIGHT  0x111
-#define BTN_MIDDLE 0x112
+#define KEY_LEFTSHIFT  42
+#define KEY_RIGHTSHIFT 54
 
-#define CFG_ABS_INFO 0x12
-#define CFG_EV_BITS  0x11
+#define CFG_EV_BITS 0x11
+
+static int shift_l = 0, shift_r = 0;
+
+/* US QWERTY scancode -> ASCII (unshifted, make codes only) - copied
+ * verbatim from src/kernel/gfx_shell.c's sc2asc[89] (x86's PS/2 table).
+ * Linux's KEY_* constants for the base US layout use the exact same
+ * numbering as AT keyboard Set-1 make codes, so this table is reusable
+ * as-is - confirmed by hand-checking KEY_A=30->'a', KEY_ENTER=28->'\n',
+ * KEY_LEFTSHIFT=42->0 (correctly unmapped, it's a modifier). */
+static const unsigned char sc2asc[89] = {
+    0,0,
+    '1','2','3','4','5','6','7','8','9','0','-','=','\b',
+    '\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',
+    0,'a','s','d','f','g','h','j','k','l',';','\'','`',
+    0,'\\','z','x','c','v','b','n','m',',','.','/',0,
+    '*',0,' ',0,
+    0,0,0,0,0,0,0,0,0,0,  /* F1-F10 */
+    0,0,                   /* Num/Scroll lock */
+    '7','8','9','-','4','5','6','+','1','2','3','0','.'
+};
+
+/* Shifted variant: uppercase letters + the common shifted digit/punctuation
+ * pairs. Real virtio-input reports genuine press/release, so unlike x86's
+ * PS/2 polling demo (which never bothers with shift at all), tracking it
+ * here is cheap and correct. */
+static char shift_ch(char c) {
+    if (c >= 'a' && c <= 'z') return (char)(c - 32);
+    switch (c) {
+        case '1': return '!'; case '2': return '@'; case '3': return '#';
+        case '4': return '$'; case '5': return '%'; case '6': return '^';
+        case '7': return '&'; case '8': return '*'; case '9': return '(';
+        case '0': return ')'; case '-': return '_'; case '=': return '+';
+        case '[': return '{'; case ']': return '}'; case ';': return ':';
+        case '\'': return '"'; case '`': return '~'; case '\\': return '|';
+        case ',': return '<'; case '.': return '>'; case '/': return '?';
+        default: return c;
+    }
+}
+
+/* ---- small ASCII FIFO, drained by virtio_keyboard_getc() ---- */
+#define KBD_QUEUE_SIZE 16
+static char kbd_queue[KBD_QUEUE_SIZE];
+static unsigned int kbd_head = 0, kbd_tail = 0, kbd_count = 0;
+
+static void kbd_push(char c) {
+    if (kbd_count == KBD_QUEUE_SIZE) return;  /* drop if the reader isn't keeping up */
+    kbd_queue[kbd_tail] = c;
+    kbd_tail = (kbd_tail + 1) % KBD_QUEUE_SIZE;
+    kbd_count++;
+}
+
+static int kbd_pop(void) {
+    if (!kbd_count) return -1;
+    char c = kbd_queue[kbd_head];
+    kbd_head = (kbd_head + 1) % KBD_QUEUE_SIZE;
+    kbd_count--;
+    return (unsigned char)c;
+}
 
 static void cfg_select(unsigned char select, unsigned char subsel) {
     CFGB(0) = select;
@@ -124,16 +165,14 @@ static void cfg_select(unsigned char select, unsigned char subsel) {
 
 /* 1 if the device at the currently-selected input_base reports ANY
  * EV_ABS support (absolute axes) - true for the tablet, false for a
- * real keyboard. Now that a virtio-keyboard device can also sit on this
- * same id-18 class, the scan below must not blindly bind to the first
- * match - see virtio_keyboard.c's mirror of this same check. */
+ * real keyboard. Used to skip the wrong id-18 device during the scan. */
 static int supports_ev_abs(void) {
     cfg_select(CFG_EV_BITS, EV_ABS);
-    return CFGB(0) != 0;
+    return CFGB(0) != 0;   /* CFGB(0) after select = reported bitmap size in bytes */
 }
 
 static int init_v1(void) {
-    uart_puts("[input] using legacy v1 MMIO\r\n");
+    uart_puts("[kbd] using legacy v1 MMIO\r\n");
     REG(R_STATUS) = 0;
     __asm__ volatile("fence" ::: "memory");
     REG(R_STATUS) = S_ACK | S_DRIVER;
@@ -150,7 +189,7 @@ static int init_v1(void) {
     void *p1 = alloc_page();
     if (!p0 || !p1) return -1;
     if ((unsigned long)p1 != (unsigned long)p0 + PAGE_SIZE) {
-        uart_puts("[input] v1: pages not adjacent!\r\n");
+        uart_puts("[kbd] v1: pages not adjacent!\r\n");
         return -1;
     }
     desc  = (vdesc_t  *)p0;
@@ -165,7 +204,7 @@ static int init_v1(void) {
 }
 
 static int init_v2(void) {
-    uart_puts("[input] using modern v2 MMIO\r\n");
+    uart_puts("[kbd] using modern v2 MMIO\r\n");
     REG(R_STATUS) = 0;
     __asm__ volatile("fence" ::: "memory");
     REG(R_STATUS) = S_ACK | S_DRIVER;
@@ -201,8 +240,6 @@ static int init_v2(void) {
     return 0;
 }
 
-/* Re-posts descriptor `i` (device-writable, one input_event_t) into the
- * avail ring so the device can fill it with a future event. */
 static void repost(unsigned int i) {
     desc[i].addr = (unsigned long)&events[i];
     desc[i].len  = sizeof(input_event_t);
@@ -215,7 +252,7 @@ static void repost(unsigned int i) {
     avail->idx = (unsigned short)(ai + 1);
 }
 
-int virtio_input_init(void) {
+int virtio_keyboard_init(void) {
     input_base = 0;
     for (int i = 0; i < VIRTIO_MMIO_SLOTS; i++) {
         unsigned long base = VIRTIO_MMIO_BASE + (unsigned long)i * VIRTIO_MMIO_STEP;
@@ -223,76 +260,53 @@ int virtio_input_init(void) {
         volatile unsigned int *id_reg    = (volatile unsigned int *)(base + R_DEVICE_ID);
         if (*magic_reg == 0x74726976 && *id_reg == INPUT_DEVICE_ID) {
             input_base = base;
-            if (supports_ev_abs()) break;   /* has ABS axes -> the tablet */
-            input_base = 0;                  /* this one's the keyboard, keep scanning */
+            if (!supports_ev_abs()) break;   /* no ABS axes -> real keyboard */
+            input_base = 0;                  /* this one's the tablet, keep scanning */
         }
     }
     if (!input_base) {
-        uart_puts("[input] virtio-input device not found (scanned 8 MMIO slots)\r\n");
+        uart_puts("[kbd] virtio-keyboard device not found (scanned 8 MMIO slots)\r\n");
         return -1;
     }
-    uart_puts("[input] found @ 0x1000");
+    uart_puts("[kbd] found @ 0x1000");
     uart_putc('0' + (char)((input_base - VIRTIO_MMIO_BASE) / VIRTIO_MMIO_STEP + 1));
     uart_puts("000\r\n");
 
     events = (input_event_t *)alloc_page();
-    if (!events) { uart_puts("[input] OOM events buffer\r\n"); return -1; }
+    if (!events) { uart_puts("[kbd] OOM events buffer\r\n"); return -1; }
 
     unsigned int ver = REG(R_VERSION);
     int rc = (ver == 1) ? init_v1() : init_v2();
-    if (rc != 0) { uart_puts("[input] queue init failed\r\n"); return -1; }
+    if (rc != 0) { uart_puts("[kbd] queue init failed\r\n"); return -1; }
 
-    /* Query the device's reported ABS_X/ABS_Y ranges so we can scale raw
-     * coordinates to screen pixels. */
-    cfg_select(CFG_ABS_INFO, ABS_X);
-    abs_x_min = CFGU32(8);
-    abs_x_max = CFGU32(12);
-    cfg_select(CFG_ABS_INFO, ABS_Y);
-    abs_y_min = CFGU32(8);
-    abs_y_max = CFGU32(12);
-    if (abs_x_max <= abs_x_min) { abs_x_min = 0; abs_x_max = 0xFFFF; }
-    if (abs_y_max <= abs_y_min) { abs_y_min = 0; abs_y_max = 0xFFFF; }
-
-    /* Pre-post all QUEUE_SIZE buffers as empty device-writable receive
-     * slots — the device fills them in as real events occur. */
     for (unsigned int i = 0; i < QUEUE_SIZE; i++) repost(i);
     __asm__ volatile("fence ow, ow" ::: "memory");
     REG(R_QUEUE_NOTIFY) = 0;
 
     last_used = 0;
     ready = 1;
-    uart_puts("[input] ready (tablet mode)\r\n");
+    uart_puts("[kbd] ready\r\n");
     return 0;
 }
 
-int virtio_input_ready(void) { return ready; }
+int virtio_keyboard_ready(void) { return ready; }
 
 static void handle_event(const input_event_t *ev) {
-    if (ev->type == EV_ABS) {
-        if (ev->code == ABS_X) {
-            unsigned int range = abs_x_max - abs_x_min;
-            unsigned int v = (ev->value < abs_x_min) ? abs_x_min :
-                             (ev->value > abs_x_max) ? abs_x_max : ev->value;
-            cur_x = range ? ((v - abs_x_min) * (GPU_FB_WIDTH - 1)) / range : 0;
-        } else if (ev->code == ABS_Y) {
-            unsigned int range = abs_y_max - abs_y_min;
-            unsigned int v = (ev->value < abs_y_min) ? abs_y_min :
-                             (ev->value > abs_y_max) ? abs_y_max : ev->value;
-            cur_y = range ? ((v - abs_y_min) * (GPU_FB_HEIGHT - 1)) / range : 0;
-        }
-    } else if (ev->type == EV_KEY) {
-        unsigned int bit = (ev->code == BTN_LEFT)   ? 1u :
-                           (ev->code == BTN_RIGHT)  ? 2u :
-                           (ev->code == BTN_MIDDLE) ? 4u : 0u;
-        if (bit) {
-            if (ev->value) cur_buttons |= bit; else cur_buttons &= ~bit;
-        }
-    }
-    /* EV_SYN and anything else: no state to update. */
+    if (ev->type != EV_KEY) return;   /* EV_SYN etc - no state to update */
+
+    if (ev->code == KEY_LEFTSHIFT)  { shift_l = ev->value ? 1 : 0; return; }
+    if (ev->code == KEY_RIGHTSHIFT) { shift_r = ev->value ? 1 : 0; return; }
+
+    if (!ev->value) return;   /* only translate presses, not releases */
+    if (ev->code >= 89) return;
+    unsigned char ch = sc2asc[ev->code];
+    if (!ch) return;
+    if (shift_l || shift_r) ch = (unsigned char)shift_ch((char)ch);
+    kbd_push((char)ch);
 }
 
-unsigned long virtio_input_state(void) {
-    if (!ready) return 0;
+int virtio_keyboard_getc(void) {
+    if (!ready) return -1;
 
     int any = 0;
     while (used->idx != last_used) {
@@ -308,7 +322,5 @@ unsigned long virtio_input_state(void) {
         REG(R_QUEUE_NOTIFY) = 0;
     }
 
-    return ((unsigned long)(cur_x & 0xFFFF) << 32) |
-           ((unsigned long)(cur_y & 0xFFFF) << 16) |
-           (unsigned long)(cur_buttons & 0xFF);
+    return kbd_pop();
 }

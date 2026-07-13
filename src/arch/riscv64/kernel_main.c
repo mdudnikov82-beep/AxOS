@@ -5,6 +5,7 @@
 #include "virtio_blk.h"
 #include "virtio_gpu.h"
 #include "virtio_input.h"
+#include "virtio_keyboard.h"
 #include "virtio_net.h"
 #include "console.h"
 #include "vfs.h"
@@ -297,6 +298,13 @@ void kernel_main(unsigned long hart_id, unsigned long dtb) {
     // находится и virtio_input_ready() всегда возвращает 0 (SYS_MOUSE_STATE
     // тогда безобидно отдаёт 0 вызывающему).
     virtio_input_init();
+
+    // VirtIO-keyboard — real key events for AxTerminal and any other
+    // GUI program that wants text input. Requires
+    // `-device virtio-keyboard-device`; if absent, just doesn't find
+    // it and virtio_keyboard_ready() always returns 0 (SYS_KBD_GETC
+    // then harmlessly returns -1 to the caller).
+    virtio_keyboard_init();
 
     // VirtIO-net — только приём/отправка сырых Ethernet-кадров (см.
     // virtio_net.h); ARP/IPv4/ICMP поверх этого пока не реализованы.

@@ -55,6 +55,10 @@ echo [5d] virtio_input.c...
 "%CC%" %KFLAGS% -c %SRC%\virtio_input.c -o %OUT%\virtio_input.o
 if %errorlevel% neq 0 goto :error
 
+echo [5d2] virtio_keyboard.c...
+"%CC%" %KFLAGS% -c %SRC%\virtio_keyboard.c -o %OUT%\virtio_keyboard.o
+if %errorlevel% neq 0 goto :error
+
 echo [5e] virtio_net.c...
 "%CC%" %KFLAGS% -c %SRC%\virtio_net.c -o %OUT%\virtio_net.o
 if %errorlevel% neq 0 goto :error
@@ -97,6 +101,7 @@ echo [11] Linking kernel...
     %OUT%\virtio_gpu.o ^
     %OUT%\console.o ^
     %OUT%\virtio_input.o ^
+    %OUT%\virtio_keyboard.o ^
     %OUT%\virtio_net.o ^
     %OUT%\fat12.o ^
     %OUT%\vfs.o ^
