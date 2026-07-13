@@ -13,6 +13,23 @@
 static unsigned char udp_tx[14 + 20 + 8 + 512];
 static unsigned char udp_rx[600];
 
+// ---- Общая сетевая случайность (TCP ISN, DNS query ID/source port) ----
+// xorshift64, тот же алгоритм/константы, что уже используются для MTE
+// тегов поколения (malloc.c) - переиспользовано вместо изобретения
+// нового PRNG. Возвращает старшие 32 бита (лучше перемешаны, чем
+// младшие, для xorshift-генераторов).
+static unsigned long long __net_rand_state = 0;
+static unsigned int net_rand32(void) {
+    if (__net_rand_state == 0) {
+        __net_rand_state = (unsigned long long)ax_get_ticks() ^ 0x9E3779B97F4A7C15ULL;
+        if (__net_rand_state == 0) __net_rand_state = 1ULL;
+    }
+    __net_rand_state ^= __net_rand_state << 13;
+    __net_rand_state ^= __net_rand_state >> 7;
+    __net_rand_state ^= __net_rand_state << 17;
+    return (unsigned int)(__net_rand_state >> 32);
+}
+
 // Собирает и шлёт одну UDP-датаграмму (макс. 512 байт payload). Поле
 // UDP-чексуммы ставится в 0 - по RFC 768 чексумма над IPv4 ОПЦИОНАЛЬНА,
 // 0 означает "не считалась", это не битый пакет, а легальный режим.

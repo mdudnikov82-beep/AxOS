@@ -132,8 +132,13 @@ static int dns_resolve_a(const char *hostname, unsigned int dns_server,
                           unsigned int timeout_ms, unsigned int *ip_out) {
     if (dns_cache_lookup(hostname, ip_out)) return 1;
 
-    static unsigned short next_id = 0x5AA5;
-    unsigned short qid = next_id++;
+    // Случайные qid и source port (не фиксированные) - защита от DNS
+    // cache-poisoning/спуфинга: атакующему нужно угадать ОБА значения,
+    // чтобы подделать ответ. Вычисляются ОДИН раз на весь resolve -
+    // retry по RTO повторяет тот же уже собранный запрос с тем же qid,
+    // как и раньше.
+    unsigned short qid      = (unsigned short)net_rand32();
+    unsigned short src_port = (unsigned short)(49152 + (net_rand32() % 16384));   // IANA ephemeral range
 
     dns_tx[0] = (unsigned char)(qid >> 8); dns_tx[1] = (unsigned char)qid;
     dns_tx[2] = 0x01; dns_tx[3] = 0x00;   // flags: стандартный запрос, RD
@@ -147,7 +152,7 @@ static int dns_resolve_a(const char *hostname, unsigned int dns_server,
     dns_tx[off++] = 0; dns_tx[off++] = 1;   // QTYPE = A
     dns_tx[off++] = 0; dns_tx[off++] = 1;   // QCLASS = IN
 
-    if (udp_send(dns_server, DNS_PORT, 5354, dns_tx, off) != 0) return 0;
+    if (udp_send(dns_server, DNS_PORT, src_port, dns_tx, off) != 0) return 0;
 
     unsigned int rto = DNS_RTO_MS;
     unsigned int elapsed = 0;
@@ -155,9 +160,9 @@ static int dns_resolve_a(const char *hostname, unsigned int dns_server,
     for (int attempt = 0; attempt <= DNS_MAX_RETRIES; attempt++) {
         unsigned int waited = 0;
         while (waited < rto && elapsed < timeout_ms) {
-            unsigned int src_ip; unsigned short src_port, dst_port;
-            unsigned int n = udp_recv(&src_ip, &src_port, &dst_port, dns_rx, sizeof(dns_rx));
-            if (n >= 12 && dst_port == 5354) {
+            unsigned int src_ip; unsigned short resp_src_port, dst_port;
+            unsigned int n = udp_recv(&src_ip, &resp_src_port, &dst_port, dns_rx, sizeof(dns_rx));
+            if (n >= 12 && dst_port == src_port) {
                 unsigned int rid = ((unsigned int)dns_rx[0] << 8) | dns_rx[1];
                 unsigned int qdcount = ((unsigned int)dns_rx[4] << 8) | dns_rx[5];
                 unsigned int ancount = ((unsigned int)dns_rx[6] << 8) | dns_rx[7];
@@ -195,7 +200,7 @@ static int dns_resolve_a(const char *hostname, unsigned int dns_server,
         if (elapsed >= timeout_ms) break;
         // RTO истёк без ответа - возможно, запрос или ответ потерялся:
         // повторяем тот же уже собранный запрос (тот же qid).
-        udp_send(dns_server, DNS_PORT, 5354, dns_tx, off);
+        udp_send(dns_server, DNS_PORT, src_port, dns_tx, off);
         rto *= 2;
         if (rto > DNS_RTO_MAX_MS) rto = DNS_RTO_MAX_MS;
     }

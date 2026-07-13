@@ -179,7 +179,7 @@ static int tcp_connect(tcp_conn_t *c, unsigned int ip, unsigned short port,
     c->remote_ip   = ip;
     c->remote_port = port;
     c->local_port  = TCP_LOCAL_PORT;
-    c->snd_nxt     = 0x12345678;   // фиксированный ISN - одно соединение за раз, случайность тут не нужна
+    c->snd_nxt     = net_rand32();   // случайный ISN (RFC 6528) - защита от TCP session hijacking/spoofing
     c->rcv_nxt     = 0;
     c->connected   = 0;
     c->peer_closed = 0;
@@ -253,7 +253,7 @@ static int tcp_accept(tcp_conn_t *c, unsigned short local_port, unsigned int tim
             c->remote_port = (unsigned short)seg.src_port;
             for (int i = 0; i < 6; i++) c->remote_mac[i] = tcp_rx[6 + i];   // src MAC кадра с SYN
             c->rcv_nxt = seg.seq + 1;
-            unsigned int isn = 0x77AA0011;   // фиксированный server ISN - одно соединение за раз
+            unsigned int isn = net_rand32();   // случайный server ISN (RFC 6528)
             c->snd_nxt = isn;
             tcp_send_segment(c, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, 0);
 
@@ -649,7 +649,7 @@ static int tcp_mux_poll(void) {
             s->conn.remote_port = (unsigned short)seg.src_port;
             s->conn.local_port  = tcp_mux_local_port;
             s->conn.rcv_nxt     = seg.seq + 1;
-            s->conn.snd_nxt     = 0x77AA0011u + (unsigned int)fi * 0x1000u;   // разный ISN на слот
+            s->conn.snd_nxt     = net_rand32();   // случайный ISN (RFC 6528) - независим для каждого слота уже сам по себе
             s->conn.connected   = 0;
             s->conn.peer_closed = 0;
             s->reqlen  = 0;
