@@ -712,9 +712,30 @@ void *virtio_gpu_fb(void) { return fb; }
 
 int virtio_gpu_ready(void) { return ready; }
 
+// Bounding box (not a rect list - simplest correct choice) of every
+// pixel touched since the last successful flush. x0>=x1 (or y0>=y1)
+// means "nothing dirty". Starts FULL-SCREEN, not empty - the kernel's
+// own boot-time test pattern (kernel_main.c) writes directly into
+// virtio_gpu_fb() bypassing putpixel/fill_rect entirely, then calls
+// flush() once; this is the only bypass site that exists (userspace
+// only ever reaches the framebuffer through these tracked functions),
+// so starting fully dirty makes that one call correct for free.
+static unsigned int dirty_x0 = 0, dirty_y0 = 0;
+static unsigned int dirty_x1 = GPU_FB_WIDTH, dirty_y1 = GPU_FB_HEIGHT;
+
+static void mark_dirty(unsigned int x, unsigned int y, unsigned int w, unsigned int h) {
+    if (!w || !h) return;
+    unsigned int x1 = x + w, y1 = y + h;
+    if (x  < dirty_x0) dirty_x0 = x;
+    if (y  < dirty_y0) dirty_y0 = y;
+    if (x1 > dirty_x1) dirty_x1 = x1;
+    if (y1 > dirty_y1) dirty_y1 = y1;
+}
+
 void virtio_gpu_putpixel(unsigned int x, unsigned int y, unsigned int bgra) {
     if (!ready || x >= GPU_FB_WIDTH || y >= GPU_FB_HEIGHT) return;
     ((unsigned int *)fb)[y * GPU_FB_WIDTH + x] = bgra;
+    mark_dirty(x, y, 1, 1);
 }
 
 void virtio_gpu_fill_rect(unsigned int x, unsigned int y,
@@ -729,6 +750,7 @@ void virtio_gpu_fill_rect(unsigned int x, unsigned int y,
     for (unsigned int yy = y; yy < y1; yy++)
         for (unsigned int xx = x; xx < x1; xx++)
             px[yy * GPU_FB_WIDTH + xx] = bgra;
+    mark_dirty(x, y, x1 - x, y1 - y);
 }
 
 unsigned int virtio_gpu_getpixel(unsigned int x, unsigned int y) {
@@ -738,14 +760,27 @@ unsigned int virtio_gpu_getpixel(unsigned int x, unsigned int y) {
 
 int virtio_gpu_flush(void) {
     if (!ready) return -1;
+    if (dirty_x0 >= dirty_x1 || dirty_y0 >= dirty_y1) return 0;   // nothing changed - skip both virtqueue round-trips
+
+    unsigned int rx = dirty_x0, ry = dirty_y0;
+    unsigned int rw = dirty_x1 - dirty_x0, rh = dirty_y1 - dirty_y0;
     void *cmd  = cmd_buf;
     void *resp = (unsigned char *)cmd_buf + 512;
 
     {
         gpu_transfer_to_host_2d_t *c = (gpu_transfer_to_host_2d_t *)cmd;
         hdr_init(&c->hdr, GPU_CMD_TRANSFER_TO_HOST_2D);
-        c->r.x = 0; c->r.y = 0; c->r.width = GPU_FB_WIDTH; c->r.height = GPU_FB_HEIGHT;
-        c->offset = 0;
+        c->r.x = rx; c->r.y = ry; c->r.width = rw; c->r.height = rh;
+        /* offset = byte position of (rx,ry) within the linear backing
+         * store, using the resource's OWN full width as the row stride
+         * (GPU_FB_WIDTH*4 bytes/row) - NOT always 0. The full-screen
+         * case (rx=ry=0) happened to make offset=0 correct by
+         * coincidence, which is why this was missed until a genuinely
+         * partial rect (nonzero rx/ry) exposed it: with offset=0 but
+         * r.x/r.y nonzero, the device reads from the wrong backing-store
+         * position while still stepping rows at the resource's stride,
+         * producing a vertically-shifted/duplicated image. */
+        c->offset = (unsigned long)(ry * (unsigned int)GPU_FB_WIDTH + rx) * 4u;
         c->resource_id = 1;
         c->padding = 0;
         if (send_cmd(c, sizeof(*c), resp, 512) != 0) return -1;
@@ -754,11 +789,13 @@ int virtio_gpu_flush(void) {
     {
         gpu_resource_flush_t *c = (gpu_resource_flush_t *)cmd;
         hdr_init(&c->hdr, GPU_CMD_RESOURCE_FLUSH);
-        c->r.x = 0; c->r.y = 0; c->r.width = GPU_FB_WIDTH; c->r.height = GPU_FB_HEIGHT;
+        c->r.x = rx; c->r.y = ry; c->r.width = rw; c->r.height = rh;
         c->resource_id = 1;
         c->padding = 0;
         if (send_cmd(c, sizeof(*c), resp, 512) != 0) return -1;
         if (check_resp_ok((gpu_ctrl_hdr_t *)resp, "RESOURCE_FLUSH")) return -1;
     }
+
+    dirty_x0 = GPU_FB_WIDTH; dirty_y0 = GPU_FB_HEIGHT; dirty_x1 = 0; dirty_y1 = 0;   // reset - clean until the next write
     return 0;
 }
