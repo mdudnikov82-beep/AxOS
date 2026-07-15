@@ -192,7 +192,16 @@ void kernel_main(unsigned long hart_id, unsigned long dtb) {
     unsigned long t;
     __asm__ volatile("csrr %0, time" : "=r"(t));   // тот же CSR, что и heap.c для MTE-тегов
     unsigned long seed = t ^ 0x9E3779B97F4A7C15UL;
-    unsigned long skip_pages = seed % 2048UL;   // 0..8МБ, шаг 4КБ - ~11 бит энтропии
+    // Расширяем диапазон сдвига до почти всей доступной RAM (было
+    // хардкоженных 8МБ) - вычисляем от РЕАЛЬНОГО объёма свободной памяти,
+    // оставляя reserve_min гарантированного места под кучу/фреймбуфер/
+    // юзер-страницы после сдвига. НЕ VA/PA-развязка (см. комментарий выше) -
+    // тот же единственный identity-mapped gigapage, просто диапазон
+    // кандидатов старта теперь не хардкодится.
+    unsigned long avail = 0x88000000UL - pmem_start;
+    unsigned long reserve_min = 32UL * 1024 * 1024;   // с большим запасом хватает любому текущему тесту
+    unsigned long max_skip_pages = (avail > reserve_min) ? (avail - reserve_min) / 4096UL : 1UL;
+    unsigned long skip_pages = seed % max_skip_pages;   // было фикс. ~11 бит, теперь ~log2(max_skip_pages)
     pmem_start += skip_pages * 4096UL;
 
     pmem_init(pmem_start, 0x88000000UL);

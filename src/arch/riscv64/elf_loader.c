@@ -267,15 +267,24 @@ int elf_load(const char *cmdline) {
     }
 
     /* Heap starts on the page right after the highest loaded segment,
-     * plus небольшой случайный сдвиг (ASLR, тот же приём, что и у x86
-     * heap-slide в kernel.c) - до 64 страниц (256КБ), пока не вылезаем
-     * за USER_HEAP_CEILING (иначе просто не сдвигаем - лучше без ASLR,
-     * чем упереться в потолок у крошечных программ). */
+     * plus случайный сдвиг (ASLR, тот же приём, что и у x86 heap-slide в
+     * kernel.c). */
     unsigned long brk0 = (heap_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     unsigned long t2;
     __asm__ volatile("csrr %0, time" : "=r"(t2));
-    unsigned long slide = ((t2 ^ 0x9E3779B97F4A7C15UL) % 64UL) * PAGE_SIZE;
-    if (brk0 + slide < USER_HEAP_CEILING) brk0 += slide;
+    // Расширяем диапазон сдвига почти на весь зазор до USER_HEAP_CEILING
+    // (было хардкоженных 64 страницы/256КБ) - чисто виртуальный офсет,
+    // физические страницы кучи выделяются по требованию через SYS_SBRK
+    // (см. syscall.c - уже сверяется с фиксированным USER_HEAP_CEILING,
+    // этой правки не касается), так что тут нет риска "current_task на
+    // смещённой куче" из kernel_main.c/paging.c - тот риск был про
+    // КЕРНЕЛЬНУЮ кучу, а не про пользовательскую. Резервируем reserve_min
+    // гарантированного места под реальный рост кучи после сдвига.
+    unsigned long reserve_min = 64UL * 1024 * 1024;   // с большим запасом для любой текущей программы
+    unsigned long gap = (brk0 < USER_HEAP_CEILING) ? (USER_HEAP_CEILING - brk0) : 0;
+    unsigned long max_slide_pages = (gap > reserve_min) ? (gap - reserve_min) / PAGE_SIZE : 0;
+    unsigned long slide = max_slide_pages ? ((t2 ^ 0x9E3779B97F4A7C15UL) % max_slide_pages) * PAGE_SIZE : 0;
+    brk0 += slide;
     procs[pid].heap_brk = brk0;
 
     uart_puts("[elf] process pid=");
