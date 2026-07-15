@@ -50,3 +50,46 @@ jobs:
 
       - name: ai ask regression test in QEMU
         run: python tools\ai_ask_regression_test.py
+
+  build-riscv:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # build_riscv.bat expects a prebuilt xPack riscv-none-elf-gcc at a
+      # fixed local path (see RISCV_PREFIX) - same toolchain/version/layout
+      # used for local dev builds all session, just fetched fresh here
+      # instead of relying on a machine-local install.
+      - name: Install RISC-V GCC toolchain (xPack riscv-none-elf-gcc 15.2.0-1)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v15.2.0-1/xpack-riscv-none-elf-gcc-15.2.0-1-win32-x64.zip"
+          $zip = "$env:RUNNER_TEMP\riscv-gcc.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          New-Item -ItemType Directory -Force -Path "C:\axos_build\riscv-gcc" | Out-Null
+          Expand-Archive -Path $zip -DestinationPath "C:\axos_build\riscv-gcc" -Force
+          $cc = "C:\axos_build\riscv-gcc\xpack-riscv-none-elf-gcc-15.2.0-1\bin\riscv-none-elf-gcc.exe"
+          if (-not (Test-Path $cc)) {
+            Write-Error "Expected toolchain path not found after extract: $cc"
+            exit 1
+          }
+
+      - name: Build AxOS RISC-V (build_riscv.bat)
+        shell: cmd
+        run: build_riscv.bat
+
+      - name: Check RISC-V build artifacts exist
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($f in @("rv64build\out\kernel.elf", "rv64build\disk.img")) {
+            if (-not (Test-Path $f)) {
+              Write-Error "Missing expected build artifact: $f"
+              exit 1
+            }
+            $size = (Get-Item $f).Length
+            Write-Host "$f : $size bytes"
+          }
