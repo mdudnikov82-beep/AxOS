@@ -683,10 +683,8 @@ static const unsigned char font8x8[96][8] = {
     {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF}, /* 7F   */
 };
 
-/* Rendered at 2x: each 1x1 source bit becomes a GFX_FONT_SCALE x
- * GFX_FONT_SCALE block. Matches x86 gfx_shell.c's FONT_SCALE - at native
- * 8x8 pixels, text is tiny/hard to read on an 800x600 canvas. */
-#define GFX_FONT_SCALE 2
+// GFX_FONT_SCALE now lives in virtio_gpu.h (was a private duplicate here -
+// console.c needs the same value for its cell grid, see virtio_gpu.h).
 
 void virtio_gpu_draw_char(unsigned int x, unsigned int y, char ch, unsigned int bgra) {
     unsigned char u = (unsigned char)ch;
@@ -717,9 +715,10 @@ int virtio_gpu_ready(void) { return ready; }
 // means "nothing dirty". Starts FULL-SCREEN, not empty - the kernel's
 // own boot-time test pattern (kernel_main.c) writes directly into
 // virtio_gpu_fb() bypassing putpixel/fill_rect entirely, then calls
-// flush() once; this is the only bypass site that exists (userspace
-// only ever reaches the framebuffer through these tracked functions),
-// so starting fully dirty makes that one call correct for free.
+// flush() once; starting fully dirty makes that one call correct for
+// free. NOT the only bypass, though (see virtio_gpu_mark_dirty() below) -
+// console.c's scroll_up() is a second one, found only after it caused a
+// real visible artifact (old/new text double-exposed on screen).
 static unsigned int dirty_x0 = 0, dirty_y0 = 0;
 static unsigned int dirty_x1 = GPU_FB_WIDTH, dirty_y1 = GPU_FB_HEIGHT;
 
@@ -730,6 +729,20 @@ static void mark_dirty(unsigned int x, unsigned int y, unsigned int w, unsigned 
     if (y  < dirty_y0) dirty_y0 = y;
     if (x1 > dirty_x1) dirty_x1 = x1;
     if (y1 > dirty_y1) dirty_y1 = y1;
+}
+
+// Public escape hatch for callers that write directly into virtio_gpu_fb()
+// instead of going through putpixel()/fill_rect() - console.c's
+// scroll_up() shifts the ENTIRE framebuffer with a raw pixel-array memmove
+// (much cheaper than 800*592 individual putpixel calls), which completely
+// bypasses mark_dirty(). Without this, only the tiny newly-exposed bottom
+// row (cleared via a real fill_rect call) would be marked dirty, and the
+// flush would leave the rest of the just-scrolled screen showing STALE
+// host-side content - old and new console text visibly double-exposed on
+// top of each other. Callers doing a raw fb write must call this with the
+// bounds of whatever they touched.
+void virtio_gpu_mark_dirty(unsigned int x, unsigned int y, unsigned int w, unsigned int h) {
+    mark_dirty(x, y, w, h);
 }
 
 void virtio_gpu_putpixel(unsigned int x, unsigned int y, unsigned int bgra) {

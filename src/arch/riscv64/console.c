@@ -1,8 +1,14 @@
 #include "console.h"
 #include "virtio_gpu.h"
 
-#define CONSOLE_COLS (GPU_FB_WIDTH  / 8)
-#define CONSOLE_ROWS (GPU_FB_HEIGHT / 8)
+// Real on-screen glyph size is 8*GFX_FONT_SCALE square (virtio_gpu_draw_char
+// scales up from the 8x8 source bitmap) - was hardcoded to plain 8 here,
+// which never matched once GFX_FONT_SCALE became 2: every cell overlapped
+// the previous one by half, garbling all console text on screen (caught
+// live via a screendump, not from reading the code).
+#define CELL_PX      (8 * GFX_FONT_SCALE)
+#define CONSOLE_COLS (GPU_FB_WIDTH  / CELL_PX)
+#define CONSOLE_ROWS (GPU_FB_HEIGHT / CELL_PX)
 
 #define BGRA(r, g, b) ((0xFFu << 24) | ((unsigned int)(r) << 16) | \
                        ((unsigned int)(g) << 8) | (unsigned int)(b))
@@ -33,14 +39,21 @@ static const unsigned int ansi_fg[8] = {
 static void scroll_up(void) {
     unsigned int *px = (unsigned int *)virtio_gpu_fb();
     unsigned long total_px = (unsigned long)GPU_FB_WIDTH * GPU_FB_HEIGHT;
-    unsigned long shift_px = (unsigned long)GPU_FB_WIDTH * 8;
+    unsigned long shift_px = (unsigned long)GPU_FB_WIDTH * CELL_PX;
     for (unsigned long i = 0; i < total_px - shift_px; i++) px[i] = px[i + shift_px];
-    virtio_gpu_fill_rect(0, GPU_FB_HEIGHT - 8, GPU_FB_WIDTH, 8, BG_COLOR);
+    virtio_gpu_fill_rect(0, GPU_FB_HEIGHT - CELL_PX, GPU_FB_WIDTH, CELL_PX, BG_COLOR);
+    /* The memmove above writes directly into the fb pointer, bypassing
+     * putpixel/fill_rect's dirty tracking entirely - without this, only
+     * the bottom strip (cleared via the real fill_rect call just above)
+     * would be marked dirty, and flush() would leave the rest of the
+     * screen showing stale pre-scroll content (old/new text visibly
+     * double-exposed - a real artifact caught live, not just theoretical). */
+    virtio_gpu_mark_dirty(0, 0, GPU_FB_WIDTH, GPU_FB_HEIGHT);
 }
 
 static void draw_cell(unsigned int col, unsigned int row, char ch) {
-    unsigned int x = col * 8, y = row * 8;
-    virtio_gpu_fill_rect(x, y, 8, 8, BG_COLOR);
+    unsigned int x = col * CELL_PX, y = row * CELL_PX;
+    virtio_gpu_fill_rect(x, y, CELL_PX, CELL_PX, BG_COLOR);
     virtio_gpu_draw_char(x, y, ch, cur_fg);
 }
 
@@ -66,8 +79,8 @@ static void handle_csi(char final) {
     } else if (final == 'H') {
         cur_col = 0; cur_row = 0;
     } else if (final == 'K') {
-        virtio_gpu_fill_rect(cur_col * 8, cur_row * 8,
-                             GPU_FB_WIDTH - cur_col * 8, 8, BG_COLOR);
+        virtio_gpu_fill_rect(cur_col * CELL_PX, cur_row * CELL_PX,
+                             GPU_FB_WIDTH - cur_col * CELL_PX, CELL_PX, BG_COLOR);
     }
     /* Unrecognized final bytes: silently ignored. */
 }

@@ -10,6 +10,16 @@
 #define GPU_FB_WIDTH  800
 #define GPU_FB_HEIGHT 600
 
+// virtio_gpu_draw_char()/draw_text() render each 8x8 source glyph at this
+// scale (real on-screen size is 8*GFX_FONT_SCALE square) - exposed here
+// (not just a private #define in virtio_gpu.c) so console.c's cell
+// grid/spacing can use the SAME value instead of an independently
+// hardcoded one: a real bug found live had console.c still assuming
+// plain 8x8 cells while draw_char was already drawing 16x16, so every
+// character/row overlapped the previous one by half - garbled,
+// double-exposed-looking text on screen.
+#define GFX_FONT_SCALE 2
+
 // Инициализирует VirtIO-GPU (2D-режим, без 3D/virgl) по MMIO на QEMU virt:
 // сканирует 8 MMIO-слотов, создаёт resource GPU_FB_WIDTH x GPU_FB_HEIGHT
 // B8G8R8A8, аллоцирует linear framebuffer в guest RAM, приаттачивает его
@@ -47,6 +57,16 @@ void virtio_gpu_fill_rect(unsigned int x, unsigned int y,
 // for absolute/tablet devices, so callers may need to draw their own).
 // Returns the BGRA value, or 0 if out of bounds / GPU not ready.
 unsigned int virtio_gpu_getpixel(unsigned int x, unsigned int y);
+
+// Marks [x, x+w) x [y, y+h) as changed WITHOUT touching any pixel data -
+// for callers that write directly into virtio_gpu_fb() (raw pointer)
+// instead of through putpixel()/fill_rect() above, e.g. console.c's
+// scroll_up() (a full-framebuffer memmove, far cheaper than one putpixel
+// per pixel). Skipping this call after a raw fb write means flush() won't
+// know that region changed and the host will keep showing stale content
+// there. No-op bounds beyond the framebuffer are harmless (same clamping
+// as the tracked functions).
+void virtio_gpu_mark_dirty(unsigned int x, unsigned int y, unsigned int w, unsigned int h);
 
 // Рисует один символ 8x8 битмап-шрифтом (ASCII 0x20-0x7F) левым верхним
 // углом в (x, y). Непечатаемые/за диапазоном коды игнорируются.
