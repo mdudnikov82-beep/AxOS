@@ -402,7 +402,7 @@ static void draw_num2(int x, int y, int v, color_t fg) {
 }
 
 /* ── UI state ─────────────────────────────────────────────────────── */
-typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT } Screen;
+typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT } Screen;
 static Screen scr = SCR_DESKTOP;
 
 /* Icon hit-boxes (desktop) */
@@ -410,8 +410,32 @@ struct icon { int x,y,w,h; Screen dst; const char *label; color_t color; };
 static const struct icon icons[] = {
     { 40, 60, 112, 96, SCR_TERMINAL, "TERM",  C_BLUE   },
     { 192, 60, 112, 96, SCR_ABOUT,    "ABOUT", C_MAROON },
+    { 344, 60, 112, 96, SCR_PAINT,    "PAINT", C_DGREEN },
 };
-#define N_ICONS 2
+#define N_ICONS 3
+
+/* ── Paint state ──────────────────────────────────────────────────────
+ * Draw-only (no save/load — gfx_shell.c is a standalone boot image with
+ * zero disk access, see build.bat: it links into os-image-shell.bin, a
+ * completely separate floppy image from the interactive kernel's
+ * os-image.bin, so wiring up file I/O here is a much bigger, separate
+ * task). Canvas lives in its own fixed-address buffer, NOT in BACKBUF -
+ * BACKBUF gets fully overwritten every frame by whichever screen's
+ * render function runs (this file has no dirty-rect/partial-redraw
+ * concept), so painted pixels can't persist there across frames. Address
+ * chosen clear of BACKBUF's own range (0x200000..~0x3D4C00) - same
+ * "fixed address, not .bss" reasoning as BACKBUF itself: nothing else in
+ * this standalone image ever touches it. */
+#define PAINT_TOOLBAR_H 36
+#define PAINT_CANVAS_H  (AREA_H - PAINT_TOOLBAR_H)
+#define PAINT_CANVAS ((unsigned int *)0x400000)
+#define PAINT_BRUSH  6   /* matches RISC-V AxPaint's own BRUSH=6 square dab */
+
+static int     paint_ready = 0;   /* canvas white-filled once, not on every screen switch - drawing persists */
+static color_t paint_color = C_RED;
+static const color_t paint_palette[6] = { C_BLACK, C_RED, C_YELLOW, C_GREEN, C_BLUE, C_WHITE };
+static int     paint_sel = 1;     /* index into paint_palette - starts on C_RED, matching paint_color above */
+static int     paint_prev_mx = -1, paint_prev_my = -1;   /* last painted point, for drag line-interpolation */
 
 /* Terminal state */
 #define TROWS 16
@@ -544,14 +568,17 @@ static void draw_icon(const struct icon *ic, int mx, int my) {
     /* Inner symbol: настоящая BMP-иконка (см. icons_data.h/bmp.h) вместо
      * ASCII-символов ">"/"?", что рисовались тут раньше. Декодируется
      * один раз (кэш в static bmp_image_t) - не при каждом кадре. */
-    static bmp_image_t icon_term_img, icon_about_img;
+    static bmp_image_t icon_term_img, icon_about_img, icon_paint_img;
     static int icons_ready = 0;
     if (!icons_ready) {
         bmp_decode(term_bmp_data, term_bmp_size, &icon_term_img);
         bmp_decode(about_bmp_data, about_bmp_size, &icon_about_img);
+        bmp_decode(paint_bmp_data, paint_bmp_size, &icon_paint_img);
         icons_ready = 1;
     }
-    const bmp_image_t *icon_img = (ic->dst == SCR_TERMINAL) ? &icon_term_img : &icon_about_img;
+    const bmp_image_t *icon_img = (ic->dst == SCR_TERMINAL) ? &icon_term_img :
+                                   (ic->dst == SCR_ABOUT)    ? &icon_about_img :
+                                                                &icon_paint_img;
     bmp_draw(icon_img, ic->x + (ic->w - icon_img->width)/2, ic->y + 16);
 
     /* Label below icon */
@@ -652,6 +679,102 @@ static void render_about(void) {
     draw_taskbar("About AxOS");
 }
 
+/* ── Paint screen ────────────────────────────────────────────────── */
+
+/* Swatch hit-box geometry - shared between drawing and click detection. */
+#define SWATCH_SZ  24
+#define SWATCH_GAP 4
+#define SWATCH_X0  16
+#define SWATCH_Y   (AREA_Y + (PAINT_TOOLBAR_H - SWATCH_SZ)/2)
+static int swatch_x(int i) { return SWATCH_X0 + i*(SWATCH_SZ+SWATCH_GAP); }
+
+/* CLEAR button hit-box - right-aligned text in the toolbar strip. */
+#define CLEAR_LABEL   "CLEAR"
+#define CLEAR_W       (5*CHAR_W)
+#define CLEAR_X       (SW - 16 - CLEAR_W)
+#define CLEAR_Y       (AREA_Y + (PAINT_TOOLBAR_H - CHAR_W)/2)
+
+static void canvas_clear(void) {
+    unsigned int *c = PAINT_CANVAS;
+    for (int i = 0; i < SW*PAINT_CANVAS_H; i++) c[i] = C_WHITE;
+}
+
+/* One brush dab (filled PAINT_BRUSH x PAINT_BRUSH square), centered on
+ * canvas-local (cx,cy). Writes straight into PAINT_CANVAS, not through
+ * px()/fill() (those target BACKBUF, which gets discarded every frame). */
+static void canvas_dot(int cx, int cy, color_t c) {
+    int x0 = cx - PAINT_BRUSH/2, y0 = cy - PAINT_BRUSH/2;
+    for (int dy = 0; dy < PAINT_BRUSH; dy++) {
+        int y = y0+dy;
+        if ((unsigned)y >= (unsigned)PAINT_CANVAS_H) continue;
+        for (int dx = 0; dx < PAINT_BRUSH; dx++) {
+            int x = x0+dx;
+            if ((unsigned)x >= (unsigned)SW) continue;
+            PAINT_CANVAS[y*SW+x] = c;
+        }
+    }
+}
+
+/* Steps brush dabs along the straight line from (x0,y0) to (x1,y1) -
+ * the PS/2 mouse driver only reports position on an 80x25 grid, scaled
+ * x10/x24 to screen coords (see gfx_main()), so consecutive frames during
+ * a drag can be 10-24px apart - a single dab per frame would leave visible
+ * gaps. Step size = PAINT_BRUSH/2 keeps dabs overlapping along the path. */
+static void canvas_paint_line(int x0, int y0, int x1, int y1, color_t c) {
+    int dx = x1-x0, dy = y1-y0;
+    int dist = dx<0?-dx:dx; int ady = dy<0?-dy:dy;
+    if (ady > dist) dist = ady;
+    int steps = dist / (PAINT_BRUSH/2);
+    if (steps < 1) steps = 1;
+    for (int i = 0; i <= steps; i++) {
+        int x = x0 + dx*i/steps;
+        int y = y0 + dy*i/steps;
+        canvas_dot(x, y, c);
+    }
+}
+
+static void render_paint(void) {
+    if (!paint_ready) { canvas_clear(); paint_ready = 1; }
+
+    draw_titlebar("Paint");
+
+    /* Blit the persistent canvas into the back buffer at its screen
+     * offset - mirrors blit()'s own row-by-row shape. */
+    int cy0 = AREA_Y + PAINT_TOOLBAR_H;
+    for (int y = 0; y < PAINT_CANVAS_H; y++) {
+        unsigned int *src = PAINT_CANVAS + y*SW;
+        for (int x = 0; x < SW; x++) px(x, cy0+y, src[x]);
+    }
+
+    /* Toolbar drawn ON TOP of the blitted canvas each frame - never
+     * written into PAINT_CANVAS itself, so this is safe (same reasoning
+     * as the cursor being redrawn fresh over the back buffer every frame
+     * instead of persisted). */
+    vgrad(0, AREA_Y, SW, PAINT_TOOLBAR_H, C_GRAY_LT, C_GRAY);
+    hline(0, AREA_Y+PAINT_TOOLBAR_H-1, SW, C_DGRAY);
+
+    for (int i = 0; i < 6; i++) {
+        int sx = swatch_x(i);
+        int selected = (i == paint_sel);
+        fill(sx, SWATCH_Y, SWATCH_SZ, SWATCH_SZ, paint_palette[i]);
+        color_t brd = selected ? C_WHITE : C_DGRAY;
+        hline(sx, SWATCH_Y, SWATCH_SZ, brd);
+        hline(sx, SWATCH_Y+SWATCH_SZ-1, SWATCH_SZ, brd);
+        vline(sx, SWATCH_Y, SWATCH_SZ, brd);
+        vline(sx+SWATCH_SZ-1, SWATCH_Y, SWATCH_SZ, brd);
+        if (selected) {
+            hline(sx-2, SWATCH_Y-2, SWATCH_SZ+4, C_WHITE);
+            hline(sx-2, SWATCH_Y+SWATCH_SZ+1, SWATCH_SZ+4, C_WHITE);
+            vline(sx-2, SWATCH_Y-2, SWATCH_SZ+4, C_WHITE);
+            vline(sx+SWATCH_SZ+1, SWATCH_Y-2, SWATCH_SZ+4, C_WHITE);
+        }
+    }
+
+    text(CLEAR_X, CLEAR_Y, CLEAR_LABEL, C_WHITE);
+
+    draw_taskbar("Paint  (right-click=clear, ESC=exit)");
+}
+
 /* ── Cursor ──────────────────────────────────────────────────────── */
 /* 8x8 arrow cursor bitmap, tip at (0,0) top-left, rendered at 2x for
  * visibility on the bigger canvas (matches FONT_SCALE). */
@@ -701,9 +824,49 @@ static void handle_click(int mx, int my) {
                     }
                 }
             }
+        } else if (scr == SCR_PAINT) {
+            for (int i = 0; i < 6; i++) {
+                int sx = swatch_x(i);
+                if (mx >= sx && mx < sx+SWATCH_SZ &&
+                    my >= SWATCH_Y && my < SWATCH_Y+SWATCH_SZ) {
+                    paint_sel   = i;
+                    paint_color = paint_palette[i];
+                }
+            }
+            if (mx >= CLEAR_X && mx < CLEAR_X+CLEAR_W &&
+                my >= CLEAR_Y && my < CLEAR_Y+CHAR_W) {
+                canvas_clear();
+            }
         }
     }
     prev_btn = btn;
+}
+
+/* ── Paint drag/clear (held-button, not click-edge - unlike handle_click
+ * above) ─────────────────────────────────────────────────────────── */
+static void handle_paint_drag(int mx, int my) {
+    if (scr != SCR_PAINT) { paint_prev_mx = -1; paint_prev_my = -1; return; }
+
+    int buttons = mouse_get_buttons();
+    int in_canvas = (my >= AREA_Y + PAINT_TOOLBAR_H && my < BBAR_Y);
+
+    if ((buttons & 0x02) && in_canvas) {   /* right button: clear */
+        canvas_clear();
+        paint_prev_mx = -1; paint_prev_my = -1;
+        return;
+    }
+
+    if ((buttons & 0x01) && in_canvas) {
+        int cx = mx, cy = my - (AREA_Y + PAINT_TOOLBAR_H);
+        if (paint_prev_mx >= 0) {
+            canvas_paint_line(paint_prev_mx, paint_prev_my, cx, cy, paint_color);
+        } else {
+            canvas_dot(cx, cy, paint_color);
+        }
+        paint_prev_mx = cx; paint_prev_my = cy;
+    } else {
+        paint_prev_mx = -1; paint_prev_my = -1;   /* stroke ended - next press starts fresh, no stale line-back */
+    }
 }
 
 /* ── Keyboard input (terminal only) ──────────────────────────────── */
@@ -755,12 +918,14 @@ void gfx_main(void) {
 
         handle_keys();
         handle_click(mx, my);
+        handle_paint_drag(mx, my);
 
         /* Draw scene to back buffer */
         switch (scr) {
             case SCR_DESKTOP:  render_desktop(mx, my); break;
             case SCR_TERMINAL: render_terminal();       break;
             case SCR_ABOUT:    render_about();          break;
+            case SCR_PAINT:    render_paint();          break;
         }
 
         /* Draw cursor on top, then blit back buffer → LFB atomically */
