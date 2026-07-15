@@ -14,10 +14,22 @@ import socket
 import subprocess
 import time
 
+# qemu-system-i386 emulates a 32-bit-only CPU by default (no long mode
+# support at all) - AxOS's kernel is x86-64 and enters long mode during
+# boot.asm's protected-mode-to-long-mode transition. Booting under plain
+# qemu-system-i386 makes that transition's far jump into the 64-bit code
+# segment raise #GP (the CPU architecturally can't honor it), cascading
+# into a double fault then triple fault within the first few instructions
+# of long-mode setup - QEMU exits near-instantly (clean exit 0, since
+# -no-reboot converts the guest reset into a process exit) with no visible
+# error, which looks exactly like "QEMU never started" from the test
+# script's side. Verified live: qemu-system-x86_64 -cpu Broadwell boots
+# the identical image/disk to the real AxSH banner with no other changes.
 QEMU_CANDIDATES = [
-    r"C:\Program Files\qemu\qemu-system-i386.exe",
-    "qemu-system-i386",
+    r"C:\Program Files\qemu\qemu-system-x86_64.exe",
+    "qemu-system-x86_64",
 ]
+QEMU_CPU = "Broadwell"
 
 # Имена клавиш QEMU monitor "sendkey" для символов, у которых имя клавиши
 # не совпадает с самим символом. Всё остальное - send_text() переводит в
@@ -55,16 +67,23 @@ def decode_vga(data):
 
 
 def send_text(sock, text):
+    # 0.05s was too fast once tests actually reached AxSH's prompt (only
+    # possible after fixing the QEMU CPU/binary above) - characters were
+    # being silently dropped mid-command ("echo axsh-exec-path-ok" typed
+    # as "ech xsh-xc-ah-ok", "exit" as "xt"), a real HMP-sendkey/guest-
+    # keyboard-IRQ race, not random - confirmed reproducible across
+    # repeated runs with different characters dropped each time.
     for ch in text:
         key = KEY_NAMES.get(ch, ch.lower())
         sock.sendall(f"sendkey {key}\n".encode())
-        time.sleep(0.05)
+        time.sleep(0.15)
 
 
 def launch_qemu(image, disk_image, monitor_port):
     qemu = find_qemu()
     args = [
         qemu,
+        "-cpu", QEMU_CPU,
         "-drive", f"format=raw,file={image},if=floppy",
     ]
     if os.path.isfile(disk_image):
@@ -78,10 +97,25 @@ def launch_qemu(image, disk_image, monitor_port):
     return subprocess.Popen(args)
 
 
-def connect_monitor(monitor_port, timeout=10):
-    sock = socket.create_connection(("127.0.0.1", monitor_port), timeout=timeout)
-    sock.recv(4096)  # monitor banner
-    return sock
+def connect_monitor(monitor_port, timeout=30):
+    """Retries for up to `timeout` seconds total (was a single connect()
+    attempt) - QEMU's monitor listener isn't always up immediately after
+    Popen returns. A fixed 2s sleep before the one attempt worked locally
+    but produced an immediate ConnectionRefusedError on a fresh GitHub
+    Actions runner (colder/slower VM, possibly extra antivirus-scan
+    latency on a just-installed qemu.exe) - only surfaced once actually
+    tested in that environment, not locally."""
+    deadline = time.time() + timeout
+    last_err = None
+    while time.time() < deadline:
+        try:
+            sock = socket.create_connection(("127.0.0.1", monitor_port), timeout=2)
+            sock.recv(4096)  # monitor banner
+            return sock
+        except OSError as e:
+            last_err = e
+            time.sleep(0.5)
+    raise last_err
 
 
 def dump_screen(sock, dump_file="vga_dump.bin", settle_sec=0.3):

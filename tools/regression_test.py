@@ -23,7 +23,13 @@ MONITOR_PORT = 55591
 DUMP_FILE = "vga_dump_selftest.bin"
 BOOT_TIMEOUT_SEC = 60
 TEST_POLL_INTERVAL_SEC = 3
-TEST_MAX_WAIT_SEC = 90
+# 90s was cutting it close - a real (non-hung) run under qemu-system-x86_64
+# -cpu Broadwell (the fixed CPU/binary, see qemu_test_helpers.py) measured
+# ~65-70s just for the FAT12 sub-test's two full fat12_flush() round trips
+# (128 IDE sector writes each) once actually timed end-to-end, on top of
+# boot + exit + selftest startup - confirmed via a longer manual watch that
+# it reaches "SELFTEST: ALL PASS" cleanly, just later than 90s allowed.
+TEST_MAX_WAIT_SEC = 150
 
 
 def main():

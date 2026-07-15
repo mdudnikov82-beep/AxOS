@@ -15,10 +15,13 @@ DISK_IMAGE = os.path.join("build", "disk.img")
 MONITOR_PORT = 55591
 DUMP_FILE = "vga_dump2.bin"
 
+# qemu-system-i386 has no long mode by default - see qemu_test_helpers.py's
+# QEMU_CANDIDATES comment for the full story (real triple fault on boot).
 QEMU_CANDIDATES = [
-    r"C:\Program Files\qemu\qemu-system-i386.exe",
-    "qemu-system-i386",
+    r"C:\Program Files\qemu\qemu-system-x86_64.exe",
+    "qemu-system-x86_64",
 ]
+QEMU_CPU = "Broadwell"
 
 KEYMAP = {
     ' ': 'spc', '\n': 'ret', '.': 'dot', '/': 'slash', '-': 'minus',
@@ -84,6 +87,7 @@ def main():
     qemu = find_qemu()
     args = [
         qemu,
+        "-cpu", QEMU_CPU,
         "-drive", f"format=raw,file={IMAGE},if=floppy",
         "-drive", f"format=raw,file={DISK_IMAGE},if=ide,index=0,media=disk",
         "-boot", "a",
