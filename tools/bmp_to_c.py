@@ -42,7 +42,7 @@ def main():
         lines.append(f"static const unsigned int {name}_size = {len(data)}u;")
         lines.append("")
 
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
     print(f"Wrote {out_path}: {(len(pairs)//2)} icon(s) embedded")
