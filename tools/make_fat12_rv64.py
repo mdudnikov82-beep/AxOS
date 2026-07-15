@@ -39,7 +39,17 @@ def main():
         r'C:\axos_build\rv64build\fs\rv64',
     ]
     rv64_fs = next((p for p in rv64_fs_candidates if os.path.isdir(p)), None)
-    out = r'C:\axos_build\rv64build\disk.img'
+    # Relative to the repo root (same as kernel.elf's own path, written by
+    # build_riscv.bat's %OUT% variable) - NOT the old hardcoded
+    # C:\axos_build\... path. That only ever worked locally because of a
+    # directory junction from C:\axos_build to this repo's own checkout;
+    # on a fresh CI runner (no such junction) it silently wrote disk.img
+    # to a disconnected, freshly-created C:\axos_build\rv64build\ instead
+    # of the repo's rv64build\ - kernel.elf showed up at the expected path,
+    # disk.img never did, and the CI artifact check failed on disk.img
+    # only. Real bug, not a flaky check - found via the actual missing-file
+    # path in the CI log, not by guessing.
+    out = os.path.join(root, 'rv64build', 'disk.img')
 
     image = bytearray(SECTOR_SIZE * TOTAL_SECTORS)
 
