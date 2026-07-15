@@ -12,19 +12,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # windows-latest ships MSYS2 at C:\msys64 but without the i686 mingw
-      # toolchain. build.bat expects plain gcc/ld/objcopy (normally provided
-      # by w64devkit, which isn't committed) - install the matching MSYS2
-      # packages and put them on PATH instead.
-      - name: Install i686 MinGW toolchain (gcc, ld, objcopy)
-        shell: cmd
-        run: C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-i686-gcc mingw-w64-i686-binutils"
+      # build.bat needs ONE gcc that can target BOTH -m64 (the kernel -
+      # KFLAGS - real x86-64 long mode C code) AND -m32 (libaxiom/userspace
+      # programs) - see KFLAGS/UFLAGS in build.bat. MSYS2's split mingw32/
+      # mingw64 environments are each single-arch only (mingw-w64-i686-gcc
+      # was tried here previously - failed with "cc1.exe: sorry,
+      # unimplemented: 64-bit mode not compiled in" on the -m64 kernel
+      # step, since that package has no 64-bit backend at all). w64devkit
+      # (what's actually used for local dev builds, per its own gcc being
+      # a full multilib x86_64-w64-mingw32 build) doesn't have this split -
+      # fetch the same prebuilt toolchain instead of trying to reassemble
+      # an equivalent from MSYS2 packages.
+      - name: Install w64devkit (multilib gcc/ld/objcopy - both -m32 and -m64)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/skeeto/w64devkit/releases/download/v2.8.0/w64devkit-x64-2.8.0.7z.exe"
+          $archive = "$env:RUNNER_TEMP\w64devkit.7z.exe"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          # The release asset is a self-extracting 7z archive - just run it
+          # directly (-y assume-yes, -o<dest> target dir), no separate 7-Zip
+          # install needed. Verified locally: extracts to <dest>\w64devkit\
+          # and its gcc.exe genuinely supports both -m64 and -m32 (confirmed
+          # by actually compiling a test file both ways before trusting
+          # this in CI).
+          & $archive -y "-oC:\w64devkit" | Out-Null
+          $gcc = Get-ChildItem -Path C:\w64devkit -Recurse -Filter gcc.exe | Select-Object -First 1
+          if (-not $gcc) {
+            Write-Error "gcc.exe not found anywhere under C:\w64devkit after extraction"
+            exit 1
+          }
+          Write-Host "Found gcc at: $($gcc.FullName)"
+          Add-Content -Path $env:GITHUB_PATH -Value $gcc.DirectoryName
 
       - name: Build AxOS (build.bat)
         shell: cmd
-        run: |
-          set PATH=C:\msys64\mingw32\bin;%PATH%
-          (echo.) | build.bat
+        run: (echo.) | build.bat
 
       - name: Check kernel.bin fits in 89 boot sectors (<= 45568 bytes)
         shell: pwsh
