@@ -1,5 +1,4 @@
 #include "syscall.h"
-#include "cursor.h"
 #include "gfx_ui.h"
 #include "bmp.h"
 
@@ -89,8 +88,6 @@ int main(void) {
     unsigned int mx = 0, my = 0, buttons = 0;
 
     for (;;) {
-        cursor_restore();
-
         if (!mouse_state(&mx, &my, &buttons)) {
             puts_rv("axdesk: no mouse device found\r\n");
             exit(1);
@@ -116,7 +113,6 @@ int main(void) {
         }
         prev_left = left;
 
-        cursor_draw_at(mx, my);
         gfx_flush();
         sleep_ms(20);
     }

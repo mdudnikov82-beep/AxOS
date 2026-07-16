@@ -1,6 +1,5 @@
 #include "syscall.h"
 #include "window.h"
-#include "cursor.h"
 
 /* AxFiles — read-only file manager, ported from x86 gfx_shell.c's
  * AxFiles window (see that file's own "Files (AxFiles) state" comment
@@ -265,7 +264,6 @@ int main(void) {
     unsigned int drag_off_x = 0, drag_off_y = 0;
 
     for (;;) {
-        cursor_restore();
         unsigned int mx = 0, my = 0, buttons = 0;
         if (mouse_state(&mx, &my, &buttons)) {
             int left = buttons & 1;
@@ -296,7 +294,6 @@ int main(void) {
             prev_left = left;
         }
 
-        cursor_draw_at(mx, my);
         gfx_flush();
         sleep_ms(20);
     }

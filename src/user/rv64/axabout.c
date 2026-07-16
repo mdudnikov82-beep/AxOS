@@ -1,6 +1,5 @@
 #include "syscall.h"
 #include "window.h"
-#include "cursor.h"
 
 /* AxAbout — right-hand window with static info plus a pulsing "alive"
  * indicator dot. Meant to run as a background process alongside
@@ -42,7 +41,6 @@ int main(void) {
     int on = 0;
     unsigned long tick = 0;
     for (;;) {
-        cursor_restore();
         unsigned int mx = 0, my = 0, buttons = 0;
         if (mouse_state(&mx, &my, &buttons)) {
             int left = buttons & 1;
@@ -74,7 +72,6 @@ int main(void) {
             on = !on;
         }
 
-        cursor_draw_at(mx, my);
         gfx_flush();
         tick++;
         sleep_ms(20);

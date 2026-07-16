@@ -1,11 +1,12 @@
 #include "syscall.h"
-#include "cursor.h"
 #include "gfx_ui.h"
 #include "bmp.h"
 
 /* AxPaint — simple finger-paint over the shared framebuffer, driven by the
- * virtio-input tablet (SYS_MOUSE_STATE). See cursor.h for why the cursor
- * is software-drawn rather than using the virtio-gpu hardware cursor plane.
+ * virtio-input tablet (SYS_MOUSE_STATE). The kernel draws the software
+ * mouse cursor itself now, as part of every gfx_flush() (see
+ * kernel_cursor_render() in src/arch/riscv64/syscall.c) - this app no
+ * longer needs to manage it.
  *
  * Top strip = palette (click a swatch to select color).
  * Rest of the screen = canvas. Hold left button to paint, right to clear.
@@ -132,8 +133,6 @@ int main(void) {
     unsigned int mx = 0, my = 0, buttons = 0;
 
     for (;;) {
-        cursor_restore();   /* undo last frame's overlay before touching anything */
-
         if (!mouse_state(&mx, &my, &buttons)) {
             puts_rv("axpaint: no mouse device found\r\n");
             exit(1);
@@ -164,8 +163,6 @@ int main(void) {
             if (c == 's') do_save(w, h);
             else if (c == 'l') do_load(w, h);
         }
-
-        cursor_draw_at(mx, my);
 
         gfx_flush();
         sleep_ms(20);   /* ~50 Hz poll */

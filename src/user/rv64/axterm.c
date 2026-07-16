@@ -1,6 +1,5 @@
 #include "syscall.h"
 #include "window.h"
-#include "cursor.h"
 
 /* AxTerminal — a real interactive terminal window, driven by
  * kbd_getc() (virtio-keyboard, see virtio_keyboard.c). Mirrors x86
@@ -98,7 +97,6 @@ int main(void) {
     for (;;) {
         int changed = 0;
 
-        cursor_restore();
         unsigned int mx = 0, my = 0, buttons = 0;
         if (mouse_state(&mx, &my, &buttons)) {
             int left = buttons & 1;
@@ -146,10 +144,6 @@ int main(void) {
             draw_input_line(&win, cursor_on);
         }
 
-        /* Mouse cursor is drawn every tick regardless of "changed" (same
-         * convention as axpaint.c/axdesk.c) - gating it would make it
-         * flicker out on idle ticks instead of tracking smoothly. */
-        cursor_draw_at(mx, my);
         gfx_flush();
         sleep_ms(20);
     }

@@ -236,6 +236,60 @@ static int mls_dominates(unsigned int object_level) {
     return 0;
 }
 
+/* ---- Kernel-owned software cursor ----
+ * Was 5 independent per-process implementations (src/user/rv64/
+ * cursor.h, one static copy per GUI app - axterm/axabout/axpaint/
+ * axdesk/axfiles). Each app polled the mouse and restored/redrew the
+ * cursor on its own ~20ms timer with zero coordination between
+ * processes - with 2+ GUI apps running at once, one process's
+ * restore/draw could interleave with another's, leaving stale
+ * cursor-shaped ghosts behind (confirmed live via headless QEMU:
+ * clean with 1 process running, ghosted with 2+). Moved here as ONE
+ * authoritative step inside SYS_GFX_FLUSH instead: sys_gfx_flush()
+ * already runs non-preemptively to completion on this single-core
+ * kernel (no timer IRQ mid-syscall, nothing in this path calls
+ * schedule()), so doing restore-old/get-fresh-position/draw-new here
+ * is atomic regardless of which process's gfx_flush() triggers it. */
+#define KCURSOR_SIZE 8
+static unsigned int kcursor_saved[KCURSOR_SIZE * KCURSOR_SIZE];
+static unsigned int kcursor_x, kcursor_y;
+static int kcursor_shown = 0;
+
+static int kcursor_is_border(int dx, int dy) {
+    return dx == 0 || dy == 0 || dx == KCURSOR_SIZE - 1 || dy == KCURSOR_SIZE - 1;
+}
+
+static void kernel_cursor_render(void) {
+    if (!virtio_gpu_ready()) return;
+
+    if (kcursor_shown) {
+        for (int dy = 0; dy < KCURSOR_SIZE; dy++)
+            for (int dx = 0; dx < KCURSOR_SIZE; dx++)
+                if (kcursor_is_border(dx, dy))
+                    virtio_gpu_putpixel(kcursor_x + dx, kcursor_y + dy,
+                                        kcursor_saved[dy * KCURSOR_SIZE + dx]);
+        kcursor_shown = 0;
+    }
+
+    if (!virtio_input_ready()) return;
+    unsigned long st = virtio_input_state();
+    unsigned int mx = (unsigned int)((st >> 32) & 0xFFFF);
+    unsigned int my = (unsigned int)((st >> 16) & 0xFFFF);
+    unsigned int x = (mx > KCURSOR_SIZE / 2) ? mx - KCURSOR_SIZE / 2 : 0;
+    unsigned int y = (my > KCURSOR_SIZE / 2) ? my - KCURSOR_SIZE / 2 : 0;
+
+    for (int dy = 0; dy < KCURSOR_SIZE; dy++)
+        for (int dx = 0; dx < KCURSOR_SIZE; dx++)
+            if (kcursor_is_border(dx, dy)) {
+                kcursor_saved[dy * KCURSOR_SIZE + dx] = virtio_gpu_getpixel(x + dx, y + dy);
+                /* BGRA black/white checkerboard, matches the old
+                 * cursor.h's gfx_rgb(0,0,0)/gfx_rgb(255,255,255). */
+                unsigned int c = ((dx + dy) & 1) ? 0xFF000000u : 0xFFFFFFFFu;
+                virtio_gpu_putpixel(x + dx, y + dy, c);
+            }
+    kcursor_x = x; kcursor_y = y; kcursor_shown = 1;
+}
+
 /* ---- Kernel-side dispatch ---- */
 
 void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
@@ -473,6 +527,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
     }
 
     case SYS_GFX_FLUSH:
+        kernel_cursor_render();
         ret = virtio_gpu_flush();
         break;
 
@@ -498,13 +553,12 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
          * set), unlike 0 which IS a legitimately reachable state
          * (x=0,y=0,no buttons). */
         if (!virtio_input_ready()) { ret = -1; break; }
-        unsigned long st = virtio_input_state();
-        /* Move the hardware cursor to match, so every caller of
-         * mouse_state() gets a visible pointer for free — no extra
-         * syscall needed on the program's side. */
-        virtio_gpu_cursor_move((unsigned int)((st >> 32) & 0xFFFF),
-                               (unsigned int)((st >> 16) & 0xFFFF));
-        ret = (long)st;
+        /* No longer also moves the hardware cursor plane here - that
+         * became redundant (and would show a second, unreliably-
+         * composited cursor) once SYS_GFX_FLUSH started drawing an
+         * authoritative software cursor itself, see
+         * kernel_cursor_render() above. */
+        ret = (long)virtio_input_state();
         break;
     }
 
