@@ -20,6 +20,7 @@ QEMU_CANDIDATES = [
 KERNEL = os.path.join("rv64build", "out", "kernel.elf")
 DISK_IMAGE = os.path.join("rv64build", "disk.img")
 SERIAL_PORT = 55594
+MONITOR_PORT = 55595
 BOOT_TIMEOUT_SEC = 60
 
 
@@ -32,10 +33,21 @@ def find_qemu():
 
 def launch_qemu():
     qemu = find_qemu()
+    # -S: start with the guest CPU PAUSED. "-serial ...,server,nowait"
+    # silently DISCARDS anything the guest writes to the UART before a
+    # client connects - a plain "retry connect() in a loop" race worked
+    # locally but lost the entire boot transcript on the CI runner
+    # (presumably different relative timing between QEMU's socket-bind
+    # and the guest actually starting to execute). Connecting the serial
+    # AND monitor sockets first, then explicitly resuming via the
+    # monitor's "cont", guarantees nothing written before that point can
+    # ever be missed - same fix already used successfully elsewhere this
+    # session for an identical class of flake.
     args = [
         qemu, "-M", "virt", "-bios", "default", "-kernel", KERNEL,
-        "-display", "none",
+        "-display", "none", "-S",
         "-serial", f"tcp:127.0.0.1:{SERIAL_PORT},server,nowait",
+        "-monitor", f"tcp:127.0.0.1:{MONITOR_PORT},server,nowait",
         "-device", "virtio-gpu-device",
         "-device", "virtio-keyboard-device",
         "-device", "virtio-tablet-device",
@@ -46,6 +58,15 @@ def launch_qemu():
             "-device", "virtio-blk-device,drive=hd0",
         ]
     return subprocess.Popen(args)
+
+
+def connect_retry(port, timeout=5, attempts=30, delay=1):
+    for _ in range(attempts):
+        try:
+            return socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        except OSError:
+            time.sleep(delay)
+    return None
 
 
 def main():
@@ -59,16 +80,18 @@ def main():
     proc = launch_qemu()
     buf = ""
     try:
-        sock = None
-        for _ in range(30):
-            try:
-                sock = socket.create_connection(("127.0.0.1", SERIAL_PORT), timeout=5)
-                break
-            except OSError:
-                time.sleep(1)
+        sock = connect_retry(SERIAL_PORT)
         if sock is None:
             print("FAIL: could not connect to QEMU serial port")
             return 1
+
+        msock = connect_retry(MONITOR_PORT)
+        if msock is None:
+            print("FAIL: could not connect to QEMU monitor port")
+            return 1
+        time.sleep(0.3)
+        msock.recv(4096)  # drain the "(qemu)" banner
+        msock.sendall(b"cont\n")  # both sockets connected - safe to let the guest CPU run now
 
         sock.settimeout(2)
         deadline = time.time() + BOOT_TIMEOUT_SEC
@@ -82,6 +105,7 @@ def main():
             if "AxOS>" in buf or "[TRAP] kernel halted" in buf:
                 break
         sock.close()
+        msock.close()
     finally:
         proc.terminate()
         try:
