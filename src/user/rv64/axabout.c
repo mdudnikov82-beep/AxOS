@@ -45,6 +45,9 @@ int main(void) {
         if (mouse_state(&mx, &my, &buttons)) {
             int left = buttons & 1;
             if (!dragging && left && !prev_left && window_hit_close(&win, mx, my)) {
+                /* Nothing else ever erases a closed window's footprint
+                 * (no compositor) - see axterm.c's identical fix. */
+                window_erase_desktop_bg((int)win.x, (int)win.y, (int)win.w, (int)win.h, screen_h);
                 gfx_flush();
                 exit(0);
             } else if (!dragging && left && !prev_left && window_hit_titlebar(&win, mx, my)) {

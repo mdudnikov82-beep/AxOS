@@ -126,6 +126,25 @@ static void window_init(window_t *win, unsigned int x, unsigned int y,
     window_draw_close(win);
 }
 
+/* Truncates s to fit within the window's own right edge before drawing
+ * - gfx_draw_text() has no clipping of its own (bounded only by the
+ * framebuffer edge), so an unclipped long line silently overruns into
+ * whatever's drawn next to this window (another window, the desktop) -
+ * confirmed live: a long echo in AxTerminal bled straight through into
+ * AxAbout's window sitting next to it. Truncates (doesn't wrap) -
+ * matches window_println()'s existing one-call-one-line contract. */
+static void window_draw_text_clipped(const window_t *win, unsigned int x,
+                                     unsigned int y, const char *s, unsigned int color) {
+    unsigned int avail_px = (x < win->x + win->w) ? (win->x + win->w - x) : 0;
+    unsigned int max_chars = avail_px / 16;
+    char buf[80];
+    if (max_chars > sizeof(buf) - 1) max_chars = sizeof(buf) - 1;
+    unsigned int n = 0;
+    while (s[n] && n < max_chars) { buf[n] = s[n]; n++; }
+    buf[n] = '\0';
+    gfx_draw_text(x, y, buf, color);
+}
+
 /* Prints one line into the content area; when it fills up, clears just
  * the content area (not the whole window/screen) and restarts at the top. */
 static void window_println(window_t *win, const char *s, unsigned int color) {
@@ -135,7 +154,7 @@ static void window_println(window_t *win, const char *s, unsigned int color) {
         gfx_fill_rect(win->x + 4, win->content_y, win->w - 8, win->content_h, win->bg);
         win->cur_row = 0;
     }
-    gfx_draw_text(win->x + 6, win->content_y + win->cur_row * 16, s, color);
+    window_draw_text_clipped(win, win->x + 6, win->content_y + win->cur_row * 16, s, color);
     win->cur_row++;
 }
 

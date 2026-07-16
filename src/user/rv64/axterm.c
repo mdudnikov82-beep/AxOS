@@ -39,7 +39,7 @@ static void draw_input_line(window_t *win, int cursor_on) {
     unsigned int y = win->content_y + win->content_h;
     gfx_fill_rect(win->x + 4, y, win->w - 8, 16, win->bg);
     gfx_draw_text(win->x + 6, y, "> ", gfx_rgb(255, 255, 0));
-    if (input_len) gfx_draw_text(win->x + 6 + 32, y, input, gfx_rgb(255, 255, 255));
+    if (input_len) window_draw_text_clipped(win, win->x + 6 + 32, y, input, gfx_rgb(255, 255, 255));
     if (cursor_on)
         gfx_fill_rect(win->x + 6 + 32 + input_len * 16, y, 10, 16, gfx_rgb(255, 255, 255));
 }
@@ -101,6 +101,11 @@ int main(void) {
         if (mouse_state(&mx, &my, &buttons)) {
             int left = buttons & 1;
             if (!dragging && left && !prev_left && window_hit_close(&win, mx, my)) {
+                /* Nothing else ever erases a closed window's footprint
+                 * (no compositor) - without this, the process exits
+                 * cleanly (confirmed via `ps`) but its pixels just sit
+                 * on screen forever, looking exactly like "won't close". */
+                window_erase_desktop_bg((int)win.x, (int)win.y, (int)win.w, (int)win.h, screen_h);
                 gfx_flush();
                 exit(0);
             } else if (!dragging && left && !prev_left && window_hit_titlebar(&win, mx, my)) {
