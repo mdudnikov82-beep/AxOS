@@ -116,3 +116,9 @@ jobs:
             $size = (Get-Item $f).Length
             Write-Host "$f : $size bytes"
           }
+
+      - name: Install QEMU
+        run: choco install qemu --no-progress -y
+
+      - name: Smoke test in QEMU (RISC-V)
+        run: python tools\smoke_test_riscv.py
