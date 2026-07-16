@@ -33,10 +33,19 @@ def to_83(fname):
 
 def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    # Смотрим в <root>/fs/rv64/ (git-дерево) и в C:\axos_build\rv64build\fs\rv64\
+    # build_riscv.bat populates <root>/rv64build/fs/rv64/ (copies every
+    # compiled ELF there before calling this script) - NOT <root>/fs/rv64/
+    # (never existed, neither in git nor created by any build step) and
+    # NOT the old hardcoded C:\axos_build\rv64build\fs\rv64\ (only ever
+    # resolved locally because of a directory junction from C:\axos_build
+    # to this repo - see the disk.img path fix below for the same class
+    # of bug). Both wrong candidates silently fell through to this
+    # script's built-in 3-file fallback on a fresh CI runner, producing a
+    # disk image with no ELF programs on it at all (AXSH.ELF genuinely
+    # missing, not a timing issue) - found live via the smoke test's own
+    # serial output ("no user program found").
     rv64_fs_candidates = [
-        os.path.join(root, 'fs', 'rv64'),
-        r'C:\axos_build\rv64build\fs\rv64',
+        os.path.join(root, 'rv64build', 'fs', 'rv64'),
     ]
     rv64_fs = next((p for p in rv64_fs_candidates if os.path.isdir(p)), None)
     # Relative to the repo root (same as kernel.elf's own path, written by
