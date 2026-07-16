@@ -66,16 +66,12 @@ typedef unsigned int color_t;
 #define AREA_Y   TBAR_H
 #define AREA_H   (BBAR_Y - TBAR_H)
 
-/* Floating "card" panel used by Terminal/About instead of a full-bleed
- * flat-color screen - margin from the content area edges, corner radius,
- * inner padding for whatever's drawn inside it. */
-#define CARD_M   14
+/* Corner radius + inner padding shared by window chrome and window
+ * content (Terminal/About) - used to be a full-screen "floating card"
+ * panel's own margin/size too (CARD_X/Y/W/H), now dead since Terminal/
+ * About are real movable windows with their own x/y/w/h (see win_t). */
 #define CARD_R   16
 #define CARD_PAD 16
-#define CARD_X   CARD_M
-#define CARD_Y   (AREA_Y + CARD_M)
-#define CARD_W   (SW - 2*CARD_M)
-#define CARD_H   (AREA_H - 2*CARD_M)
 
 /* ── I/O ─────────────────────────────────────────────────────────── */
 static unsigned char inb(unsigned short p) {
@@ -414,6 +410,98 @@ static const struct icon icons[] = {
 };
 #define N_ICONS 3
 
+/* ── Window manager (Terminal + About only - see plan/memory for why
+ * Paint stays a full-screen mode, matching the RISC-V reference's own
+ * axpaint.c, which also doesn't use its window.h) ──────────────────────
+ *
+ * gfx_shell.c already rebuilds the ENTIRE back buffer from scratch every
+ * frame (no dirty-rect/partial-redraw concept at all - see blit()/the
+ * main loop) - real overlapping, z-ordered windows are basically free
+ * here: draw the desktop, then iterate windows back-to-front, each one
+ * at full quality every frame, cursor last. No RISC-V-style cheap
+ * "ghost" render during drag needed, no manual "erase old footprint"
+ * logic needed - full redraw already handles both for free. Not
+ * resizable (matches RISC-V's own window.h scope too), just movable. */
+typedef struct {
+    int x, y;   /* top-left, draggable */
+    int w, h;   /* fixed size */
+    int open;
+} win_t;
+
+#define WIN_TERM  0
+#define WIN_ABOUT 1
+#define N_WINDOWS 2
+
+/* Sizes fit each screen's existing content (TROWS x TCOLS grid for
+ * Terminal, the logo+info+feature-list block for About) plus the
+ * window's own titlebar+padding. Positions offset diagonally so opening
+ * both at once doesn't perfectly overlap them - and deliberately start
+ * BELOW the icon row (icons occupy y 60-156): a default position
+ * covering the icons would make About/Paint unreachable the moment
+ * Terminal opens, found live via screendump (About's icon sat directly
+ * under Terminal's default footprint, its click never got through). */
+static win_t windows[N_WINDOWS] = {
+    { 70,  170, 660, 340, 0 },   /* WIN_TERM  */
+    { 230, 180, 560, 380, 0 },   /* WIN_ABOUT */
+};
+static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT };  /* [0]=back .. [N-1]=front/focused */
+
+static int dragging_win = -1;
+static int drag_off_x = 0, drag_off_y = 0;
+
+#define WIN_TITLE_H  28
+#define WIN_CLOSE_SZ 16
+
+static int win_hit_titlebar(int idx, int mx, int my) {
+    win_t *w = &windows[idx];
+    if (my < w->y || my >= w->y + WIN_TITLE_H) return 0;
+    if (mx < w->x || mx >= w->x + w->w) return 0;
+    if (mx >= w->x + w->w - WIN_CLOSE_SZ - 8) return 0;   /* excludes the close button */
+    return 1;
+}
+static int win_hit_close(int idx, int mx, int my) {
+    win_t *w = &windows[idx];
+    int bx = w->x + w->w - WIN_CLOSE_SZ - 6;
+    int by = w->y + (WIN_TITLE_H - WIN_CLOSE_SZ) / 2;
+    return mx >= bx && mx < bx + WIN_CLOSE_SZ && my >= by && my < by + WIN_CLOSE_SZ;
+}
+/* Front-to-back so an on-top window wins the hit test over one it overlaps. */
+static int win_topmost_at(int mx, int my) {
+    for (int i = N_WINDOWS - 1; i >= 0; i--) {
+        int idx = win_order[i];
+        win_t *w = &windows[idx];
+        if (!w->open) continue;
+        if (mx >= w->x && mx < w->x + w->w && my >= w->y && my < w->y + w->h) return idx;
+    }
+    return -1;
+}
+static void win_raise(int idx) {
+    int pos = -1;
+    for (int i = 0; i < N_WINDOWS; i++) if (win_order[i] == idx) { pos = i; break; }
+    for (int i = pos; i < N_WINDOWS - 1; i++) win_order[i] = win_order[i+1];
+    win_order[N_WINDOWS - 1] = idx;
+}
+static void win_open(int idx) {
+    windows[idx].open = 1;
+    win_raise(idx);
+}
+static void win_close(int idx) {
+    windows[idx].open = 0;
+    if (dragging_win == idx) dragging_win = -1;
+}
+/* win_order tracks z-order, not open/closed state - after the front
+ * window closes, win_order[N_WINDOWS-1] still names it. Callers that
+ * need "the window the user is actually looking at" (ESC-to-close,
+ * keyboard focus routing) must skip closed entries, not read the raw
+ * top slot. */
+static int win_focused(void) {
+    for (int i = N_WINDOWS - 1; i >= 0; i--) {
+        int idx = win_order[i];
+        if (windows[idx].open) return idx;
+    }
+    return -1;
+}
+
 /* ── Paint state ──────────────────────────────────────────────────────
  * Draw-only (no save/load — gfx_shell.c is a standalone boot image with
  * zero disk access, see build.bat: it links into os-image-shell.bin, a
@@ -507,7 +595,7 @@ static void trun(void) {
         tputs("Graphical Shell v2.0 - VBE truecolor");
     }
     else if (CMD("exit")) {
-        scr = SCR_DESKTOP;
+        win_close(WIN_TERM);
     }
     else {
         tputs("Unknown. Try: help");
@@ -607,17 +695,14 @@ static void render_desktop(int mx, int my) {
 }
 
 /* ── Terminal screen ─────────────────────────────────────────────── */
-static void render_terminal(void) {
-    /* Page backdrop (gradient), then a floating rounded card holding the
-     * actual terminal - was a flat full-bleed black rectangle before. */
-    vgrad(0, AREA_Y, SW, AREA_H, C_NAVY_DK, C_BLACK);
-    draw_titlebar("Terminal");
-
-    shadow_round(CARD_X, CARD_Y, CARD_W, CARD_H, CARD_R, 6);
-    card_round(CARD_X, CARD_Y, CARD_W, CARD_H, CARD_R, C_CARD_BG, C_CARD_BRD);
-
-    int tx = CARD_X + CARD_PAD;
-    int ty = CARD_Y + CARD_PAD;
+/* (cx0,cy0,cw,ch) is the CONTENT area - inside the window, below its own
+ * mini titlebar (drawn separately by render_window_chrome()). Used to be
+ * a full-screen mode with its own screen-wide backdrop/titlebar/taskbar -
+ * now just draws into whatever rect the window manager hands it. */
+static void render_terminal(int cx0, int cy0, int cw, int ch) {
+    (void)ch;
+    int tx = cx0 + CARD_PAD;
+    int ty = cy0 + CARD_PAD;
 
     /* Text area: one row per CHAR_W*2 (font height) px */
     for (int r=0; r<TROWS; r++) {
@@ -625,9 +710,9 @@ static void render_terminal(void) {
             text(tx, ty + r*CHAR_W, tlines[r], C_GREEN);
     }
 
-    /* Input line (below the text block), spans the card's own width */
+    /* Input line (below the text block), spans the window's own width */
     int inpy = ty + TROWS*CHAR_W;
-    int inx0 = CARD_X + 3, inw = CARD_W - 6;
+    int inx0 = cx0 + 3, inw = cw - 6;
     fill(inx0, inpy, inw, CHAR_W+2, C_DGRAY);
     hline(inx0, inpy, inw, C_GRAY);
     text(tx, inpy+2, ">", C_YELLOW);
@@ -638,45 +723,68 @@ static void render_terminal(void) {
     if ((blink_timer >> 14) & 1)
         fill(tx+2*CHAR_W + tinlen*CHAR_W, inpy+2, CHAR_W-4, CHAR_W, C_WHITE);
 
-    /* "[exit]" hint, right-aligned within the card */
-    text(CARD_X+CARD_W-CARD_PAD - 6*CHAR_W, inpy+2, "[exit]", C_DGRAY);
-
-    draw_taskbar("Terminal");
+    /* "[exit]" hint, right-aligned within the window */
+    text(cx0+cw-CARD_PAD - 6*CHAR_W, inpy+2, "[exit]", C_DGRAY);
 }
 
 /* ── About screen ─────────────────────────────────────────────────── */
-static void render_about(void) {
-    vgrad(0, AREA_Y, SW, AREA_H, C_NAVY_DK, C_BLACK);
-    draw_titlebar("About AxOS");
-
-    shadow_round(CARD_X, CARD_Y, CARD_W, CARD_H, CARD_R, 6);
-    card_round(CARD_X, CARD_Y, CARD_W, CARD_H, CARD_R, C_CARD_BG, C_CARD_BRD);
-
-    int y = CARD_Y + CARD_PAD;
+static void render_about(int cx0, int cy0, int cw, int ch) {
+    (void)ch;
+    int cxmid = cx0 + cw/2;
+    int y = cy0 + CARD_PAD;
 
     /* ASCII art logo */
-    text_center(SW/2, y,    " _  _ ", C_CYAN);   y += CHAR_W;
-    text_center(SW/2, y,    "/_\\\\\\  ___", C_CYAN); y += CHAR_W;
-    text_center(SW/2, y,    "/ _ \\\\/ __ \\\\", C_CYAN); y += CHAR_W;
-    text_center(SW/2, y,    "/_/ \\\\_\\\\____/", C_CYAN); y += CHAR_W;
+    text_center(cxmid, y,    " _  _ ", C_CYAN);   y += CHAR_W;
+    text_center(cxmid, y,    "/_\\\\\\  ___", C_CYAN); y += CHAR_W;
+    text_center(cxmid, y,    "/ _ \\\\/ __ \\\\", C_CYAN); y += CHAR_W;
+    text_center(cxmid, y,    "/_/ \\\\_\\\\____/", C_CYAN); y += CHAR_W;
     y += CHAR_W/2;
 
-    text_center(SW/2, y, "AxOS  v0.1", C_WHITE);   y += CHAR_W+4;
-    text_center(SW/2, y, "x86 Protected Mode", C_GRAY); y += CHAR_W+4;
-    text_center(SW/2, y, "VBE LFB  800x600x32  truecolor", C_GRAY); y += CHAR_W+4;
-    text_center(SW/2, y, "Graphical Shell  v2.0", C_GRAY); y += CHAR_W+10;
+    text_center(cxmid, y, "AxOS  v0.1", C_WHITE);   y += CHAR_W+4;
+    text_center(cxmid, y, "x86 Protected Mode", C_GRAY); y += CHAR_W+4;
+    text_center(cxmid, y, "VBE LFB  800x600x32  truecolor", C_GRAY); y += CHAR_W+4;
+    text_center(cxmid, y, "Graphical Shell  v2.0", C_GRAY); y += CHAR_W+10;
 
-    text_center(SW/2, y, "Made by Maxim", C_YELLOW); y += CHAR_W+4;
-    text_center(SW/2, y, "Age 11", C_YELLOW); y += CHAR_W+10;
+    text_center(cxmid, y, "Made by Maxim", C_YELLOW); y += CHAR_W+4;
+    text_center(cxmid, y, "Age 11", C_YELLOW); y += CHAR_W+10;
 
     /* Feature list */
-    int fx = CARD_X + CARD_PAD + 26;
+    int fx = cx0 + CARD_PAD + 26;
     text(fx, y, "+ Preemptive multitasking",  C_GREEN);  y += CHAR_W+2;
     text(fx, y, "+ ELF32 loader + FAT12 FS",  C_GREEN);  y += CHAR_W+2;
     text(fx, y, "+ SMEP / SMAP / W^X / CFI",  C_GREEN);  y += CHAR_W+2;
     text(fx, y, "+ User shell (sh.c) + GUI",   C_GREEN);  y += CHAR_W+2;
+}
 
-    draw_taskbar("About AxOS");
+/* ── Window chrome (shared by Terminal + About) ─────────────────────
+ * Shadow + rounded body (reusing the same card_round() the old
+ * full-screen "cards" used) + a mini titlebar strip with a close button -
+ * RISC-V's window.h equivalent, drawn at full quality every single frame
+ * (see the file-top comment on why that's cheap here, unlike RISC-V). */
+static void render_window_chrome(int idx, const char *title) {
+    win_t *w = &windows[idx];
+    shadow_round(w->x, w->y, w->w, w->h, CARD_R, 6);
+    card_round(w->x, w->y, w->w, w->h, CARD_R, C_CARD_BG, C_CARD_BRD);
+
+    /* Titlebar strip inset 2px to match card_round()'s own border inset,
+     * so it doesn't poke through the rounded corners. */
+    vgrad(w->x+2, w->y+2, w->w-4, WIN_TITLE_H, C_NAVY_LT, C_NAVY);
+    hline(w->x+2, w->y+2+WIN_TITLE_H-1, w->w-4, C_BLUE);
+    text(w->x+10, w->y+2+(WIN_TITLE_H-CHAR_W)/2, title, C_WHITE);
+
+    /* Close button: red square + white X, matching RISC-V's window.h
+     * close-button visual convention for cross-platform consistency. */
+    int bx = w->x + w->w - WIN_CLOSE_SZ - 6;
+    int by = w->y + (WIN_TITLE_H - WIN_CLOSE_SZ) / 2;
+    fill(bx, by, WIN_CLOSE_SZ, WIN_CLOSE_SZ, C_RED);
+    hline(bx, by, WIN_CLOSE_SZ, C_WHITE);
+    hline(bx, by+WIN_CLOSE_SZ-1, WIN_CLOSE_SZ, C_WHITE);
+    vline(bx, by, WIN_CLOSE_SZ, C_WHITE);
+    vline(bx+WIN_CLOSE_SZ-1, by, WIN_CLOSE_SZ, C_WHITE);
+    for (int i = 2; i < WIN_CLOSE_SZ-2; i++) {
+        px(bx+i, by+i, C_WHITE);
+        px(bx+i, by+WIN_CLOSE_SZ-1-i, C_WHITE);
+    }
 }
 
 /* ── Paint screen ────────────────────────────────────────────────── */
@@ -813,14 +921,37 @@ static void handle_click(int mx, int my) {
     if (btn && !prev_btn) {
         /* Left click: fire */
         if (scr == SCR_DESKTOP) {
-            for (int i=0; i<N_ICONS; i++) {
-                if (mx >= icons[i].x && mx < icons[i].x+icons[i].w &&
-                    my >= icons[i].y && my < icons[i].y+icons[i].h) {
-                    scr = icons[i].dst;
-                    if (scr == SCR_TERMINAL) {
-                        tputs("AxOS Terminal v1.0");
-                        tputs("Type 'help' for commands.");
-                        tputs("");
+            int hit = win_topmost_at(mx, my);
+            if (hit >= 0) {
+                /* Focus-follows-click - even a plain content click raises
+                 * the window, matching conventional WM behavior. */
+                win_raise(hit);
+                if (win_hit_close(hit, mx, my)) {
+                    win_close(hit);
+                } else if (win_hit_titlebar(hit, mx, my)) {
+                    dragging_win = hit;
+                    drag_off_x = mx - windows[hit].x;
+                    drag_off_y = my - windows[hit].y;
+                }
+                /* else: click landed in the window's content - no
+                 * per-content click handling needed for Terminal/About. */
+            } else {
+                for (int i=0; i<N_ICONS; i++) {
+                    if (mx >= icons[i].x && mx < icons[i].x+icons[i].w &&
+                        my >= icons[i].y && my < icons[i].y+icons[i].h) {
+                        if (icons[i].dst == SCR_TERMINAL) {
+                            int was_open = windows[WIN_TERM].open;
+                            win_open(WIN_TERM);
+                            if (!was_open) {
+                                tputs("AxOS Terminal v1.0");
+                                tputs("Type 'help' for commands.");
+                                tputs("");
+                            }
+                        } else if (icons[i].dst == SCR_ABOUT) {
+                            win_open(WIN_ABOUT);
+                        } else if (icons[i].dst == SCR_PAINT) {
+                            scr = SCR_PAINT;   /* unchanged - Paint stays full-screen */
+                        }
                     }
                 }
             }
@@ -869,15 +1000,51 @@ static void handle_paint_drag(int mx, int my) {
     }
 }
 
+/* ── Window drag (held-button, mirrors handle_paint_drag's shape) ──── */
+static void handle_window_drag(int mx, int my) {
+    if (scr != SCR_DESKTOP || dragging_win < 0) return;
+    int btn = mouse_get_buttons() & 0x01;
+    if (!btn) { dragging_win = -1; return; }
+
+    win_t *w = &windows[dragging_win];
+    int nx = mx - drag_off_x, ny = my - drag_off_y;
+    if (nx < 0) nx = 0;
+    if (nx + w->w > SW) nx = SW - w->w;
+    if (ny < AREA_Y) ny = AREA_Y;
+    if (ny + w->h > BBAR_Y) ny = BBAR_Y - w->h;
+    w->x = nx; w->y = ny;
+}
+
 /* ── Keyboard input (terminal only) ──────────────────────────────── */
+static int esc_down = 0;   /* edge-detect: typematic repeat on a held ESC
+                             * must not cascade-close more than one window
+                             * per physical press, same idea as the mouse's
+                             * prev_btn edge-detection above. */
 static void handle_keys(void) {
     unsigned char sc;
     while (kbd_get(&sc)) {
-        if (sc == 0x01) { /* ESC → back to desktop */
-            scr = SCR_DESKTOP;
+        if (sc == 0x01) { /* ESC make (incl. typematic repeat) */
+            if (!esc_down) {
+                esc_down = 1;
+                if (scr == SCR_PAINT) {
+                    scr = SCR_DESKTOP;
+                } else if (scr == SCR_DESKTOP) {
+                    /* Closes the focused window, matching its own close
+                     * button - no-op if nothing is open. */
+                    int top = win_focused();
+                    if (top >= 0) win_close(top);
+                }
+            }
             return;
         }
-        if (scr != SCR_TERMINAL) continue;
+        if (sc == 0x81) { /* ESC break */
+            esc_down = 0;
+            return;
+        }
+        /* Character input only reaches Terminal when it's the focused
+         * window - standard "only the focused window gets keyboard
+         * input" behavior. */
+        if (!(scr == SCR_DESKTOP && win_focused() == WIN_TERM)) continue;
         char ch = sc_to_char(sc);
         if (!ch) continue;
         if (ch == '\n') {
@@ -919,13 +1086,30 @@ void gfx_main(void) {
         handle_keys();
         handle_click(mx, my);
         handle_paint_drag(mx, my);
+        handle_window_drag(mx, my);
 
         /* Draw scene to back buffer */
         switch (scr) {
-            case SCR_DESKTOP:  render_desktop(mx, my); break;
-            case SCR_TERMINAL: render_terminal();       break;
-            case SCR_ABOUT:    render_about();          break;
-            case SCR_PAINT:    render_paint();          break;
+            case SCR_DESKTOP:
+                render_desktop(mx, my);
+                /* Windows drawn back-to-front on top of the desktop -
+                 * full quality every frame, see the window-manager
+                 * comment up top for why that's cheap here. */
+                for (int i = 0; i < N_WINDOWS; i++) {
+                    int idx = win_order[i];
+                    if (!windows[idx].open) continue;
+                    render_window_chrome(idx, idx == WIN_TERM ? "Terminal" : "About AxOS");
+                    int cx0 = windows[idx].x + 2;
+                    int cy0 = windows[idx].y + 2 + WIN_TITLE_H;
+                    int cw  = windows[idx].w - 4;
+                    int ch  = windows[idx].h - 4 - WIN_TITLE_H;
+                    if (idx == WIN_TERM) render_terminal(cx0, cy0, cw, ch);
+                    else                 render_about(cx0, cy0, cw, ch);
+                }
+                break;
+            case SCR_TERMINAL: break;   /* scr never actually becomes this anymore - Terminal is a window now */
+            case SCR_ABOUT:    break;   /* same */
+            case SCR_PAINT:    render_paint(); break;
         }
 
         /* Draw cursor on top, then blit back buffer → LFB atomically */
