@@ -122,3 +122,6 @@ jobs:
 
       - name: Smoke test in QEMU (RISC-V)
         run: python tools\smoke_test_riscv.py
+
+      - name: Regression tests in QEMU (RISC-V)
+        run: python tools\regression_test_riscv.py
