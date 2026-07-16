@@ -12,6 +12,16 @@ import subprocess
 import sys
 import time
 
+# The serial stream carries ANSI escape sequences and arbitrary bytes from
+# a live UART - decoded with errors="replace" into a valid Python str, but
+# printing that str can still fail: a fresh CI runner's console defaults to
+# cp1252, which can't represent everything UTF-8-safe Python text can (hit
+# live: UnicodeEncodeError from a plain print() of the boot transcript).
+# Same class of bug as tools/bmp_to_c.py's encoding fix earlier - force the
+# stdout encoding explicitly instead of relying on the host locale.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 QEMU_CANDIDATES = [
     r"C:\Program Files\qemu\qemu-system-riscv64.exe",
     "qemu-system-riscv64",
