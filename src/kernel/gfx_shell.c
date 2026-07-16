@@ -1098,7 +1098,7 @@ void gfx_main(void) {
                 for (int i = 0; i < N_WINDOWS; i++) {
                     int idx = win_order[i];
                     if (!windows[idx].open) continue;
-                    render_window_chrome(idx, idx == WIN_TERM ? "Terminal" : "About AxOS");
+                    render_window_chrome(idx, idx == WIN_TERM ? "AxTerminal" : "AxAbout");
                     int cx0 = windows[idx].x + 2;
                     int cy0 = windows[idx].y + 2 + WIN_TITLE_H;
                     int cw  = windows[idx].w - 4;
