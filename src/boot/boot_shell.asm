@@ -12,23 +12,58 @@
 ;  Ищем режим ПО РЕАЛЬНОМУ СПИСКУ, который вернул controller info
 ;  (функция 4F00h), а не гадаем номер режима: конкретные номера у
 ;  разных BIOS/vgabios отличаются, а список режимов - нет.
-; =================================================================
+;
+;  Самоперемещение на 0x0700 (см. boot.asm за тем же приёмом и его
+;  причиной: растущий буфер чтения ядра иначе переписывает ещё
+;  выполняющийся загрузчик в 0x7c00-0x7e00 - тихий hang без кода
+;  ошибки). ВАЖНО: адрес релокации здесь НЕ 0x0600, как в boot.asm -
+;  этот загрузчик сам использует 0x0600 как FB_INFO_ADDR (см.
+;  vbe_set_800x600x32 ниже), куда пишет физ.адрес/разрешение LFB уже
+;  ПОСЛЕ переезда на релоцированную копию. Если бы релоцировались на
+;  сам 0x0600, этот же вызов затёр бы первые байты ещё выполняющейся
+;  релоцированной копии загрузчика самим собой (self-modifying code
+;  гонка) - 0x0700 гарантированно не пересекается ни с FB_INFO_ADDR
+;  (0x0600, 11 байт полезной нагрузки), ни с чем-либо ещё в реальном
+;  режиме ниже 0x7c00.
+%define RELOC_DELTA (0x0700 - 0x7c00)
+
 [org 0x7c00]
 
 start:
+    cli
     xor ax, ax
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov sp, 0x9000
+    mov sp, 0x7c00          ; временный стек ниже своего же кода - только на время копирования
+
+    mov si, 0x7c00
+    mov di, 0x0700
+    mov cx, 512
+    cld
+    rep movsb
+
+    jmp relocated_start + RELOC_DELTA
+
+relocated_start:
+    ; Выше конца буфера чтения ядра (0x1000 + 89*512 = 0xC200) - см.
+    ; boot.asm за тем же выбором и тем же обоснованием.
+    mov sp, 0xF000
 
     ; --- VBE: найти 800x600x32 ПЕРЕД загрузкой ядра с диска -------
     ; ВАЖНО: делаем это ДО чтения ядра в 0x1000, иначе временные буферы
     ; VBE (0x7000/0x7E00) окажутся внутри уже загруженного образа ядра
-    ; (он занимает 0x1000..~0x7A00) и всё испортят.
+    ; и всё испортят. К этому моменту мы уже выполняемся из релоцированной
+    ; копии (0x0700+), так что запись VBE-результата в FB_INFO_ADDR
+    ; (0x0600) ничего не затирает - см. комментарий про RELOC_DELTA выше.
     call vbe_set_800x600x32
 
-    ; --- Загружаем gfx-ядро с диска в память по адресу 0x1000 (как в boot_gfx.asm) ---
+    ; --- Загружаем gfx-ядро с диска в память по адресу 0x1000 -----
+    ; Тот же геометрический расклад, что и в boot.asm: 89 секторов
+    ; (45568 байт) вместо прежних 53 (27136) - у файлового менеджера
+    ; (fat12_shell.o + IDE-чтение + UI) заметно выросла кодовая часть,
+    ; и именно этот более широкий бюджет чтения и требовал релокации
+    ; выше (иначе рост секторов заново задел бы тот же самый баг).
     mov bx, 0x1000
     mov ah, 0x02
     mov al, 17
@@ -62,6 +97,28 @@ start:
     cmp al, 18
     jne disk_error
 
+    mov bx, 0x1000 + 53 * 512
+    mov ah, 0x02
+    mov al, 18
+    mov ch, 1
+    mov dh, 1
+    mov cl, 1
+    int 0x13
+    jc disk_error
+    cmp al, 18
+    jne disk_error
+
+    mov bx, 0x1000 + 71 * 512
+    mov ah, 0x02
+    mov al, 18
+    mov ch, 2
+    mov dh, 0
+    mov cl, 1
+    int 0x13
+    jc disk_error
+    cmp al, 18
+    jne disk_error
+
     jmp disk_done
 
 disk_error:
@@ -77,8 +134,9 @@ disk_done:
 ;  VBE: найти режим 800x600x32bpp по СПИСКУ режимов контроллера,
 ;  включить его с линейным фреймбуфером, и сохранить нужные поля
 ;  ModeInfoBlock (физ. адрес LFB, pitch, разрешение, bpp) по адресу
-;  0x0600 - фиксированный адрес НИЖЕ образа ядра (0x1000+), который
-;  ядро (gfx_shell.c) читает уже в защищённом режиме как обычную
+;  0x0600 - фиксированный адрес НИЖЕ образа ядра (0x1000+) и НИЖЕ
+;  релоцированной копии загрузчика (0x0700+), который ядро
+;  (gfx_shell.c) читает уже в защищённом режиме как обычную
 ;  физическую память.
 ; =================================================================
 VBE_INFO_BUF   equ 0x7000   ; VbeInfoBlock (512 байт) - временный
@@ -172,7 +230,19 @@ BEGIN_PM:
     mov esp, 0x90000
     mov ebp, esp
 
-    jmp 0x1000
+    ; jmp 0x1000 (bare immediate) would assemble as a RELATIVE near
+    ; jump (E9 rel32) - NASM computes that displacement assuming this
+    ; code still executes from its original, non-relocated 0x7c00+
+    ; address. Since this file self-relocates to 0x0700 (see the
+    ; RELOC_DELTA comment up top), that relative encoding would land
+    ; at completely the wrong (garbage) address once actually run from
+    ; the relocated copy - confirmed live as a triple fault at
+    ; EIP=0xffff9b1d. Fix: absolute indirect jump via a register,
+    ; exactly like boot.asm's own `mov rax,0x1000 / jmp rax` (there in
+    ; 64-bit long mode, here in 32-bit protected mode) - a register
+    ; jump target is a literal value, immune to relative-encoding bugs.
+    mov eax, 0x1000
+    jmp eax
     jmp $
 
 times 510 - ($ - $$) db 0

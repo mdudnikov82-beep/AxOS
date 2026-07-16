@@ -22,11 +22,25 @@
 // теперь фиксированная huge page (см. init_paging() в paging.c) - не
 // кандидат случайной кучи (её floor сдвинут с PD[2] на PD[3], см.
 // kheap_pick_pd_index()).
+// FAT12_BASE переопределяется через -D для сборок без paging (x86 GUI-шелл,
+// gfx_shell.c) - там своя раскладка физической памяти (BACKBUF/PAINT_CANVAS),
+// не связанная с paging.c/PD[2] ниже. Основное ядро (-m64) получает
+// значение по умолчанию как раньше.
+#ifndef FAT12_BASE
 #define FAT12_BASE 0x300000
+#endif
 #define FAT12_TOTAL_SECTORS 4096 // 2 МБ / 512 = TOTAL_SECTORS в make_fat12.py
 
+// FAT12_NO_WRITE отключает запись/печать (fat12_write/mkdir/delete/flush,
+// fat12_list/fat12_cat) - используется сборкой gfx_shell.c (x86 GUI-шелл,
+// -m32, read-only файловый менеджер), где нет ни print_string/print_uint
+// (текстовые функции основного ядра), ни ide_write_sector (там реализован
+// только ide_read_sector, см. gfx_shell.c). fat12_init/is_ready/readdir/load
+// и их общие read-only хелперы этим макросом не затрагиваются.
+#ifndef FAT12_NO_WRITE
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
+#endif
 
 // Boot Parameter Block FAT12-тома (см. tools/make_fat12.py)
 struct fat12_bpb {
@@ -99,6 +113,7 @@ int fat12_init() {
     return 1;
 }
 
+#ifndef FAT12_NO_WRITE
 // Записывает RAM-копию FAT12-тома обратно на build/disk.img (LBA 0-511),
 // делая изменения от fat12_write() персистентными между запусками QEMU.
 static void fat12_flush() {
@@ -107,6 +122,7 @@ static void fat12_flush() {
         ide_write_sector(lba, src);
     }
 }
+#endif
 
 // Возвращает значение 12-битной записи FAT для кластера cluster
 static unsigned int fat12_get_entry(unsigned int cluster) {
@@ -165,6 +181,7 @@ static void parse_83(char* input, char* name, char* ext) {
     }
 }
 
+#ifndef FAT12_NO_WRITE
 // Записывает значение value в 12-битную запись FAT для кластера cluster
 // (read-modify-write пары байт, см. set_fat_entry в tools/make_fat12.py)
 static void fat12_set_entry(unsigned int cluster, unsigned int value) {
@@ -264,6 +281,7 @@ static struct fat12_dir_entry* fat12_find_free_entry() {
 
     return 0;
 }
+#endif // FAT12_NO_WRITE
 
 // Ищет файл в корневой директории по имени в формате 8.3
 static struct fat12_dir_entry* fat12_find(char* name, char* ext) {
@@ -309,6 +327,7 @@ static unsigned int fat12_read_file(struct fat12_dir_entry* entry, unsigned char
     return total_read;
 }
 
+#ifndef FAT12_NO_WRITE
 void fat12_list() {
     if (!fat12_ready) return;
 
@@ -333,6 +352,7 @@ void fat12_list() {
         print_string(" bytes)\n");
     }
 }
+#endif // FAT12_NO_WRITE
 
 int fat12_readdir(unsigned int index, char* name_out, unsigned int* size_out, int* is_dir_out) {
     if (!fat12_ready) return 0;
@@ -369,6 +389,7 @@ int fat12_readdir(unsigned int index, char* name_out, unsigned int* size_out, in
 // (корневая директория или том заполнены). Разные коды нужны, чтобы
 // mkdir.bin мог сказать пользователю точную причину отказа, а не общее
 // "exists or disk locked" на все три случая сразу.
+#ifndef FAT12_NO_WRITE
 int fat12_mkdir(char* dirname) {
     if (!fat12_ready) return 0;
     if (fat12_locked) return 0;
@@ -425,7 +446,9 @@ int fat12_mkdir(char* dirname) {
     fat12_flush();
     return 1;
 }
+#endif // FAT12_NO_WRITE
 
+#ifndef FAT12_NO_WRITE
 int fat12_cat(char* filename) {
     if (!fat12_ready) return 0;
 
@@ -443,6 +466,7 @@ int fat12_cat(char* filename) {
     print_string((char*)buf);
     return 1;
 }
+#endif // FAT12_NO_WRITE
 
 unsigned int fat12_load(char* filename, unsigned char* buffer, unsigned int max_size) {
     if (!fat12_ready) return 0;
@@ -456,6 +480,7 @@ unsigned int fat12_load(char* filename, unsigned char* buffer, unsigned int max_
     return fat12_read_file(entry, buffer, max_size);
 }
 
+#ifndef FAT12_NO_WRITE
 // Возвращает: 1 - удалён, 0 - диск не готов/заблокирован,
 // FAT12_DELETE_NOTFOUND - файла с таким именем нет.
 int fat12_delete(char* filename) {
@@ -519,3 +544,4 @@ int fat12_write(char* filename, unsigned char* data, unsigned int size) {
     fat12_flush();
     return 1;
 }
+#endif // FAT12_NO_WRITE

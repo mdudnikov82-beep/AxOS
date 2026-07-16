@@ -12,6 +12,7 @@
 // physical == linear here).
 
 #include "../drivers/mouse.h"
+#include "../fs/fat12.h"
 
 /* ── Framebuffer info, written by boot_shell.asm before the kernel loads ── */
 typedef struct {
@@ -81,6 +82,59 @@ static unsigned char inb(unsigned short p) {
 }
 static void outb(unsigned short p, unsigned char v) {
     __asm__ volatile("outb %%al,%%dx"::"a"(v),"d"(p));
+}
+static unsigned short inw(unsigned short p) {
+    unsigned short r;
+    __asm__ volatile("inw %%dx,%%ax":"=a"(r):"d"(p));
+    return r;
+}
+
+/* ── IDE (polled — no IRQ14/PIT here, unlike src/drivers/ide.c, which
+ * needs both and can't be reused as-is) ─────────────────────────────
+ * Primary bus, master, LBA28, PIO, single-threaded (this mini-kernel's
+ * main loop is the only thing that ever touches these ports, so no
+ * lock needed). Read-only - AxFiles (the file manager window) never
+ * writes. Resolves fat12_shell.o's extern ide_read_sector() at link
+ * time (see build.bat's Graphical Shell section). */
+#define IDE_REG_DATA       0x1F0
+#define IDE_REG_SECCOUNT   0x1F2
+#define IDE_REG_LBA_LOW    0x1F3
+#define IDE_REG_LBA_MID    0x1F4
+#define IDE_REG_LBA_HIGH   0x1F5
+#define IDE_REG_DRIVE_HEAD 0x1F6
+#define IDE_REG_STATUS     0x1F7
+#define IDE_REG_COMMAND    0x1F7
+#define IDE_STATUS_ERR 0x01
+#define IDE_STATUS_DRQ 0x08
+#define IDE_STATUS_BSY 0x80
+#define IDE_CMD_READ_SECTORS 0x20
+#define IDE_WAIT_LIMIT 100000
+
+int ide_read_sector(unsigned int lba, unsigned char *buffer) {
+    unsigned char st = inb(IDE_REG_STATUS);
+    if (st == 0xFF) return 0;   /* no controller (floating bus) - fail fast */
+
+    int spins;
+    for (spins = IDE_WAIT_LIMIT; spins && (inb(IDE_REG_STATUS) & IDE_STATUS_BSY); spins--);
+    if (!spins) return 0;
+
+    outb(IDE_REG_DRIVE_HEAD, 0xE0 | ((lba >> 24) & 0x0F));
+    outb(IDE_REG_SECCOUNT, 1);
+    outb(IDE_REG_LBA_LOW,  (unsigned char)(lba));
+    outb(IDE_REG_LBA_MID,  (unsigned char)(lba >> 8));
+    outb(IDE_REG_LBA_HIGH, (unsigned char)(lba >> 16));
+    outb(IDE_REG_COMMAND,  IDE_CMD_READ_SECTORS);
+
+    for (spins = IDE_WAIT_LIMIT; spins; spins--) {
+        st = inb(IDE_REG_STATUS);
+        if (st & IDE_STATUS_ERR) return 0;
+        if (!(st & IDE_STATUS_BSY) && (st & IDE_STATUS_DRQ)) break;
+    }
+    if (!spins) return 0;
+
+    unsigned short *dst = (unsigned short *)buffer;
+    for (int i = 0; i < 256; i++) dst[i] = inw(IDE_REG_DATA);
+    return 1;
 }
 
 /* Copy back buffer to the real LFB in one shot — eliminates tearing.
@@ -398,7 +452,7 @@ static void draw_num2(int x, int y, int v, color_t fg) {
 }
 
 /* ── UI state ─────────────────────────────────────────────────────── */
-typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT } Screen;
+typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT, SCR_FILES } Screen;
 static Screen scr = SCR_DESKTOP;
 
 /* Icon hit-boxes (desktop) */
@@ -407,8 +461,9 @@ static const struct icon icons[] = {
     { 40, 60, 112, 96, SCR_TERMINAL, "TERM",  C_BLUE   },
     { 192, 60, 112, 96, SCR_ABOUT,    "ABOUT", C_MAROON },
     { 344, 60, 112, 96, SCR_PAINT,    "PAINT", C_DGREEN },
+    { 496, 60, 112, 96, SCR_FILES,    "FILES", C_TEAL   },
 };
-#define N_ICONS 3
+#define N_ICONS 4
 
 /* ── Window manager (Terminal + About only - see plan/memory for why
  * Paint stays a full-screen mode, matching the RISC-V reference's own
@@ -430,7 +485,8 @@ typedef struct {
 
 #define WIN_TERM  0
 #define WIN_ABOUT 1
-#define N_WINDOWS 2
+#define WIN_FILES 2
+#define N_WINDOWS 3
 
 /* Sizes fit each screen's existing content (TROWS x TCOLS grid for
  * Terminal, the logo+info+feature-list block for About) plus the
@@ -443,8 +499,9 @@ typedef struct {
 static win_t windows[N_WINDOWS] = {
     { 70,  170, 660, 340, 0 },   /* WIN_TERM  */
     { 230, 180, 560, 380, 0 },   /* WIN_ABOUT */
+    { 120, 165, 620, 380, 0 },   /* WIN_FILES */
 };
-static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT };  /* [0]=back .. [N-1]=front/focused */
+static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT, WIN_FILES };  /* [0]=back .. [N-1]=front/focused */
 
 static int dragging_win = -1;
 static int drag_off_x = 0, drag_off_y = 0;
@@ -501,13 +558,24 @@ static int win_focused(void) {
     }
     return -1;
 }
+/* Content area = inside the window, below its mini titlebar. Shared by
+ * the render loop and content-click hit-testing (AxFiles' row/button
+ * geometry) so the two can't drift apart. */
+static void win_content_rect(int idx, int *cx0, int *cy0, int *cw, int *ch) {
+    win_t *w = &windows[idx];
+    *cx0 = w->x + 2;
+    *cy0 = w->y + 2 + WIN_TITLE_H;
+    *cw  = w->w - 4;
+    *ch  = w->h - 4 - WIN_TITLE_H;
+}
 
 /* ── Paint state ──────────────────────────────────────────────────────
- * Draw-only (no save/load — gfx_shell.c is a standalone boot image with
- * zero disk access, see build.bat: it links into os-image-shell.bin, a
- * completely separate floppy image from the interactive kernel's
- * os-image.bin, so wiring up file I/O here is a much bigger, separate
- * task). Canvas lives in its own fixed-address buffer, NOT in BACKBUF -
+ * Draw-only (no save/load) - unrelated to AxFiles' read-only disk
+ * access below (fat12_shell.o + ide_read_sector()); adding a save path
+ * here would still need fat12_write, which is compiled out of this
+ * image (FAT12_NO_WRITE, see build.bat) to avoid pulling in the main
+ * kernel's print_string/print_uint at link time - out of scope for
+ * this round. Canvas lives in its own fixed-address buffer, NOT in BACKBUF -
  * BACKBUF gets fully overwritten every frame by whichever screen's
  * render function runs (this file has no dirty-rect/partial-redraw
  * concept), so painted pixels can't persist there across frames. Address
@@ -664,10 +732,13 @@ static void draw_icon(const struct icon *ic, int mx, int my) {
         bmp_decode(paint_bmp_data, paint_bmp_size, &icon_paint_img);
         icons_ready = 1;
     }
+    /* AxFiles (SCR_FILES) has no BMP asset - card + label only, no
+     * pixel art in scope for this feature. */
     const bmp_image_t *icon_img = (ic->dst == SCR_TERMINAL) ? &icon_term_img :
                                    (ic->dst == SCR_ABOUT)    ? &icon_about_img :
-                                                                &icon_paint_img;
-    bmp_draw(icon_img, ic->x + (ic->w - icon_img->width)/2, ic->y + 16);
+                                   (ic->dst == SCR_PAINT)    ? &icon_paint_img :
+                                                                0;
+    if (icon_img) bmp_draw(icon_img, ic->x + (ic->w - icon_img->width)/2, ic->y + 16);
 
     /* Label below icon */
     text_center(ic->x + ic->w/2, ic->y + ic->h - 20, ic->label, fg);
@@ -754,6 +825,186 @@ static void render_about(int cx0, int cy0, int cw, int ch) {
     text(fx, y, "+ ELF32 loader + FAT12 FS",  C_GREEN);  y += CHAR_W+2;
     text(fx, y, "+ SMEP / SMAP / W^X / CFI",  C_GREEN);  y += CHAR_W+2;
     text(fx, y, "+ User shell (sh.c) + GUI",   C_GREEN);  y += CHAR_W+2;
+}
+
+/* ── Files (AxFiles) state ────────────────────────────────────────────
+ * Read-only file manager window: lists FAT12 root-directory files
+ * (fat12_readdir) and previews one file's raw content as text
+ * (fat12_load) - no delete/write, matches v1's read-only scope (see
+ * FAT12_NO_WRITE in build.bat's Graphical Shell section, which compiles
+ * that whole path out of fat12_shell.o). */
+#define FILES_MAX 64   /* FAT12 root-directory entry cap, see make_fat12.py */
+static int  fat12_ok;
+static int  files_count;
+static char files_names[FILES_MAX][13];
+static unsigned int files_sizes[FILES_MAX];
+static int  files_scroll;
+static int  files_preview_mode;
+
+static void files_scan(void) {
+    files_count = 0;
+    int is_dir;
+    while (files_count < FILES_MAX &&
+           fat12_readdir((unsigned int)files_count, files_names[files_count],
+                          &files_sizes[files_count], &is_dir))
+        files_count++;
+}
+
+#define FILES_PREVIEW_MAX 4096
+static char          files_preview_name[13];
+static unsigned char files_preview_buf[FILES_PREVIEW_MAX];
+static unsigned int  files_preview_len;
+static int           files_preview_truncated;
+static int           files_preview_scroll;
+
+/* Loads the file at files_names[idx] into the preview buffer and flips
+ * into preview mode. Large files get a visible "(truncated)" marker
+ * rather than growing the buffer - this is a preview, not a full
+ * editor (v1 scope). idx comes straight from a row click, so the size
+ * is already cached in files_sizes[] - no need to re-look-up by name. */
+static void files_open_preview(int idx) {
+    int i = 0;
+    for (; files_names[idx][i] && i < 12; i++) files_preview_name[i] = files_names[idx][i];
+    files_preview_name[i] = 0;
+    files_preview_len = fat12_load(files_names[idx], files_preview_buf, FILES_PREVIEW_MAX);
+    files_preview_truncated = (files_preview_len < files_sizes[idx]);
+    files_preview_scroll = 0;
+    files_preview_mode = 1;
+}
+
+static int udigits(unsigned int v) {
+    int n = 1;
+    while (v >= 10) { v /= 10; n++; }
+    return n;
+}
+static void draw_uint(int x, int y, unsigned int v, color_t fg) {
+    char buf[11];
+    int n = udigits(v);
+    buf[n] = 0;
+    for (int i = n - 1; i >= 0; i--) { buf[i] = (char)('0' + v % 10); v /= 10; }
+    text(x, y, buf, fg);
+}
+static void draw_uint_right(int x_right, int y, unsigned int v, color_t fg) {
+    draw_uint(x_right - udigits(v) * CHAR_W, y, v, fg);
+}
+
+#define FILES_PAD   10
+#define FILES_ROW_H CHAR_W
+#define FILES_BTN_W (3*CHAR_W)   /* "[^]"/"[v]" */
+
+/* List-mode row/button geometry - shared by render_files() and
+ * handle_files_content_click() so hit-testing can't drift from what's
+ * actually drawn (win_content_rect() plays the same role one level up,
+ * for the window itself). */
+static void files_layout(int cx0, int cy0, int cw, int ch,
+                          int *list_y0, int *visible_rows,
+                          int *up_x, int *down_x, int *btn_y, int *size_right) {
+    int header_y = cy0 + FILES_PAD;
+    *down_x = cx0 + cw - FILES_PAD - FILES_BTN_W;
+    *up_x   = *down_x - FILES_BTN_W - 8;
+    *btn_y  = header_y;
+    *size_right = *up_x - 16;
+    *list_y0 = header_y + FILES_ROW_H + 6;
+    *visible_rows = (cy0 + ch - FILES_PAD - *list_y0) / FILES_ROW_H;
+    if (*visible_rows < 0) *visible_rows = 0;
+}
+
+static void render_files_list(int cx0, int cy0, int cw, int ch) {
+    int x = cx0 + FILES_PAD;
+    int y = cy0 + FILES_PAD;
+
+    if (!fat12_ok) { text(x, y, "Disk not ready", C_GRAY); return; }
+    if (files_count == 0) { text(x, y, "(no files)", C_GRAY); return; }
+
+    int list_y0, visible_rows, up_x, down_x, btn_y, size_right;
+    files_layout(cx0, cy0, cw, ch, &list_y0, &visible_rows, &up_x, &down_x, &btn_y, &size_right);
+
+    text(x, y, "NAME", C_CYAN);
+    text(size_right - 4*CHAR_W, y, "SIZE", C_CYAN);
+    text(up_x,   btn_y, "[^]", C_WHITE);
+    text(down_x, btn_y, "[v]", C_WHITE);
+    hline(x, list_y0 - 4, cw - 2*FILES_PAD, C_GRAY);
+
+    int max_scroll = files_count - visible_rows;
+    if (max_scroll < 0) max_scroll = 0;
+    if (files_scroll > max_scroll) files_scroll = max_scroll;
+    if (files_scroll < 0) files_scroll = 0;
+
+    for (int i = 0; i < visible_rows && files_scroll + i < files_count; i++) {
+        int idx = files_scroll + i;
+        int ry = list_y0 + i * FILES_ROW_H;
+        text(x, ry, files_names[idx], C_GREEN);
+        draw_uint_right(size_right, ry, files_sizes[idx], C_GRAY);
+    }
+}
+
+/* Preview-mode header/text-area geometry - shared with the click
+ * handler's "[< Back]" hit-test, same reasoning as files_layout(). */
+static void files_preview_layout(int cx0, int cy0, int cw, int ch,
+                                  int *back_x, int *back_y,
+                                  int *text_y0, int *visible_rows, int *max_cols) {
+    *back_x = cx0 + FILES_PAD;
+    *back_y = cy0 + FILES_PAD;
+    *text_y0 = *back_y + FILES_ROW_H + 6;
+    *visible_rows = (cy0 + ch - FILES_PAD - *text_y0) / FILES_ROW_H;
+    if (*visible_rows < 0) *visible_rows = 0;
+    *max_cols = (cw - 2*FILES_PAD) / CHAR_W;
+    if (*max_cols > TCOLS) *max_cols = TCOLS;
+    if (*max_cols < 1) *max_cols = 1;
+}
+
+static void render_files_preview(int cx0, int cy0, int cw, int ch) {
+    int back_x, back_y, text_y0, visible_rows, max_cols;
+    files_preview_layout(cx0, cy0, cw, ch, &back_x, &back_y, &text_y0, &visible_rows, &max_cols);
+
+    text(back_x, back_y, "[< Back]", C_YELLOW);
+    text(back_x + 9*CHAR_W, back_y, files_preview_name, C_WHITE);
+    hline(cx0 + FILES_PAD, text_y0 - 4, cw - 2*FILES_PAD, C_GRAY);
+
+    /* Walk the raw buffer from the start every frame (cheap - matches
+     * this file's own full-redraw-every-frame philosophy, see the
+     * window-manager comment up top), breaking on '\n' and hard-wrapping
+     * long runs at max_cols, skipping files_preview_scroll lines. */
+    int line = 0, drawn = 0, col = 0;
+    char linebuf[TCOLS+1];
+    unsigned int i = 0;
+    while (i <= files_preview_len) {
+        int is_end     = (i == files_preview_len);
+        unsigned char c = is_end ? 0 : files_preview_buf[i];
+        int is_newline = (!is_end) && (c == '\n');
+        int is_wrap    = (!is_end) && (!is_newline) && (col >= max_cols);
+
+        if (is_wrap) {
+            linebuf[col] = 0;
+            if (line >= files_preview_scroll && drawn < visible_rows) {
+                text(cx0 + FILES_PAD, text_y0 + drawn*FILES_ROW_H, linebuf, C_GREEN);
+                drawn++;
+            }
+            line++; col = 0;
+            continue;   /* i unchanged - byte i starts the fresh line */
+        }
+
+        if (is_newline || is_end) {
+            linebuf[col] = 0;
+            if (line >= files_preview_scroll && drawn < visible_rows) {
+                text(cx0 + FILES_PAD, text_y0 + drawn*FILES_ROW_H, linebuf, C_GREEN);
+                drawn++;
+            }
+            line++; col = 0; i++;
+            if (is_end) break;
+            continue;
+        }
+
+        linebuf[col++] = (char)c;
+        i++;
+    }
+    if (files_preview_truncated && drawn < visible_rows)
+        text(cx0 + FILES_PAD, text_y0 + drawn*FILES_ROW_H, "(truncated)", C_YELLOW);
+}
+
+static void render_files(int cx0, int cy0, int cw, int ch) {
+    if (files_preview_mode) render_files_preview(cx0, cy0, cw, ch);
+    else                    render_files_list(cx0, cy0, cw, ch);
 }
 
 /* ── Window chrome (shared by Terminal + About) ─────────────────────
@@ -913,6 +1164,48 @@ static void cursor_erase(int cx, int cy) {
     for (int r=0; r<CURSOR_PX; r++) for (int c=0; c<CURSOR_PX; c++) px(cx+c, cy+r, cursor_save[i++]);
 }
 
+/* ── AxFiles content clicks (row select / [^]/[v] paging / [< Back]) ─
+ * Reuses files_layout()/files_preview_layout() - the exact geometry
+ * render_files() just drew - so hit-testing can never drift from what
+ * the user sees. */
+static void handle_files_content_click(int mx, int my) {
+    int cx0, cy0, cw, ch;
+    win_content_rect(WIN_FILES, &cx0, &cy0, &cw, &ch);
+
+    if (files_preview_mode) {
+        int back_x, back_y, text_y0, visible_rows, max_cols;
+        files_preview_layout(cx0, cy0, cw, ch, &back_x, &back_y, &text_y0, &visible_rows, &max_cols);
+        if (mx >= back_x && mx < back_x + 8*CHAR_W &&
+            my >= back_y && my < back_y + FILES_ROW_H) {
+            files_preview_mode = 0;
+        }
+        return;
+    }
+
+    if (!fat12_ok || files_count == 0) return;
+
+    int list_y0, visible_rows, up_x, down_x, btn_y, size_right;
+    files_layout(cx0, cy0, cw, ch, &list_y0, &visible_rows, &up_x, &down_x, &btn_y, &size_right);
+
+    if (my >= btn_y && my < btn_y + FILES_ROW_H) {
+        if (mx >= up_x && mx < up_x + FILES_BTN_W) {
+            files_scroll -= visible_rows;
+            if (files_scroll < 0) files_scroll = 0;
+            return;
+        }
+        if (mx >= down_x && mx < down_x + FILES_BTN_W) {
+            files_scroll += visible_rows;   /* clamped in render_files_list() */
+            return;
+        }
+    }
+
+    if (my >= list_y0) {
+        int row = (my - list_y0) / FILES_ROW_H;
+        int idx = files_scroll + row;
+        if (row < visible_rows && idx < files_count) files_open_preview(idx);
+    }
+}
+
 /* ── Mouse click detection ───────────────────────────────────────── */
 static int prev_btn = 0;
 
@@ -932,6 +1225,8 @@ static void handle_click(int mx, int my) {
                     dragging_win = hit;
                     drag_off_x = mx - windows[hit].x;
                     drag_off_y = my - windows[hit].y;
+                } else if (hit == WIN_FILES) {
+                    handle_files_content_click(mx, my);
                 }
                 /* else: click landed in the window's content - no
                  * per-content click handling needed for Terminal/About. */
@@ -951,6 +1246,13 @@ static void handle_click(int mx, int my) {
                             win_open(WIN_ABOUT);
                         } else if (icons[i].dst == SCR_PAINT) {
                             scr = SCR_PAINT;   /* unchanged - Paint stays full-screen */
+                        } else if (icons[i].dst == SCR_FILES) {
+                            int was_open = windows[WIN_FILES].open;
+                            win_open(WIN_FILES);
+                            if (!was_open) {
+                                files_preview_mode = 0;
+                                files_scroll = 0;
+                            }
                         }
                     }
                 }
@@ -1029,10 +1331,17 @@ static void handle_keys(void) {
                 if (scr == SCR_PAINT) {
                     scr = SCR_DESKTOP;
                 } else if (scr == SCR_DESKTOP) {
-                    /* Closes the focused window, matching its own close
-                     * button - no-op if nothing is open. */
                     int top = win_focused();
-                    if (top >= 0) win_close(top);
+                    if (top == WIN_FILES && files_preview_mode) {
+                        /* Back out of preview first - closing outright
+                         * would lose the "which file" context for no
+                         * reason, matching the [< Back] button. */
+                        files_preview_mode = 0;
+                    } else if (top >= 0) {
+                        /* Closes the focused window, matching its own
+                         * close button - no-op if nothing is open. */
+                        win_close(top);
+                    }
                 }
             }
             return;
@@ -1071,6 +1380,14 @@ void gfx_main(void) {
     init_idt_shell();
     init_mouse();
 
+    /* AxFiles: one-time FAT12 mount + directory scan. Read-only, and the
+     * disk can't change under this single-session shell, so scanning
+     * once here (rather than on every window-open) is sufficient - see
+     * files_scan(). render_files_list() shows "Disk not ready" if
+     * fat12_ok is 0 (e.g. no IDE device attached). */
+    fat12_ok = fat12_init();
+    files_scan();
+
     /* Initialize terminal */
     for (int r=0; r<TROWS; r++) tlines[r][0] = 0;
     tinput[0] = 0;
@@ -1098,17 +1415,19 @@ void gfx_main(void) {
                 for (int i = 0; i < N_WINDOWS; i++) {
                     int idx = win_order[i];
                     if (!windows[idx].open) continue;
-                    render_window_chrome(idx, idx == WIN_TERM ? "AxTerminal" : "AxAbout");
-                    int cx0 = windows[idx].x + 2;
-                    int cy0 = windows[idx].y + 2 + WIN_TITLE_H;
-                    int cw  = windows[idx].w - 4;
-                    int ch  = windows[idx].h - 4 - WIN_TITLE_H;
-                    if (idx == WIN_TERM) render_terminal(cx0, cy0, cw, ch);
-                    else                 render_about(cx0, cy0, cw, ch);
+                    const char *title = idx == WIN_TERM ? "AxTerminal" :
+                                        idx == WIN_ABOUT ? "AxAbout" : "AxFiles";
+                    render_window_chrome(idx, title);
+                    int cx0, cy0, cw, ch;
+                    win_content_rect(idx, &cx0, &cy0, &cw, &ch);
+                    if (idx == WIN_TERM)       render_terminal(cx0, cy0, cw, ch);
+                    else if (idx == WIN_ABOUT) render_about(cx0, cy0, cw, ch);
+                    else                       render_files(cx0, cy0, cw, ch);
                 }
                 break;
             case SCR_TERMINAL: break;   /* scr never actually becomes this anymore - Terminal is a window now */
             case SCR_ABOUT:    break;   /* same */
+            case SCR_FILES:    break;   /* same */
             case SCR_PAINT:    render_paint(); break;
         }
 

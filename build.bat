@@ -1035,8 +1035,12 @@ echo Compiling mouse driver for shell...
 gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -c src\drivers\mouse.c -o build\mouse_shell.o
 if %errorlevel% neq 0 goto :error
 
+echo Compiling FAT12 driver for shell (read-only, own IDE polling in gfx_shell.c)...
+gcc -m32 -Os -ffreestanding -mno-sse -mno-sse2 -mno-mmx -I src/drivers -DFAT12_BASE=0x600000 -DFAT12_NO_WRITE -c src\fs\fat12.c -o build\fat12_shell.o
+if %errorlevel% neq 0 goto :error
+
 echo Linking graphical shell kernel...
-ld -T kernel_gfx.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_gfx_entry.o build\idt_shell.o build\gfx_shell.o build\mouse_shell.o -o build\kernel_shell.exe
+ld -T kernel_gfx.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\kernel_gfx_entry.o build\idt_shell.o build\gfx_shell.o build\mouse_shell.o build\fat12_shell.o -o build\kernel_shell.exe
 if %errorlevel% neq 0 goto :error
 
 echo Stripping to flat binary...
