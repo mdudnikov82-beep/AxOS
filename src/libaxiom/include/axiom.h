@@ -119,18 +119,35 @@ void* ax_sbrk(int increment);           // сдвинуть heap break; (void*)-
 void* ax_malloc(unsigned int size);     // выделить size байт или NULL
 void  ax_free(void* ptr);               // освободить блок
 
-// Shadow + Memory Tagging API (64-битный тег поколения):
+// Shadow + Memory Tagging API (144-битный составной тег поколения - см.
+// src/kernel/heap.c за обоснованием ширины/компромисса скорости):
 // ax_check      — 1 если [ptr,ptr+size) в состоянии OK (любой тег).
-// ax_alloc_tag  — тег текущего поколения блока (0 = freed/не выделен).
+// ax_alloc_tag  — тег текущего поколения блока (нулевой tag144_t = freed/не выделен).
 // ax_check_tag  — 1 если OK И тег совпадает; ловит UAF после переиспользования.
 // ax_handle      — снимок (addr, тег) в "проверяемую ссылку" (software TBI stand-in).
 // ax_resolve     — указатель, если поколение всё ещё текущее; иначе 0.
-int                ax_check(void* ptr, unsigned int size);
-unsigned long long ax_alloc_tag(void* ptr);
-int                ax_check_tag(void* ptr, unsigned long long expected_tag, unsigned int size);
-typedef struct { void* addr; unsigned long long tag; } ax_handle_t;
-ax_handle_t        ax_handle(void* ptr);
-void*              ax_resolve(ax_handle_t h, unsigned int size);
+typedef struct {
+    unsigned long long lo;
+    unsigned long long mid;
+    unsigned short      hi;   // используются только младшие 16 бит
+} __attribute__((packed)) tag144_t;
+
+static inline tag144_t tag144_zero(void) {
+    tag144_t t; t.lo = 0; t.mid = 0; t.hi = 0; return t;
+}
+static inline int tag144_is_zero(tag144_t t) {
+    return !t.lo && !t.mid && !t.hi;
+}
+static inline int tag144_eq(tag144_t a, tag144_t b) {
+    return a.lo == b.lo && a.mid == b.mid && a.hi == b.hi;
+}
+
+int          ax_check(void* ptr, unsigned int size);
+tag144_t     ax_alloc_tag(void* ptr);
+int          ax_check_tag(void* ptr, tag144_t expected_tag, unsigned int size);
+typedef struct { void* addr; tag144_t tag; } ax_handle_t;
+ax_handle_t  ax_handle(void* ptr);
+void*        ax_resolve(ax_handle_t h, unsigned int size);
 
 // Уровень stdio (реализован в stdio.c)
 void ax_putchar(char c);

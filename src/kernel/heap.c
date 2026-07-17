@@ -42,15 +42,19 @@
 //    чей заголовок не похож на "выделенный нами блок" (чужой/мусорный
 //    указатель), и явно детектирует double-free, вместо того чтобы
 //    тихо повторно влинковать уже свободный блок в список.
-// 2. tag (полные 64 бита, "цвет" блока, по аналогии с MTE, но шире - см.
+// 2. tag (144 бита, "цвет" блока, по аналогии с MTE, но куда шире - см.
 //    тот же приём в src/user/rv64/malloc.h) - случайное число, назначаемое
 //    блоку при ВЫХОДЕ из карантина обратно в free-list. Канарейка
-//    вычисляется из тега (tagged_canary) - поэтому совпадает только пока
-//    тег в заголовке не менялся. Изначально здесь было 4 бита (как
-//    настоящий ARM MTE); в long mode x86-64 родная ширина регистра/ALU -
-//    64 бита, так же как на RV64, так что расширение до полного machine
-//    word ничего не стоит (одно сравнение вместо одного сравнения) и
-//    делает коллизию поколений при use-after-free 1-в-2^64 вместо 1-в-16.
+//    вычисляется из тега (tagged_canary144) - поэтому совпадает только
+//    пока тег в заголовке не менялся. Изначально здесь было 4 бита (как
+//    настоящий ARM MTE), потом 64 (родная ширина регистра/ALU в long
+//    mode - одно сравнение "бесплатно"). 144 бит - уже НЕ помещается в
+//    один регистр (составной тип из двух 64-битных слов + одного
+//    16-битного, tag144_t ниже), так что проверка - это честных три
+//    сравнения вместо одного, сознательный компромисс скорости ради
+//    ещё меньшей вероятности коллизии поколений при use-after-free
+//    (1-в-2^144 вместо 1-в-2^64) - при 64 битах она и так уже
+//    практически недостижима, дальнейший выигрыш скорее академический.
 // 3. canary сразу после пользовательских данных, завязанная на tag:
 //    linear-overflow, который раньше тихо переписывал заголовок
 //    СЛЕДУЮЩЕГО блока, теперь детектируется в free() ДО того, как
@@ -125,15 +129,38 @@ static void print_hex64(unsigned long long val) {
 #define HEAP_MAGIC_QUARANTINE 0x51524E54u // "QRNT" - свободен, но ещё не виден malloc()
 #define HEAP_MAGIC_FREE       0x46524545u // "EERF" - свободен и виден malloc()
 
-#define CANARY_SIZE  8
-#define CANARY_BASE  0xACACACACACACACACull
+// 144-битный составной тег: два 64-битных слова + одно 16-битное
+// (64+64+16=144), packed - без паддинга ровно 18 байт. Не влезает в один
+// регистр (в отличие от прежних 64 бит), поэтому сравнение (tag144_eq)
+// честно сравнивает все три поля, а не одно машинное слово - см.
+// комментарий в начале файла про этот компромисс.
+typedef struct {
+    unsigned long long lo;
+    unsigned long long mid;
+    unsigned short      hi;   // используются только младшие 16 бит
+} __attribute__((packed)) tag144_t;
+
+static tag144_t tag144_zero(void) {
+    tag144_t t; t.lo = 0; t.mid = 0; t.hi = 0; return t;
+}
+static int tag144_is_zero(tag144_t t) {
+    return !t.lo && !t.mid && !t.hi;
+}
+static int tag144_eq(tag144_t a, tag144_t b) {
+    return a.lo == b.lo && a.mid == b.mid && a.hi == b.hi;
+}
+
+#define CANARY_SIZE  18   // sizeof(tag144_t) - see the typedef just above
+#define CANARY_BASE_LO  0xACACACACACACACACull
+#define CANARY_BASE_MID 0xACACACACACACACACull
+#define CANARY_BASE_HI  ((unsigned short)0xACACu)
 
 // Левый redzone: фиксированный паттерн между заголовком и данными -
 // underflow затирает его раньше, чем добирается до самого заголовка.
 #define RZONE_SIZE  8
 #define RZONE_BYTE  0xBEu
 
-// Полный 64-битный "цвет" блока (по аналогии с тегами ARM MTE, но шире и
+// Полный 144-битный "цвет" блока (по аналогии с тегами ARM MTE, но шире и
 // без аппаратной проверки - см. комментарий в начале файла). Канарейка
 // строится из него, так что подмена тега в заголовке (или просто другой
 // блок того же адреса, но другого "поколения") меняет ожидаемое значение
@@ -150,7 +177,7 @@ typedef struct block_header {
     int free;                   // 1 - блок свободен И виден malloc() (не в карантине)
     struct block_header* next;  // следующий блок в списке (или NULL)
     unsigned int magic;         // HEAP_MAGIC_* - см. комментарий выше
-    unsigned long long tag;     // 64-битный "цвет" текущего поколения блока
+    tag144_t tag;                // 144-битный "цвет" текущего поколения блока
 } block_header_t;
 
 #define HEADER_SIZE (sizeof(block_header_t))
@@ -160,9 +187,10 @@ typedef struct block_header {
 // избегаем "блоков-крошек", в которые ничего не влезет.
 #define MIN_BLOCK_SIZE 16
 
-// Выравнивание размера запроса malloc() до кратного 8 байт - CANARY_SIZE
-// теперь тоже 8 (полный 64-битный тег), выравнивание держит канарейку на
-// естественной границе слова вместо произвольного 4-байтного смещения.
+// Выравнивание размера запроса malloc() до кратного 8 байт - держит
+// канарейку (18 байт, tag144_t, начинается сразу после данных) на
+// естественной 8-байтной границе для её первых двух 64-битных полей,
+// а не на произвольном смещении.
 #define ALIGN8(x) (((x) + 7) & ~7)
 
 // 0, not HEAP_START: HEAP_START now depends on the runtime g_kheap_base
@@ -182,7 +210,7 @@ static unsigned long long tag_prng_state = 0;
 // 64-битного слова (13, 7, 17) - не та тройка (13, 17, 5), что была тут
 // для 32-битной версии: она подобрана под 32 бита и на 64 давала бы
 // более слабую/короткую последовательность.
-static unsigned long long next_tag() {
+static unsigned long long xorshift64_step(void) {
     if (tag_prng_state == 0) {
         tag_prng_state = (unsigned long long)timer_ticks ^ 0x9E3779B97F4A7C15ull;
         if (tag_prng_state == 0) tag_prng_state = 0x9E3779B97F4A7C15ull;
@@ -194,14 +222,31 @@ static unsigned long long next_tag() {
     return tag_prng_state ? tag_prng_state : 1ull;
 }
 
-// Канарейка зависит от tag блока напрямую (XOR с базовым паттерном) -
-// больше не нужно "размножать" по байтам, как для 4-битного тега: тег уже
-// занимает все 64 бита. Старый указатель, переживший free() и повторную
-// выдачу того же адреса с НОВЫМ тегом, при попытке write затирает память
-// по старому смещению, но не предъявляет верную канарейку нового
-// поколения при следующем легитимном free() этого блока.
-static unsigned long long tagged_canary(unsigned long long tag) {
-    return CANARY_BASE ^ tag;
+// Тег теперь 144 бита - три прогона той же xorshift64 подряд (общее
+// состояние генератора цепляется между ними, как и раньше между
+// последовательными тегами), упакованные в lo/mid/hi. tag144_is_zero()
+// проверяет все три поля, так что шанс СЛУЧАЙНО получить "нулевой" тег
+// (зарезервирован под "свободно") астрономически меньше прежнего.
+static tag144_t next_tag(void) {
+    tag144_t t;
+    t.lo  = xorshift64_step();
+    t.mid = xorshift64_step();
+    t.hi  = (unsigned short)(xorshift64_step() & 0xFFFFu);
+    if (tag144_is_zero(t)) t.lo = 1; // тот же анти-ноль подстраховщик, что и раньше
+    return t;
+}
+
+// Канарейка зависит от tag блока напрямую (XOR с базовым паттерном,
+// теперь пофиелдно на все три части) - старый указатель, переживший
+// free() и повторную выдачу того же адреса с НОВЫМ тегом, при попытке
+// write затирает память по старому смещению, но не предъявляет верную
+// канарейку нового поколения при следующем легитимном free() этого блока.
+static tag144_t tagged_canary144(tag144_t tag) {
+    tag144_t c;
+    c.lo  = CANARY_BASE_LO  ^ tag.lo;
+    c.mid = CANARY_BASE_MID ^ tag.mid;
+    c.hi  = (unsigned short)(CANARY_BASE_HI ^ tag.hi);
+    return c;
 }
 
 static void heap_corrupted(char* why) {
@@ -242,7 +287,7 @@ void init_heap() {
     heap_head->free = 1;
     heap_head->next = 0;
     heap_head->magic = HEAP_MAGIC_FREE;
-    heap_head->tag = 0;
+    heap_head->tag = tag144_zero();
 
     quarantine_count = 0;
     quarantine_pos = 0;
@@ -276,7 +321,7 @@ void* malloc(unsigned int size) {
                 new_block->size = remaining - HEADER_SIZE;
                 new_block->free = 1;
                 new_block->magic = HEAP_MAGIC_FREE;
-                new_block->tag = 0;
+                new_block->tag = tag144_zero();
                 new_block->next = current->next;
 
                 current->size = reserved;
@@ -299,8 +344,8 @@ void* malloc(unsigned int size) {
             for (unsigned int i = 0; i < RZONE_SIZE; i++) lzone[i] = RZONE_BYTE;
 
             result = (void*)(lzone + RZONE_SIZE);
-            *(unsigned long long*)((unsigned char*)result + (current->size - RZONE_SIZE - CANARY_SIZE)) =
-                tagged_canary(current->tag);
+            *(tag144_t*)((unsigned char*)result + (current->size - RZONE_SIZE - CANARY_SIZE)) =
+                tagged_canary144(current->tag);
             break;
         }
 
@@ -324,7 +369,7 @@ static void release_from_quarantine(block_header_t* block) {
 
     block->free = 1;
     block->magic = HEAP_MAGIC_FREE;
-    block->tag = 0;
+    block->tag = tag144_zero();
 
     if (block->next && block->next->free) {
         block->size += HEADER_SIZE + block->next->size;
@@ -378,8 +423,8 @@ void free(void* ptr) {
     }
 
     unsigned int user_size = block->size - RZONE_SIZE - CANARY_SIZE;
-    unsigned long long canary = *(unsigned long long*)((unsigned char*)ptr + user_size);
-    if (canary != tagged_canary(block->tag)) {
+    tag144_t canary = *(tag144_t*)((unsigned char*)ptr + user_size);
+    if (!tag144_eq(canary, tagged_canary144(block->tag))) {
         heap_corrupted("buffer overflow (canary)");
     }
 

@@ -9,21 +9,23 @@
  * pointer for translation — they don't store a tag per memory granule or
  * check it on every access). So instead of pretending to have hardware we
  * don't, this ports the same idea AxOS's x86 side already uses
- * (src/libaxiom/src/malloc.c, 4-bit tag) but widened all the way to a full
- * 64-bit generation tag per 8-byte granule: on RV64 `unsigned long` IS the
- * native register/ALU width, so a 64-bit tag/canary/PRNG state costs no more
- * than the 32-bit version did — every check is still a single native load
- * and compare, not a double-word emulation like it would be on rv32. The
- * wider tag just makes stale-pointer/use-after-free collisions astronomically
- * less likely (1-in-2^64 vs 1-in-2^32 for a reused address to accidentally
- * carry the same generation tag). Checked explicitly via
- * mte_check()/mte_check_tag() (or automatically inside free()) instead of
- * on every CPU load/store.
+ * (src/libaxiom/src/malloc.c) but widened all the way to a composite
+ * 144-bit generation tag per 8-byte granule (tag144_t below: two 64-bit
+ * words + one 16-bit word, 64+64+16=144) — wider than RV64's native
+ * register, so a check is now a genuine three-field compare instead of a
+ * single native load+compare (was true up through the 64-bit version,
+ * which fit in one register "for free"; this is a deliberate speed/
+ * curiosity trade, not an oversight — see src/kernel/heap.c for the same
+ * call on x86). The wider tag makes stale-pointer/use-after-free
+ * collisions astronomically less likely (1-in-2^144 vs 1-in-2^64), though
+ * at 64 bits that was already practically unreachable — the further gain
+ * is mostly academic. Checked explicitly via mte_check()/mte_check_tag()
+ * (or automatically inside free()) instead of on every CPU load/store.
  *
  * Block layout:
  *   [heap_block_t header]
  *   [left redzone  : RZONE_SIZE bytes, 0xBE]   <- shadow RZONE
- *   [user data     : N bytes, zeroed on alloc] <- shadow OK + 32-bit tag
+ *   [user data     : N bytes, zeroed on alloc] <- shadow OK + 144-bit tag
  *   [right redzone : RZONE_SIZE bytes, 0xBE]   <- shadow RZONE
  *   [canary        : CANARY_SIZE bytes, BASE^tag]
  *
@@ -32,7 +34,7 @@
  *   heap overflow    -> right redzone / canary corrupted, caught at free()
  *   use-after-free   -> shadow state == FREED, mte_check_tag() returns 0
  *   double-free      -> magic == QUARANTINE/FREE on second free()
- *   stale generation -> reused address gets a new 64-bit tag; an old
+ *   stale generation -> reused address gets a new 144-bit tag; an old
  *                       pointer's remembered tag no longer matches
  *
  * API:
@@ -55,11 +57,46 @@
 
 #define HEAP_RZONE_SIZE   8u
 #define HEAP_RZONE_BYTE   0xBEu
-#define HEAP_CANARY_SIZE  8u
-#define HEAP_CANARY_BASE  (0xACACACACu | ((unsigned long)0xACACACACu << 32))
+/* HEAP_CANARY_SIZE is the RESERVED canary slot, 24 bytes, NOT
+ * sizeof(tag144_t) (18). Shadow memory is indexed in 8-byte granules
+ * (MTE_GRANULE below) and silently assumes every header/lzone/user/rzone/
+ * canary boundary in a block lands on an 8-byte-aligned offset from
+ * __heap_base. With the old 8-byte tag this held "for free" (HEAP_HDR_SIZE
+ * was already a multiple of 8, forced by the struct's 8-byte pointer on
+ * lp64). tag144_t (18 bytes, packed, 1-byte alignment) breaks it for the
+ * canary slot specifically: 18 isn't a multiple of 8, so each block's total
+ * footprint stops being 8-aligned, and the SAME real bug found live on the
+ * x86 side (src/libaxiom/src/malloc.c: "FAIL: ax_check live" - a shared
+ * granule between user data and the right redzone got silently overwritten)
+ * would eventually hit RV64 too, just not on the very first allocation
+ * (masked there because HEAP_HDR_SIZE alone is already 8-aligned - the
+ * corruption only shows up once misalignment accumulates across more than
+ * one block). 24 = ALIGN8(18) restores the invariant; tag144_t itself is
+ * still exactly 18 bytes/144 bits, the extra 6 bytes are just reserved and
+ * never read or written. */
+#define HEAP_CANARY_SIZE  24u
+#define HEAP_CANARY_BASE_LO  (0xACACACACu | ((unsigned long)0xACACACACu << 32))
+#define HEAP_CANARY_BASE_MID (0xACACACACu | ((unsigned long)0xACACACACu << 32))
+#define HEAP_CANARY_BASE_HI  ((unsigned short)0xACACu)
 #define HEAP_QUARANTINE_CAPACITY 8
 
-/* Shadow memory: one state byte + one 64-bit tag per 8-byte granule,
+typedef struct {
+    unsigned long lo;
+    unsigned long mid;
+    unsigned short hi;   /* only the low 16 bits are used */
+} __attribute__((packed)) tag144_t;
+
+static tag144_t tag144_zero(void) {
+    tag144_t t; t.lo = 0; t.mid = 0; t.hi = 0; return t;
+}
+static int tag144_is_zero(tag144_t t) {
+    return !t.lo && !t.mid && !t.hi;
+}
+static int tag144_eq(tag144_t a, tag144_t b) {
+    return a.lo == b.lo && a.mid == b.mid && a.hi == b.hi;
+}
+
+/* Shadow memory: one state byte + one 144-bit tag per 8-byte granule,
  * covering the first MTE_SHADOW_COVER bytes of the heap. Allocations (or
  * parts of them) beyond that window are still allocated/freed correctly,
  * they just aren't shadow-tracked (mte_check* on them returns 0/miss). */
@@ -76,7 +113,7 @@ typedef struct heap_block {
     struct heap_block  *next;
     unsigned int         free;
     unsigned int         magic;
-    unsigned long         tag;   /* 64-bit generation tag (1..2^64-1; 0 = none) */
+    tag144_t              tag;   /* 144-bit generation tag (zero = none) */
 } heap_block_t;
 
 #define HEAP_HDR_SIZE ((unsigned int)sizeof(heap_block_t))
@@ -89,7 +126,7 @@ static unsigned long   __heap_prng             = 0;
 static unsigned char  *__heap_base             = 0;  /* first sbrk-ed address */
 
 static unsigned char   __mte_state[MTE_SHADOW_SIZE];
-static unsigned long   __mte_tag[MTE_SHADOW_SIZE];
+static tag144_t         __mte_tag[MTE_SHADOW_SIZE];
 
 static void heap_abort(const char *why) {
     puts_rv("\r\n\033[31m*** HEAP CORRUPTION: ");
@@ -108,7 +145,7 @@ static long __mte_idx(const void *p) {
 }
 
 static void __mte_fill(const void *start, unsigned int nbytes,
-                       unsigned char state, unsigned long tag) {
+                       unsigned char state, tag144_t tag) {
     if (!nbytes) return;
     long i0 = __mte_idx(start);
     long i1 = __mte_idx((const unsigned char *)start + nbytes - 1);
@@ -126,21 +163,21 @@ static int mte_check(const void *ptr, unsigned int size) {
     return 1;
 }
 
-/* Current generation's tag, or 0 if freed / not shadow-tracked. */
-static unsigned long mte_tag(const void *ptr) {
+/* Current generation's tag, or a zero tag144_t if freed / not shadow-tracked. */
+static tag144_t mte_tag(const void *ptr) {
     long idx = __mte_idx(ptr);
-    if (idx < 0 || __mte_state[idx] != MTE_STATE_OK) return 0;
+    if (idx < 0 || __mte_state[idx] != MTE_STATE_OK) return tag144_zero();
     return __mte_tag[idx];
 }
 
 /* 1 if [ptr, ptr+size) is live AND every granule's tag matches expected. */
-static int mte_check_tag(const void *ptr, unsigned long expected_tag, unsigned int size) {
-    if (!ptr || !size || !expected_tag) return 0;
+static int mte_check_tag(const void *ptr, tag144_t expected_tag, unsigned int size) {
+    if (!ptr || !size || tag144_is_zero(expected_tag)) return 0;
     long i0 = __mte_idx(ptr);
     long i1 = __mte_idx((const unsigned char *)ptr + size - 1);
     if (i0 < 0 || i1 < 0) return 0;
     for (long i = i0; i <= i1; i++)
-        if (__mte_state[i] != MTE_STATE_OK || __mte_tag[i] != expected_tag) return 0;
+        if (__mte_state[i] != MTE_STATE_OK || !tag144_eq(__mte_tag[i], expected_tag)) return 0;
     return 1;
 }
 
@@ -156,7 +193,7 @@ static int mte_check_tag(const void *ptr, unsigned long expected_tag, unsigned i
  * x86-64 nor RV64 sv39 have hardware support (LAM/Zjpm) to ignore tag
  * bits packed into a real pointer's high bits and check them on every
  * access transparently. */
-typedef struct { void *addr; unsigned long tag; } mte_handle_t;
+typedef struct { void *addr; tag144_t tag; } mte_handle_t;
 
 /* Snapshot ptr's CURRENT generation tag into a handle. ptr must be live
  * (fresh from malloc()) - a handle taken from a dead/foreign pointer
@@ -175,7 +212,7 @@ static mte_handle_t mte_handle(void *ptr) {
  * dereferencing - this does not abort like heap_abort(), it's a
  * legitimate "did my reference go stale" query, not corruption. */
 static void *mte_resolve(mte_handle_t h, unsigned int size) {
-    if (!h.tag) return 0;
+    if (tag144_is_zero(h.tag)) return 0;
     return mte_check_tag(h.addr, h.tag, size) ? h.addr : 0;
 }
 
@@ -185,7 +222,7 @@ static void *mte_resolve(mte_handle_t h, unsigned int size) {
  * and would give a weaker/shorter-period sequence at 64 bits. Runs as a
  * single native register op on RV64, same cost as the old 32-bit version. */
 
-static unsigned long __heap_next_tag(void) {
+static unsigned long __heap_xorshift64_step(void) {
     if (__heap_prng == 0) {
         __heap_prng = (unsigned long)gettime() ^ 0x9E3779B97F4A7C15UL;
         if (__heap_prng == 0) __heap_prng = 1UL;
@@ -198,8 +235,21 @@ static unsigned long __heap_next_tag(void) {
     return t ? t : 1UL;
 }
 
-static unsigned long __heap_tagged_canary(unsigned long tag) {
-    return HEAP_CANARY_BASE ^ tag;
+static tag144_t __heap_next_tag(void) {
+    tag144_t t;
+    t.lo  = __heap_xorshift64_step();
+    t.mid = __heap_xorshift64_step();
+    t.hi  = (unsigned short)(__heap_xorshift64_step() & 0xFFFFu);
+    if (tag144_is_zero(t)) t.lo = 1;
+    return t;
+}
+
+static tag144_t __heap_tagged_canary(tag144_t tag) {
+    tag144_t c;
+    c.lo  = HEAP_CANARY_BASE_LO  ^ tag.lo;
+    c.mid = HEAP_CANARY_BASE_MID ^ tag.mid;
+    c.hi  = (unsigned short)(HEAP_CANARY_BASE_HI ^ tag.hi);
+    return c;
 }
 
 /* ---- quarantine / free list ---- */
@@ -214,7 +264,7 @@ static void __heap_release_to_free_list(heap_block_t *b) {
 
     b->free  = 1;
     b->magic = HEAP_MAGIC_FREE;
-    b->tag   = 0;
+    b->tag   = tag144_zero();
 
     heap_block_t *next_adj = (heap_block_t *)((unsigned char *)b + HEAP_HDR_SIZE + b->size);
     heap_block_t *prev = 0, *cur = __heap_free_list;
@@ -247,7 +297,7 @@ static void __heap_quarantine_push(heap_block_t *b) {
      * it's evicted from quarantine later. */
     unsigned char *payload   = (unsigned char *)b + HEAP_HDR_SIZE + HEAP_RZONE_SIZE;
     unsigned int   user_size = b->size - 2u * HEAP_RZONE_SIZE - HEAP_CANARY_SIZE;
-    __mte_fill(payload, user_size, MTE_STATE_FREED, 0);
+    __mte_fill(payload, user_size, MTE_STATE_FREED, tag144_zero());
 
     if (__heap_quarantine_count == HEAP_QUARANTINE_CAPACITY) {
         __heap_release_to_free_list(__heap_quarantine[__heap_quarantine_pos]);
@@ -284,7 +334,7 @@ static void *malloc(unsigned int size) {
     }
 
     unsigned int user_size = b->size - 2u * HEAP_RZONE_SIZE - HEAP_CANARY_SIZE;
-    unsigned long tag      = __heap_next_tag();
+    tag144_t tag           = __heap_next_tag();
 
     b->free  = 0;
     b->next  = 0;
@@ -293,7 +343,7 @@ static void *malloc(unsigned int size) {
 
     unsigned char *lzone = (unsigned char *)b + HEAP_HDR_SIZE;
     for (unsigned int i = 0; i < HEAP_RZONE_SIZE; i++) lzone[i] = HEAP_RZONE_BYTE;
-    __mte_fill(lzone, HEAP_RZONE_SIZE, MTE_STATE_RZONE, 0);
+    __mte_fill(lzone, HEAP_RZONE_SIZE, MTE_STATE_RZONE, tag144_zero());
 
     void *ptr = (void *)(lzone + HEAP_RZONE_SIZE);
     for (unsigned int i = 0; i < user_size; i++) ((unsigned char *)ptr)[i] = 0;
@@ -301,9 +351,9 @@ static void *malloc(unsigned int size) {
 
     unsigned char *rzone = (unsigned char *)ptr + user_size;
     for (unsigned int i = 0; i < HEAP_RZONE_SIZE; i++) rzone[i] = HEAP_RZONE_BYTE;
-    __mte_fill(rzone, HEAP_RZONE_SIZE, MTE_STATE_RZONE, 0);
+    __mte_fill(rzone, HEAP_RZONE_SIZE, MTE_STATE_RZONE, tag144_zero());
 
-    *(unsigned long *)(rzone + HEAP_RZONE_SIZE) = __heap_tagged_canary(tag);
+    *(tag144_t *)(rzone + HEAP_RZONE_SIZE) = __heap_tagged_canary(tag);
 
     return ptr;
 }
@@ -326,7 +376,7 @@ static void free(void *ptr) {
     for (unsigned int i = 0; i < HEAP_RZONE_SIZE; i++)
         if (rzone[i] != HEAP_RZONE_BYTE) heap_abort("right redzone overflow");
 
-    if (*(unsigned long *)(rzone + HEAP_RZONE_SIZE) != __heap_tagged_canary(b->tag))
+    if (!tag144_eq(*(tag144_t *)(rzone + HEAP_RZONE_SIZE), __heap_tagged_canary(b->tag)))
         heap_abort("buffer overflow (canary)");
 
     b->magic = HEAP_MAGIC_QUARANTINE;

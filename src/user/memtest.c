@@ -11,8 +11,8 @@ int main(void) {
     if (!ax_check(p, 64)) { ax_print("FAIL: ax_check live\n"); return 1; }
 
     // 3. ax_alloc_tag возвращает ненулевой тег
-    unsigned long long tag = ax_alloc_tag(p);
-    if (tag == 0) { ax_print("FAIL: tag is 0\n"); return 1; }
+    tag144_t tag = ax_alloc_tag(p);
+    if (tag144_is_zero(tag)) { ax_print("FAIL: tag is 0\n"); return 1; }
 
     // 4. ax_check_tag подтверждает правильное поколение
     if (!ax_check_tag(p, tag, 64)) { ax_print("FAIL: ax_check_tag live\n"); return 1; }
@@ -24,9 +24,9 @@ int main(void) {
 
     // 6. free → shadow = FREED, тег сбрасывается
     ax_free(p);
-    if (ax_check(p, 64))          { ax_print("FAIL: ax_check freed\n"); return 1; }
-    if (ax_alloc_tag(p) != 0)     { ax_print("FAIL: tag after free\n"); return 1; }
-    if (ax_check_tag(p, tag, 64)) { ax_print("FAIL: ax_check_tag freed\n"); return 1; }
+    if (ax_check(p, 64))                       { ax_print("FAIL: ax_check freed\n"); return 1; }
+    if (!tag144_is_zero(ax_alloc_tag(p)))       { ax_print("FAIL: tag after free\n"); return 1; }
+    if (ax_check_tag(p, tag, 64))               { ax_print("FAIL: ax_check_tag freed\n"); return 1; }
 
     // 7. Переиспользование: тот же адрес, НОВОЕ поколение
     //    Карантин из 8 блоков откладывает возврат; заполняем его,
@@ -38,15 +38,15 @@ int main(void) {
     char* p2 = ax_malloc(64);   // теперь старый блок вышел из карантина
     if (!p2) { ax_print("FAIL: malloc p2\n"); return 1; }
 
-    unsigned long long tag2 = ax_alloc_tag(p2);
-    if (tag2 == 0) { ax_print("FAIL: tag2 is 0\n"); return 1; }
+    tag144_t tag2 = ax_alloc_tag(p2);
+    if (tag144_is_zero(tag2)) { ax_print("FAIL: tag2 is 0\n"); return 1; }
 
     // Если p2 == p (тот же адрес), старый тег должен НЕ совпадать
-    if (p2 == p && tag2 == tag) {
-        ax_print("NOTE: same address, same tag (1/2^64 probability)\n");
+    if (p2 == p && tag144_eq(tag2, tag)) {
+        ax_print("NOTE: same address, same tag (1/2^144 probability)\n");
     }
     // ax_check_tag со СТАРЫМ тегом должен вернуть 0 (новое поколение)
-    if (p2 == p && tag2 != tag) {
+    if (p2 == p && !tag144_eq(tag2, tag)) {
         if (ax_check_tag(p, tag, 64)) {
             ax_print("FAIL: stale tag accepted\n"); return 1;
         }

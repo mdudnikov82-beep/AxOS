@@ -24,10 +24,13 @@
 //   [пользовательские данные : N байт]
 //   [канарейка : CANARY_SIZE байт, BASE^tag]
 //
-// Тег - полные 64 бита (unsigned long - на RV64/lp64 это НАСТОЯЩИЙ 64-бит,
-// в отличие от x86-версии, которой пришлось брать unsigned long long из-за
-// LLP64 у MinGW). Канонический xorshift64 (сдвиги 13,7,17), энтропия - CSR
-// `time` (тот же регистр, что использует таймер планировщика).
+// Тег - составной, 144 бита (tag144_t ниже: два 64-битных слова + одно
+// 16-битное, 64+64+16=144) - шире родного 64-битного регистра RV64/lp64,
+// так что сравнение тега/канарейки - честных три сравнения вместо одного
+// (сознательный компромисс скорости, см. src/kernel/heap.c за тем же
+// решением на x86). Каждое из трёх 64-битных слов генерируется отдельным
+// шагом канонического xorshift64 (сдвиги 13,7,17), энтропия - CSR `time`
+// (тот же регистр, что использует таймер планировщика).
 //
 // Карантин: free() не возвращает блок в free-list немедленно, а кладёт в
 // маленькое кольцо (QUARANTINE_CAPACITY последних free()) - typical
@@ -43,8 +46,27 @@
 
 #define RZONE_SIZE   16UL
 #define RZONE_BYTE   0xBEu
-#define CANARY_SIZE  8UL
-#define CANARY_BASE  0xACACACACACACACACUL
+
+typedef struct {
+    unsigned long long lo;
+    unsigned long long mid;
+    unsigned short      hi;   // используются только младшие 16 бит
+} __attribute__((packed)) tag144_t;
+
+static tag144_t tag144_zero(void) {
+    tag144_t t; t.lo = 0; t.mid = 0; t.hi = 0; return t;
+}
+static int tag144_is_zero(tag144_t t) {
+    return !t.lo && !t.mid && !t.hi;
+}
+static int tag144_eq(tag144_t a, tag144_t b) {
+    return a.lo == b.lo && a.mid == b.mid && a.hi == b.hi;
+}
+
+#define CANARY_SIZE  18UL   // sizeof(tag144_t)
+#define CANARY_BASE_LO  0xACACACACACACACACULL
+#define CANARY_BASE_MID 0xACACACACACACACACULL
+#define CANARY_BASE_HI  ((unsigned short)0xACACu)
 
 #define QUARANTINE_CAPACITY 8
 
@@ -53,7 +75,7 @@ typedef struct block_hdr {
     unsigned long   free;    // 1 = свободен И виден kmalloc() (не в карантине)
     struct block_hdr *next;  // следующий блок в free-list (если free=1)
     unsigned long   magic;   // HEAP_MAGIC_*
-    unsigned long   tag;     // 64-битный тег текущего поколения блока
+    tag144_t        tag;     // 144-битный тег текущего поколения блока
 } block_hdr;
 
 #define HDR_SIZE ((unsigned long)sizeof(block_hdr))
@@ -81,7 +103,7 @@ static inline unsigned long rdtime(void) {
 // поколениями одного и того же адреса, не сопротивление атакующему,
 // который уже читает память ядра. Канонические сдвиги для 64-битного слова
 // (13, 7, 17).
-static unsigned long next_tag(void) {
+static unsigned long xorshift64_step(void) {
     if (tag_prng_state == 0) {
         tag_prng_state = rdtime() ^ 0x9E3779B97F4A7C15UL;
         if (tag_prng_state == 0) tag_prng_state = 1UL;
@@ -93,8 +115,21 @@ static unsigned long next_tag(void) {
     return tag_prng_state ? tag_prng_state : 1UL;
 }
 
-static unsigned long tagged_canary(unsigned long tag) {
-    return CANARY_BASE ^ tag;
+static tag144_t next_tag(void) {
+    tag144_t t;
+    t.lo  = xorshift64_step();
+    t.mid = xorshift64_step();
+    t.hi  = (unsigned short)(xorshift64_step() & 0xFFFFu);
+    if (tag144_is_zero(t)) t.lo = 1;
+    return t;
+}
+
+static tag144_t tagged_canary144(tag144_t tag) {
+    tag144_t c;
+    c.lo  = CANARY_BASE_LO  ^ tag.lo;
+    c.mid = CANARY_BASE_MID ^ tag.mid;
+    c.hi  = (unsigned short)(CANARY_BASE_HI ^ tag.hi);
+    return c;
 }
 
 static void heap_corrupted(const char *why) {
@@ -113,7 +148,7 @@ static int arena_grow(void) {
     blk->size  = PAGE_SIZE;
     blk->free  = 1;
     blk->magic = HEAP_MAGIC_FREE;
-    blk->tag   = 0;
+    blk->tag   = tag144_zero();
     blk->next  = free_list;
     free_list  = blk;
     arena_end  = (unsigned long)page + PAGE_SIZE;
@@ -155,7 +190,7 @@ void *kmalloc(unsigned long size) {
                 rest->size  = b->size - need;
                 rest->free  = 1;
                 rest->magic = HEAP_MAGIC_FREE;
-                rest->tag   = 0;
+                rest->tag   = tag144_zero();
                 rest->next  = b->next;
                 b->size = need;
                 *pp = rest;
@@ -163,7 +198,7 @@ void *kmalloc(unsigned long size) {
                 *pp = b->next;
             }
 
-            unsigned long tag = next_tag();
+            tag144_t tag = next_tag();
             b->free  = 0;
             b->magic = HEAP_MAGIC_ALLOC;
             b->tag   = tag;
@@ -179,7 +214,7 @@ void *kmalloc(unsigned long size) {
             // проверял бы не ту область.
             void *ptr = (void *)(lzone + RZONE_SIZE);
             unsigned long user_span = b->size - HDR_SIZE - RZONE_SIZE - CANARY_SIZE;
-            *(unsigned long *)((unsigned char *)ptr + user_span) = tagged_canary(tag);
+            *(tag144_t *)((unsigned char *)ptr + user_span) = tagged_canary144(tag);
 
             return ptr;
         }
@@ -201,7 +236,7 @@ static void release_from_quarantine(block_hdr *blk) {
 
     blk->free  = 1;
     blk->magic = HEAP_MAGIC_FREE;
-    blk->tag   = 0;
+    blk->tag   = tag144_zero();
 
     blk->next = free_list;
     free_list = blk;
@@ -240,8 +275,8 @@ void kfree(void *ptr) {
         if (lzone[i] != RZONE_BYTE) heap_corrupted("buffer underflow (left redzone)");
 
     unsigned long user_span = blk->size - HDR_SIZE - RZONE_SIZE - CANARY_SIZE;
-    unsigned long canary = *(unsigned long *)((unsigned char *)ptr + user_span);
-    if (canary != tagged_canary(blk->tag))
+    tag144_t canary = *(tag144_t *)((unsigned char *)ptr + user_span);
+    if (!tag144_eq(canary, tagged_canary144(blk->tag)))
         heap_corrupted("buffer overflow (canary)");
 
     // В карантин, а не сразу в free-list - не трогаем данные блока здесь

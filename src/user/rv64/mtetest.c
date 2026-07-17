@@ -14,8 +14,8 @@ int main(void) {
     CHECK(p != 0, "malloc(64) succeeded");
     CHECK(mte_check(p, 64), "fresh block is live (mte_check)");
 
-    unsigned long tag = mte_tag(p);
-    CHECK(tag != 0, "fresh block has a nonzero generation tag");
+    tag144_t tag = mte_tag(p);
+    CHECK(!tag144_is_zero(tag), "fresh block has a nonzero generation tag");
     CHECK(mte_check_tag(p, tag, 64), "mte_check_tag matches own tag");
 
     for (int i = 0; i < 64; i++) p[i] = (char)i;
@@ -25,7 +25,7 @@ int main(void) {
 
     free(p);
     CHECK(!mte_check(p, 64), "freed block is no longer live");
-    CHECK(mte_tag(p) == 0, "freed block reports tag 0");
+    CHECK(tag144_is_zero(mte_tag(p)), "freed block reports tag 0");
     CHECK(!mte_check_tag(p, tag, 64), "stale tag rejected after free()");
 
     /* Drain the quarantine (8 slots) with same-size allocations so `p`
@@ -38,8 +38,8 @@ int main(void) {
     CHECK(p2 != 0, "malloc(64) after quarantine drain succeeded");
     CHECK(p2 == p, "address was recycled (expected, once out of quarantine)");
 
-    unsigned long tag2 = mte_tag(p2);
-    CHECK(tag2 != 0 && tag2 != tag,
+    tag144_t tag2 = mte_tag(p2);
+    CHECK(!tag144_is_zero(tag2) && !tag144_eq(tag2, tag),
           "new generation got a DIFFERENT tag than the old one");
     CHECK(!mte_check_tag(p, tag, 64),
           "old pointer + old tag still rejected (use-after-free caught)");
