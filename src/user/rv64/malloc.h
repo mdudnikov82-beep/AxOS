@@ -96,6 +96,29 @@ static int tag144_eq(tag144_t a, tag144_t b) {
     return a.lo == b.lo && a.mid == b.mid && a.hi == b.hi;
 }
 
+/* tag144_t is 18 bytes - bigger than RV64/lp64's 2*XLEN (16 byte) limit
+ * for passing/returning an aggregate in registers, so the ABI itself
+ * requires every by-value tag144_t parameter/return to go through a
+ * hidden-pointer copy, which GCC implements as a call to memcpy() - not
+ * an optimization choice we can flag our way out of (unlike the separate
+ * array-fill-loop lowering build_riscv.bat's -fno-tree-loop-distribute-
+ * patterns guards against). This fully freestanding (-nostdlib, no libc)
+ * RV64 userspace has no memcpy anywhere else, so it must be provided
+ * here. MUST be non-static: GCC's own implicitly-generated calls to the
+ * "memcpy" runtime symbol are emitted at the RTL/ABI-lowering level, not
+ * through normal C call resolution, and only bind to a symbol with
+ * external (non-static) linkage - confirmed live: a `static` version of
+ * this exact function left the linker's "undefined reference to memcpy"
+ * error unchanged. Caught only on a clean CI runner (a local rebuild
+ * doesn't fail loudly - build_riscv.bat doesn't halt on a link error, it
+ * just leaves the PREVIOUS build's stale .elf in place). */
+void *memcpy(void *dst, const void *src, unsigned long n) {
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    for (unsigned long i = 0; i < n; i++) d[i] = s[i];
+    return dst;
+}
+
 /* Shadow memory: one state byte + one 144-bit tag per 8-byte granule,
  * covering the first MTE_SHADOW_COVER bytes of the heap. Allocations (or
  * parts of them) beyond that window are still allocated/freed correctly,

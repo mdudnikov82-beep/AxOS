@@ -19,7 +19,13 @@ if not exist "%CC%" (
 if not exist %OUT% mkdir %OUT%
 
 set "KFLAGS=-march=rv64imac_zicsr -mabi=lp64 -mcmodel=medany -ffreestanding -fstack-protector-strong -Os -Wall -I%SRC%"
-set "UFLAGS=-march=rv64imac_zicsr -mabi=lp64 -mcmodel=medany -ffreestanding -fno-stack-protector -Os -nostdlib -I%USRC%"
+rem -fno-tree-loop-distribute-patterns: tag144_t (18 bytes, src/user/rv64/malloc.h)
+rem is too big for GCC to always inline in a loop at -Os, so without this flag it
+rem silently lowers array-fill loops like __mte_fill()'s "__mte_tag[i] = tag;" into
+rem calls to memcpy() - undefined in this -nostdlib freestanding build (caught only
+rem on a clean CI runner; a local rebuild left a STALE mtetest_rv64.elf in place
+rem instead of failing loudly, since this script doesn't halt on a link error).
+set "UFLAGS=-march=rv64imac_zicsr -mabi=lp64 -mcmodel=medany -ffreestanding -fno-stack-protector -fno-tree-loop-distribute-patterns -Os -nostdlib -I%USRC%"
 
 echo ===== Kernel =====
 
