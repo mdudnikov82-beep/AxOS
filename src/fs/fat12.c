@@ -31,12 +31,12 @@
 #endif
 #define FAT12_TOTAL_SECTORS 4096 // 2 МБ / 512 = TOTAL_SECTORS в make_fat12.py
 
-// FAT12_NO_WRITE отключает запись/печать (fat12_write/mkdir/delete/flush,
-// fat12_list/fat12_cat) - используется сборкой gfx_shell.c (x86 GUI-шелл,
-// -m32, read-only файловый менеджер), где нет ни print_string/print_uint
-// (текстовые функции основного ядра), ни ide_write_sector (там реализован
-// только ide_read_sector, см. gfx_shell.c). fat12_init/is_ready/readdir/load
-// и их общие read-only хелперы этим макросом не затрагиваются.
+// FAT12_NO_WRITE отключает только fat12_write/mkdir/list/cat (не delete -
+// AxFiles на gfx_shell.c теперь умеет удалять файлы, см. ide_write_sector
+// там же) - используется сборкой gfx_shell.c (x86 GUI-шелл, -m32), где нет
+// print_string/print_uint (текстовые функции основного ядра, нужны только
+// list/cat). fat12_init/is_ready/readdir/load/delete и их общие хелперы
+// этим макросом не затрагиваются.
 #ifndef FAT12_NO_WRITE
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
@@ -113,16 +113,15 @@ int fat12_init() {
     return 1;
 }
 
-#ifndef FAT12_NO_WRITE
 // Записывает RAM-копию FAT12-тома обратно на build/disk.img (LBA 0-511),
-// делая изменения от fat12_write() персистентными между запусками QEMU.
+// делая изменения от fat12_write()/fat12_delete() персистентными между
+// запусками QEMU. Не под FAT12_NO_WRITE - fat12_delete() тоже им пользуется.
 static void fat12_flush() {
     for (unsigned int lba = 0; lba < FAT12_TOTAL_SECTORS; lba++) {
         unsigned char* src = (unsigned char*)FAT12_BASE + lba * IDE_SECTOR_SIZE;
         ide_write_sector(lba, src);
     }
 }
-#endif
 
 // Возвращает значение 12-битной записи FAT для кластера cluster
 static unsigned int fat12_get_entry(unsigned int cluster) {
@@ -181,7 +180,10 @@ static void parse_83(char* input, char* name, char* ext) {
     }
 }
 
-#ifndef FAT12_NO_WRITE
+// Не под FAT12_NO_WRITE - fat12_delete() (через fat12_free_chain()) тоже
+// пользуется этим блоком, хотя fat12_alloc_chain()/fat12_write_chain_data()/
+// fat12_find_free_entry()/fat12_total_clusters() ей не нужны (только
+// fat12_write()/fat12_mkdir() зовут их дальше - те остаются под гардом).
 // Записывает значение value в 12-битную запись FAT для кластера cluster
 // (read-modify-write пары байт, см. set_fat_entry в tools/make_fat12.py)
 static void fat12_set_entry(unsigned int cluster, unsigned int value) {
@@ -281,7 +283,6 @@ static struct fat12_dir_entry* fat12_find_free_entry() {
 
     return 0;
 }
-#endif // FAT12_NO_WRITE
 
 // Ищет файл в корневой директории по имени в формате 8.3
 static struct fat12_dir_entry* fat12_find(char* name, char* ext) {
@@ -480,9 +481,10 @@ unsigned int fat12_load(char* filename, unsigned char* buffer, unsigned int max_
     return fat12_read_file(entry, buffer, max_size);
 }
 
-#ifndef FAT12_NO_WRITE
 // Возвращает: 1 - удалён, 0 - диск не готов/заблокирован,
-// FAT12_DELETE_NOTFOUND - файла с таким именем нет.
+// FAT12_DELETE_NOTFOUND - файла с таким именем нет. Не под FAT12_NO_WRITE -
+// AxFiles (и x86 gfx_shell.c, и RISC-V axfiles.c) умеет удалять файлы,
+// см. ide_write_sector()/fat12_set_locked(0) в gfx_shell.c.
 int fat12_delete(char* filename) {
     if (!fat12_ready) return 0;
     if (fat12_locked)  return 0;
@@ -501,6 +503,7 @@ int fat12_delete(char* filename) {
     return 1;
 }
 
+#ifndef FAT12_NO_WRITE
 int fat12_write(char* filename, unsigned char* data, unsigned int size) {
     if (!fat12_ready) return 0;
     if (fat12_locked) return 0;

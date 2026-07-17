@@ -88,14 +88,18 @@ static unsigned short inw(unsigned short p) {
     __asm__ volatile("inw %%dx,%%ax":"=a"(r):"d"(p));
     return r;
 }
+static void outw(unsigned short p, unsigned short v) {
+    __asm__ volatile("outw %%ax,%%dx"::"a"(v),"d"(p));
+}
 
 /* ── IDE (polled — no IRQ14/PIT here, unlike src/drivers/ide.c, which
  * needs both and can't be reused as-is) ─────────────────────────────
  * Primary bus, master, LBA28, PIO, single-threaded (this mini-kernel's
  * main loop is the only thing that ever touches these ports, so no
- * lock needed). Read-only - AxFiles (the file manager window) never
- * writes. Resolves fat12_shell.o's extern ide_read_sector() at link
- * time (see build.bat's Graphical Shell section). */
+ * lock needed). AxFiles (the file manager window) can now delete
+ * files, so both read and write are needed - resolves fat12_shell.o's
+ * extern ide_read_sector()/ide_write_sector() at link time (see
+ * build.bat's Graphical Shell section). */
 #define IDE_REG_DATA       0x1F0
 #define IDE_REG_SECCOUNT   0x1F2
 #define IDE_REG_LBA_LOW    0x1F3
@@ -107,7 +111,8 @@ static unsigned short inw(unsigned short p) {
 #define IDE_STATUS_ERR 0x01
 #define IDE_STATUS_DRQ 0x08
 #define IDE_STATUS_BSY 0x80
-#define IDE_CMD_READ_SECTORS 0x20
+#define IDE_CMD_READ_SECTORS  0x20
+#define IDE_CMD_WRITE_SECTORS 0x30
 #define IDE_WAIT_LIMIT 100000
 
 int ide_read_sector(unsigned int lba, unsigned char *buffer) {
@@ -134,6 +139,36 @@ int ide_read_sector(unsigned int lba, unsigned char *buffer) {
 
     unsigned short *dst = (unsigned short *)buffer;
     for (int i = 0; i < 256; i++) dst[i] = inw(IDE_REG_DATA);
+    return 1;
+}
+
+/* Mirror of ide_read_sector() - same wait/fast-fail structure, WRITE
+ * command and outw() instead of inw(). Resolves fat12_shell.o's extern
+ * ide_write_sector() (fat12_delete() -> fat12_flush() -> this). */
+int ide_write_sector(unsigned int lba, unsigned char *buffer) {
+    unsigned char st = inb(IDE_REG_STATUS);
+    if (st == 0xFF) return 0;   /* no controller (floating bus) - fail fast */
+
+    int spins;
+    for (spins = IDE_WAIT_LIMIT; spins && (inb(IDE_REG_STATUS) & IDE_STATUS_BSY); spins--);
+    if (!spins) return 0;
+
+    outb(IDE_REG_DRIVE_HEAD, 0xE0 | ((lba >> 24) & 0x0F));
+    outb(IDE_REG_SECCOUNT, 1);
+    outb(IDE_REG_LBA_LOW,  (unsigned char)(lba));
+    outb(IDE_REG_LBA_MID,  (unsigned char)(lba >> 8));
+    outb(IDE_REG_LBA_HIGH, (unsigned char)(lba >> 16));
+    outb(IDE_REG_COMMAND,  IDE_CMD_WRITE_SECTORS);
+
+    for (spins = IDE_WAIT_LIMIT; spins; spins--) {
+        st = inb(IDE_REG_STATUS);
+        if (st & IDE_STATUS_ERR) return 0;
+        if (!(st & IDE_STATUS_BSY) && (st & IDE_STATUS_DRQ)) break;
+    }
+    if (!spins) return 0;
+
+    unsigned short *src = (unsigned short *)buffer;
+    for (int i = 0; i < 256; i++) outw(IDE_REG_DATA, src[i]);
     return 1;
 }
 
@@ -828,11 +863,13 @@ static void render_about(int cx0, int cy0, int cw, int ch) {
 }
 
 /* ── Files (AxFiles) state ────────────────────────────────────────────
- * Read-only file manager window: lists FAT12 root-directory files
- * (fat12_readdir) and previews one file's raw content as text
- * (fat12_load) - no delete/write, matches v1's read-only scope (see
- * FAT12_NO_WRITE in build.bat's Graphical Shell section, which compiles
- * that whole path out of fat12_shell.o). */
+ * File manager window: lists FAT12 root-directory files
+ * (fat12_readdir), previews one file's raw content as text
+ * (fat12_load), and can delete a file (fat12_delete, with a confirm
+ * step) - no rename/edit/write-new-content, that's still out of scope
+ * (see FAT12_NO_WRITE in build.bat's Graphical Shell section, which
+ * still compiles fat12_write/mkdir/list/cat out of fat12_shell.o;
+ * fat12_delete itself is NOT under that guard, see src/fs/fat12.c). */
 #define FILES_MAX 64   /* FAT12 root-directory entry cap, see make_fat12.py */
 static int  fat12_ok;
 static int  files_count;
@@ -840,6 +877,7 @@ static char files_names[FILES_MAX][13];
 static unsigned int files_sizes[FILES_MAX];
 static int  files_scroll;
 static int  files_preview_mode;
+static int  files_confirm_delete;   /* showing "Delete FOO.BIN? [Yes] [No]" for files_preview_name */
 
 static void files_scan(void) {
     files_count = 0;
@@ -959,6 +997,10 @@ static void render_files_preview(int cx0, int cy0, int cw, int ch) {
 
     text(back_x, back_y, "[< Back]", C_YELLOW);
     text(back_x + 9*CHAR_W, back_y, files_preview_name, C_WHITE);
+    /* "[Delete]" is the same 8-char width as "[< Back]" - right-align it
+     * in the same header row, same reasoning files_layout() already
+     * uses for the list view's [^]/[v] buttons. */
+    text(cx0 + cw - FILES_PAD - 8*CHAR_W, back_y, "[Delete]", C_RED);
     hline(cx0 + FILES_PAD, text_y0 - 4, cw - 2*FILES_PAD, C_GRAY);
 
     /* Walk the raw buffer from the start every frame (cheap - matches
@@ -1002,9 +1044,36 @@ static void render_files_preview(int cx0, int cy0, int cw, int ch) {
         text(cx0 + FILES_PAD, text_y0 + drawn*FILES_ROW_H, "(truncated)", C_YELLOW);
 }
 
+/* Delete-confirm geometry - shared with the click handler's [Yes]/[No]
+ * hit-test, same reasoning as files_layout()/files_preview_layout(). */
+static void files_confirm_layout(int cx0, int cy0, int *yes_x, int *no_x, int *btn_y) {
+    *yes_x = cx0 + FILES_PAD;
+    *no_x  = *yes_x + 6*CHAR_W + 16;
+    *btn_y = cy0 + FILES_PAD + FILES_ROW_H + 10;
+}
+
+static void render_files_confirm_delete(int cx0, int cy0, int cw, int ch) {
+    (void)ch;
+    int yes_x, no_x, btn_y;
+    files_confirm_layout(cx0, cy0, &yes_x, &no_x, &btn_y);
+
+    char msg[13+10];
+    int p = 0;
+    const char *pre = "Delete ";
+    while (pre[p]) { msg[p] = pre[p]; p++; }
+    for (int i = 0; files_preview_name[i] && p < (int)sizeof(msg)-2; i++) msg[p++] = files_preview_name[i];
+    msg[p++] = '?';
+    msg[p] = 0;
+    text(cx0 + FILES_PAD, cy0 + FILES_PAD, msg, C_YELLOW);
+
+    text(yes_x, btn_y, "[Yes]", C_RED);
+    text(no_x,  btn_y, "[No]",  C_WHITE);
+}
+
 static void render_files(int cx0, int cy0, int cw, int ch) {
-    if (files_preview_mode) render_files_preview(cx0, cy0, cw, ch);
-    else                    render_files_list(cx0, cy0, cw, ch);
+    if (files_confirm_delete)      render_files_confirm_delete(cx0, cy0, cw, ch);
+    else if (files_preview_mode)   render_files_preview(cx0, cy0, cw, ch);
+    else                           render_files_list(cx0, cy0, cw, ch);
 }
 
 /* ── Window chrome (shared by Terminal + About) ─────────────────────
@@ -1172,12 +1241,34 @@ static void handle_files_content_click(int mx, int my) {
     int cx0, cy0, cw, ch;
     win_content_rect(WIN_FILES, &cx0, &cy0, &cw, &ch);
 
+    if (files_confirm_delete) {
+        int yes_x, no_x, btn_y;
+        files_confirm_layout(cx0, cy0, &yes_x, &no_x, &btn_y);
+        if (my >= btn_y && my < btn_y + FILES_ROW_H) {
+            if (mx >= yes_x && mx < yes_x + 5*CHAR_W) {
+                fat12_delete(files_preview_name);
+                files_scan();   /* refresh from disk - the deleted file must actually disappear */
+                files_confirm_delete = 0;
+                files_preview_mode = 0;
+            } else if (mx >= no_x && mx < no_x + 4*CHAR_W) {
+                files_confirm_delete = 0;
+            }
+        }
+        return;
+    }
+
     if (files_preview_mode) {
         int back_x, back_y, text_y0, visible_rows, max_cols;
         files_preview_layout(cx0, cy0, cw, ch, &back_x, &back_y, &text_y0, &visible_rows, &max_cols);
         if (mx >= back_x && mx < back_x + 8*CHAR_W &&
             my >= back_y && my < back_y + FILES_ROW_H) {
             files_preview_mode = 0;
+            return;
+        }
+        int del_x = cx0 + cw - FILES_PAD - 8*CHAR_W;
+        if (mx >= del_x && mx < del_x + 8*CHAR_W &&
+            my >= back_y && my < back_y + FILES_ROW_H) {
+            files_confirm_delete = 1;
         }
         return;
     }
@@ -1380,12 +1471,17 @@ void gfx_main(void) {
     init_idt_shell();
     init_mouse();
 
-    /* AxFiles: one-time FAT12 mount + directory scan. Read-only, and the
-     * disk can't change under this single-session shell, so scanning
-     * once here (rather than on every window-open) is sufficient - see
-     * files_scan(). render_files_list() shows "Disk not ready" if
-     * fat12_ok is 0 (e.g. no IDE device attached). */
+    /* AxFiles: one-time FAT12 mount + directory scan. The disk can't
+     * change from outside this single-session shell, so scanning once
+     * here (rather than on every window-open) is sufficient - see
+     * files_scan(); a delete re-runs it explicitly to pick up the
+     * change. render_files_list() shows "Disk not ready" if fat12_ok
+     * is 0 (e.g. no IDE device attached). FAT12 defaults locked
+     * (read-only) - unlock once here so AxFiles' delete can actually
+     * write, matching there being no separate "unlock" affordance in
+     * this GUI (unlike the text-mode shell's lock/unlock commands). */
     fat12_ok = fat12_init();
+    fat12_set_locked(0);
     files_scan();
 
     /* Initialize terminal */

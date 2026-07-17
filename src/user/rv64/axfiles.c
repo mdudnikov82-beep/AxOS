@@ -1,15 +1,18 @@
 #include "syscall.h"
 #include "window.h"
 
-/* AxFiles — read-only file manager, ported from x86 gfx_shell.c's
- * AxFiles window (see that file's own "Files (AxFiles) state" comment
- * block for the original design this mirrors almost line-for-line).
+/* AxFiles — file manager, ported from x86 gfx_shell.c's AxFiles window
+ * (see that file's own "Files (AxFiles) state" comment block for the
+ * original design this mirrors almost line-for-line). Lists files,
+ * previews raw content as text, and can delete a file (with a confirm
+ * step) - no rename/edit/write-new-content, that's out of scope.
  * Unlike the x86 port, no new disk driver work was needed here - RISC-V
- * userspace already has real readdir()/open()/read()/close() syscalls
- * (same ones axsh.c's `ls`/`cat` already use). The only genuinely new
- * code is the UI: window.h's window_println() doesn't scroll or wrap
- * text and gives no per-row Y control for click hit-testing, so the
- * list/preview renderers here are hand-rolled via gfx_fill_rect()/
+ * userspace already has real readdir()/open()/read()/close()/unlink()
+ * syscalls (same ones axsh.c's `ls`/`cat`/`rm` already use, and unlike
+ * x86 there's no read-only lock to unset either). The only genuinely
+ * new code is the UI: window.h's window_println() doesn't scroll or
+ * wrap text and gives no per-row Y control for click hit-testing, so
+ * the list/preview renderers here are hand-rolled via gfx_fill_rect()/
  * gfx_draw_text() directly, same as x86's own render_files_list()/
  * render_files_preview(). */
 
@@ -21,6 +24,7 @@ static unsigned int files_sizes[FILES_MAX];
 static int files_count;
 static int files_scroll;
 static int files_preview_mode;   /* 0=list, 1=preview */
+static int files_confirm_delete; /* showing "Delete FOO.BIN? [Yes] [No]" for files_preview_name */
 
 #define FILES_PREVIEW_MAX 4096   /* well under sys_open's own 32KB (8-page) cap */
 static char files_preview_name[13];
@@ -149,6 +153,10 @@ static void render_files_preview(const window_t *win) {
 
     gfx_draw_text(back_x, back_y, "[< Back]", gfx_rgb(255, 255, 0));
     gfx_draw_text(back_x + 9*ROW_H, back_y, files_preview_name, gfx_rgb(255, 255, 255));
+    /* "[Delete]" is the same 8-char width as "[< Back]" - right-align
+     * it in the same header row, same reasoning files_layout() already
+     * uses for the list view's [^]/[v] buttons. */
+    gfx_draw_text(win->x + win->w - FILES_PAD - 8*ROW_H, back_y, "[Delete]", gfx_rgb(255, 80, 80));
     gfx_fill_rect(win->x + FILES_PAD, text_y0 - 4, win->w - 2*FILES_PAD, 1, gfx_rgb(120, 120, 120));
 
     /* Walk the raw buffer once per render (only called on real state
@@ -193,9 +201,39 @@ static void render_files_preview(const window_t *win) {
         gfx_draw_text(win->x + FILES_PAD, text_y0 + (unsigned int)drawn*ROW_H, "(truncated)", gfx_rgb(255, 255, 0));
 }
 
+/* Delete-confirm geometry - shared with handle_content_click()'s
+ * [Yes]/[No] hit-test, same reasoning as files_layout()/
+ * files_preview_layout(). */
+static void files_confirm_layout(const window_t *win, unsigned int *yes_x,
+                                 unsigned int *no_x, unsigned int *btn_y) {
+    *yes_x = win->x + FILES_PAD;
+    *no_x  = *yes_x + 6*ROW_H + 16;
+    *btn_y = win->content_y + FILES_PAD + ROW_H + 10;
+}
+
+static void render_files_confirm_delete(const window_t *win) {
+    gfx_fill_rect(win->x + 2, win->content_y, win->w - 4, win->content_h, win->bg);
+
+    unsigned int yes_x, no_x, btn_y;
+    files_confirm_layout(win, &yes_x, &no_x, &btn_y);
+
+    char msg[13 + 10];
+    int p = 0;
+    const char *pre = "Delete ";
+    while (pre[p]) { msg[p] = pre[p]; p++; }
+    for (int i = 0; files_preview_name[i] && p < (int)sizeof(msg) - 2; i++) msg[p++] = files_preview_name[i];
+    msg[p++] = '?';
+    msg[p] = '\0';
+    gfx_draw_text(win->x + FILES_PAD, win->content_y + FILES_PAD, msg, gfx_rgb(255, 255, 0));
+
+    gfx_draw_text(yes_x, btn_y, "[Yes]", gfx_rgb(255, 80, 80));
+    gfx_draw_text(no_x,  btn_y, "[No]",  gfx_rgb(255, 255, 255));
+}
+
 static void render_files(const window_t *win) {
-    if (files_preview_mode) render_files_preview(win);
-    else                    render_files_list(win);
+    if (files_confirm_delete)     render_files_confirm_delete(win);
+    else if (files_preview_mode)  render_files_preview(win);
+    else                          render_files_list(win);
 }
 
 /* 1 if (mx,my) falls inside this window's own content area - each
@@ -209,6 +247,25 @@ static int in_content(const window_t *win, unsigned int mx, unsigned int my) {
 
 /* Returns 1 if the click changed something worth re-rendering. */
 static int handle_content_click(const window_t *win, unsigned int mx, unsigned int my) {
+    if (files_confirm_delete) {
+        unsigned int yes_x, no_x, btn_y;
+        files_confirm_layout(win, &yes_x, &no_x, &btn_y);
+        if (my >= btn_y && my < btn_y + ROW_H) {
+            if (mx >= yes_x && mx < yes_x + 5*ROW_H) {
+                unlink(files_preview_name);
+                files_scan();   /* refresh from disk - the deleted file must actually disappear */
+                files_confirm_delete = 0;
+                files_preview_mode = 0;
+                return 1;
+            }
+            if (mx >= no_x && mx < no_x + 4*ROW_H) {
+                files_confirm_delete = 0;
+                return 1;
+            }
+        }
+        return 0;
+    }
+
     if (files_preview_mode) {
         unsigned int back_x, back_y, text_y0;
         int visible_rows, max_cols;
@@ -216,6 +273,12 @@ static int handle_content_click(const window_t *win, unsigned int mx, unsigned i
         if (mx >= back_x && mx < back_x + 8*ROW_H &&
             my >= back_y && my < back_y + ROW_H) {
             files_preview_mode = 0;
+            return 1;
+        }
+        unsigned int del_x = win->x + win->w - FILES_PAD - 8*ROW_H;
+        if (mx >= del_x && mx < del_x + 8*ROW_H &&
+            my >= back_y && my < back_y + ROW_H) {
+            files_confirm_delete = 1;
             return 1;
         }
         return 0;
