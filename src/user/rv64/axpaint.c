@@ -8,14 +8,16 @@
  * kernel_cursor_render() in src/arch/riscv64/syscall.c) - this app no
  * longer needs to manage it.
  *
- * Top strip = palette (click a swatch to select color) + [Save]/[Load]
- * buttons on the right. Rest of the screen = canvas. Hold left button to
- * paint, right to clear. Meant to run in the background
+ * Top strip = palette (click a swatch to select color) + [S:n]/[Save]/
+ * [Load] buttons on the right. Rest of the screen = canvas. Hold left
+ * button to paint, right to clear. Meant to run in the background
  * (`run AXPAINT.ELF &`); stop it with `kill <pid>` from AxSH.
  *
+ * [S:n] cycles the save slot 1-8 (PAINT1.BMP..PAINT8.BMP - 8 slots so
+ * several drawings can coexist instead of one shared CANVAS.BMP).
  * [Save]/[Load] (click, or 's'/'l' on a virtio-keyboard - both call the
  * same do_save()/do_load()) save/load a small THUMBNAIL snapshot of the
- * canvas as CANVAS.BMP - not the full-resolution drawing. sys_open()
+ * CURRENT slot's canvas - not the full-resolution drawing. sys_open()
  * deliberately caps any file read at 32KB (see bmp.h's bmp_load_indexed
  * comment); a full-resolution 800x564 canvas is ~441KB, nowhere close,
  * so this saves/loads at THUMB_SCALE:1 instead. */
@@ -30,6 +32,17 @@ static const unsigned int NUM_COLORS = 6;
 static unsigned int palette[6];
 static unsigned int save_palette[7];        /* [0]=background/black, [1..6]=palette[0..5] */
 static unsigned char thumb_idx[256 * 256];  /* generous fixed cap; actual w/h computed at runtime */
+
+/* Multiple save slots (PAINT1.BMP..PAINT8.BMP) - 8 to match AI.WTS's
+ * own BANK_SIZE convention, single digit keeps the 8.3 filename trivial. */
+#define PAINT_SLOTS 8
+static int paint_slot = 1;
+
+static void paint_slot_filename(char *out) {
+    out[0]='P'; out[1]='A'; out[2]='I'; out[3]='N'; out[4]='T';
+    out[5] = (char)('0' + paint_slot);
+    out[6]='.'; out[7]='B'; out[8]='M'; out[9]='P'; out[10]='\0';
+}
 
 static unsigned char color_to_index(unsigned int c) {
     for (unsigned char i = 0; i < 7; i++) if (save_palette[i] == c) return i;
@@ -54,21 +67,36 @@ static void do_save(unsigned int w, unsigned int h) {
         for (unsigned int tx = 0; tx < tw; tx++)
             thumb_idx[ty * tw + tx] =
                 color_to_index(gfx_getpixel(tx * THUMB_SCALE, TOOLBAR_H + ty * THUMB_SCALE));
-    int ok = bmp_save_indexed("CANVAS.BMP", thumb_idx, tw, th, save_palette, 7);
+    char fname[11];
+    paint_slot_filename(fname);
+    int ok = bmp_save_indexed(fname, thumb_idx, tw, th, save_palette, 7);
     /* gfx_draw_text() only sets "on" glyph pixels, it never clears
      * behind itself - must blank the strip first or this overlaps
      * whatever text (the original hint, or an earlier status message)
      * was already there instead of replacing it. */
     gfx_fill_rect(0, TOOLBAR_H, w, 16, gfx_rgb(0, 0, 0));
-    gfx_draw_text(4, TOOLBAR_H + 4, ok ? "Saved: CANVAS.BMP (thumbnail)" : "Save failed",
-                 gfx_rgb(255, 255, 0));
+    if (ok) {
+        char msg[40];
+        const char *prefix = "Saved: ";
+        int p = 0;
+        for (int i = 0; prefix[i]; i++) msg[p++] = prefix[i];
+        for (int i = 0; fname[i]; i++) msg[p++] = fname[i];
+        const char *suffix = " (thumbnail)";
+        for (int i = 0; suffix[i]; i++) msg[p++] = suffix[i];
+        msg[p] = '\0';
+        gfx_draw_text(4, TOOLBAR_H + 4, msg, gfx_rgb(255, 255, 0));
+    } else {
+        gfx_draw_text(4, TOOLBAR_H + 4, "Save failed", gfx_rgb(255, 255, 0));
+    }
 }
 
 static void do_load(unsigned int w, unsigned int h) {
     unsigned int tw = w / THUMB_SCALE, th = (h - TOOLBAR_H) / THUMB_SCALE;
     unsigned int pal[8];
     unsigned char n;
-    if (!bmp_load_indexed("CANVAS.BMP", thumb_idx, tw, th, pal, &n)) {
+    char fname[11];
+    paint_slot_filename(fname);
+    if (!bmp_load_indexed(fname, thumb_idx, tw, th, pal, &n)) {
         gfx_fill_rect(0, TOOLBAR_H, w, 16, gfx_rgb(0, 0, 0));
         gfx_draw_text(4, TOOLBAR_H + 4, "No saved file", gfx_rgb(255, 80, 80));
         return;
@@ -80,7 +108,15 @@ static void do_load(unsigned int w, unsigned int h) {
     /* Status line sits just below TOOLBAR_H, inside the canvas area
      * that the load loop above already repainted - draw straight over
      * the freshly-loaded pixels there, no separate clear needed. */
-    gfx_draw_text(4, TOOLBAR_H + 4, "Loaded: CANVAS.BMP (thumbnail)", gfx_rgb(0, 255, 120));
+    char msg[40];
+    const char *prefix = "Loaded: ";
+    int p = 0;
+    for (int i = 0; prefix[i]; i++) msg[p++] = prefix[i];
+    for (int i = 0; fname[i]; i++) msg[p++] = fname[i];
+    const char *suffix = " (thumbnail)";
+    for (int i = 0; suffix[i]; i++) msg[p++] = suffix[i];
+    msg[p] = '\0';
+    gfx_draw_text(4, TOOLBAR_H + 4, msg, gfx_rgb(0, 255, 120));
 }
 
 /* [Save]/[Load] hit-boxes - plain bracketed text buttons, same style as
@@ -91,9 +127,10 @@ static void do_load(unsigned int w, unsigned int h) {
  * it's hardcoded here rather than included across the syscall boundary. */
 #define BTN_CHAR_W  16
 #define BTN_W       (6 * BTN_CHAR_W)   /* "[Save]"/"[Load]" = 6 chars */
+#define SLOT_W      (5 * BTN_CHAR_W)   /* "[S:n]" = 5 chars, n is a single digit */
 #define BTN_GAP     8
 #define BTN_MARGIN  12
-#define BUTTONS_W   (BTN_W*2 + BTN_GAP + BTN_MARGIN)
+#define BUTTONS_W   (SLOT_W + BTN_GAP + BTN_W*2 + BTN_GAP + BTN_MARGIN)
 #define BTN_Y       ((TOOLBAR_H - BTN_CHAR_W) / 2)
 
 /* Redraws one swatch button - shadowed rounded card, white border if it's
@@ -115,8 +152,12 @@ static void draw_swatch(unsigned int w, unsigned int idx, int selected) {
 
 static unsigned int btn_load_x(unsigned int w) { return w - BTN_MARGIN - BTN_W; }
 static unsigned int btn_save_x(unsigned int w) { return btn_load_x(w) - BTN_GAP - BTN_W; }
+static unsigned int btn_slot_x(unsigned int w) { return btn_save_x(w) - BTN_GAP - SLOT_W; }
 
 static void draw_buttons(unsigned int w) {
+    char slot_label[6] = "[S:n]";
+    slot_label[3] = (char)('0' + paint_slot);
+    gfx_draw_text(btn_slot_x(w), BTN_Y, slot_label, gfx_rgb(255, 255, 255));
     gfx_draw_text(btn_save_x(w), BTN_Y, "[Save]", gfx_rgb(255, 255, 255));
     gfx_draw_text(btn_load_x(w), BTN_Y, "[Load]", gfx_rgb(255, 255, 255));
 }
@@ -166,11 +207,28 @@ int main(void) {
 
         if (buttons & 1) {                       /* left button: draw */
             if (my < TOOLBAR_H) {
-                unsigned int sx = btn_save_x(w), lx = btn_load_x(w);
+                unsigned int sx = btn_save_x(w), lx = btn_load_x(w), slx = btn_slot_x(w);
                 int on_save = mx >= sx && mx < sx+BTN_W && my >= BTN_Y && my < BTN_Y+BTN_CHAR_W;
                 int on_load = mx >= lx && mx < lx+BTN_W && my >= BTN_Y && my < BTN_Y+BTN_CHAR_W;
+                int on_slot = mx >= slx && mx < slx+SLOT_W && my >= BTN_Y && my < BTN_Y+BTN_CHAR_W;
                 int edge = !(prev_buttons & 1);   /* fire once per press, not every ~20ms while held - avoids spamming disk writes */
-                if (on_save) {
+                if (on_slot) {
+                    if (edge) {
+                        paint_slot = paint_slot % PAINT_SLOTS + 1;
+                        char slot_label[6] = "[S:n]";
+                        slot_label[3] = (char)('0' + paint_slot);
+                        gfx_fill_rect(slx, BTN_Y, SLOT_W, BTN_CHAR_W, gfx_rgb(20, 20, 35));
+                        gfx_draw_text(slx, BTN_Y, slot_label, gfx_rgb(255, 255, 255));
+                        gfx_fill_rect(0, TOOLBAR_H, w, 16, gfx_rgb(0, 0, 0));
+                        char msg[8];
+                        const char *smsg = "Slot: ";
+                        int sp = 0;
+                        for (int i = 0; smsg[i]; i++) msg[sp++] = smsg[i];
+                        msg[sp++] = (char)('0' + paint_slot);
+                        msg[sp] = '\0';
+                        gfx_draw_text(4, TOOLBAR_H + 4, msg, gfx_rgb(255, 255, 0));
+                    }
+                } else if (on_save) {
                     if (edge) do_save(w, h);
                 } else if (on_load) {
                     if (edge) do_load(w, h);

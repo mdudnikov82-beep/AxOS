@@ -1140,6 +1140,15 @@ static int swatch_x(int i) { return SWATCH_X0 + i*(SWATCH_SZ+SWATCH_GAP); }
 #define SAVE_X        (LOAD_X - BTN_GAP - SAVE_W)
 #define SAVE_Y        CLEAR_Y
 
+/* "SLOT n" - cycles the save-slot (1-8, see paint_slot below) on click.
+ * Label is dynamic (n changes), built into a small buffer each render -
+ * width computed off the fixed "SLOT n" length (6 chars) since n is
+ * always exactly one digit. */
+#define SLOT_LABEL_LEN 6   /* "SLOT n" */
+#define SLOT_W        (SLOT_LABEL_LEN*CHAR_W)
+#define SLOT_X        (SAVE_X - BTN_GAP - SLOT_W)
+#define SLOT_Y        CLEAR_Y
+
 static void canvas_clear(void) {
     unsigned int *c = PAINT_CANVAS;
     for (int i = 0; i < SW*PAINT_CANVAS_H; i++) c[i] = C_WHITE;
@@ -1205,6 +1214,17 @@ static void paint_status_set(const char *s) {
     paint_status_timer = 90;   /* a few seconds at this GUI's frame rate */
 }
 
+/* Multiple save slots (PAINT1.BMP..PAINT8.BMP) - 8 to match AI.WTS's
+ * own BANK_SIZE convention, single digit keeps the 8.3 filename trivial. */
+#define PAINT_SLOTS 8
+static int paint_slot = 1;
+
+static void paint_slot_filename(char *out) {
+    out[0]='P'; out[1]='A'; out[2]='I'; out[3]='N'; out[4]='T';
+    out[5] = (char)('0' + paint_slot);
+    out[6]='.'; out[7]='B'; out[8]='M'; out[9]='P'; out[10]='\0';
+}
+
 static void bmp_wr32(unsigned char *p, unsigned int v) {
     p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
     p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
@@ -1244,12 +1264,26 @@ static void paint_save(void) {
         }
     }
 
-    int ok = fat12_write("CANVAS.BMP", save_buf, SAVE_BUF_SIZE);
-    paint_status_set(ok ? "Saved: CANVAS.BMP" : "Save failed");
+    char fname[11];
+    paint_slot_filename(fname);
+    int ok = fat12_write(fname, save_buf, SAVE_BUF_SIZE);
+    if (ok) {
+        char msg[24];
+        const char *prefix = "Saved: ";
+        int p = 0;
+        while (prefix[p]) { msg[p] = prefix[p]; p++; }
+        for (int i = 0; fname[i]; i++) msg[p++] = fname[i];
+        msg[p] = '\0';
+        paint_status_set(msg);
+    } else {
+        paint_status_set("Save failed");
+    }
 }
 
 static void paint_load(void) {
-    unsigned int n = fat12_load("CANVAS.BMP", save_buf, SAVE_BUF_SIZE);
+    char fname[11];
+    paint_slot_filename(fname);
+    unsigned int n = fat12_load(fname, save_buf, SAVE_BUF_SIZE);
     if (n < 54 || save_buf[0] != 'B' || save_buf[1] != 'M') {
         paint_status_set("No saved file");
         return;
@@ -1292,7 +1326,15 @@ static void paint_load(void) {
         }
         pos += row_bytes;
     }
-    paint_status_set("Loaded: CANVAS.BMP");
+    {
+        char msg[24];
+        const char *prefix = "Loaded: ";
+        int p = 0;
+        while (prefix[p]) { msg[p] = prefix[p]; p++; }
+        for (int i = 0; fname[i]; i++) msg[p++] = fname[i];
+        msg[p] = '\0';
+        paint_status_set(msg);
+    }
 }
 
 static void render_paint(void) {
@@ -1332,6 +1374,11 @@ static void render_paint(void) {
         }
     }
 
+    {
+        char slot_label[SLOT_LABEL_LEN+1] = "SLOT n";
+        slot_label[5] = (char)('0' + paint_slot);
+        text(SLOT_X, SLOT_Y, slot_label, C_WHITE);
+    }
     text(SAVE_X, SAVE_Y, SAVE_LABEL, C_WHITE);
     text(LOAD_X, LOAD_Y, LOAD_LABEL, C_WHITE);
     text(CLEAR_X, CLEAR_Y, CLEAR_LABEL, C_WHITE);
@@ -1501,6 +1548,14 @@ static void handle_click(int mx, int my) {
             if (mx >= CLEAR_X && mx < CLEAR_X+CLEAR_W &&
                 my >= CLEAR_Y && my < CLEAR_Y+CHAR_W) {
                 canvas_clear();
+            }
+            if (mx >= SLOT_X && mx < SLOT_X+SLOT_W &&
+                my >= SLOT_Y && my < SLOT_Y+CHAR_W) {
+                paint_slot = paint_slot % PAINT_SLOTS + 1;
+                char msg[16] = "Slot: n";
+                msg[6] = (char)('0' + paint_slot);
+                msg[7] = '\0';
+                paint_status_set(msg);
             }
             if (mx >= SAVE_X && mx < SAVE_X+SAVE_W &&
                 my >= SAVE_Y && my < SAVE_Y+CHAR_W) {
