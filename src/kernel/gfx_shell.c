@@ -605,18 +605,21 @@ static void win_content_rect(int idx, int *cx0, int *cy0, int *cw, int *ch) {
 }
 
 /* ── Paint state ──────────────────────────────────────────────────────
- * Draw-only (no save/load) - unrelated to AxFiles' read-only disk
- * access below (fat12_shell.o + ide_read_sector()); adding a save path
- * here would still need fat12_write, which is compiled out of this
- * image (FAT12_NO_WRITE, see build.bat) to avoid pulling in the main
- * kernel's print_string/print_uint at link time - out of scope for
- * this round. Canvas lives in its own fixed-address buffer, NOT in BACKBUF -
+ * Canvas lives in its own fixed-address buffer, NOT in BACKBUF -
  * BACKBUF gets fully overwritten every frame by whichever screen's
  * render function runs (this file has no dirty-rect/partial-redraw
  * concept), so painted pixels can't persist there across frames. Address
  * chosen clear of BACKBUF's own range (0x200000..~0x3D4C00) - same
  * "fixed address, not .bss" reasoning as BACKBUF itself: nothing else in
- * this standalone image ever touches it. */
+ * this standalone image ever touches it.
+ *
+ * Save/Load (see paint_save()/paint_load() below, near render_paint()):
+ * writes/reads a downscaled 24bpp BMP snapshot, "CANVAS.BMP", via
+ * fat12_write()/fat12_load() - same disk fat12_shell.o already reads
+ * for AxFiles. Downscaled (SAVE_SCALE, mirrors RISC-V AxPaint's own
+ * THUMB_SCALE=5) rather than full-resolution to keep the encode buffer
+ * a small .bss static instead of ~1.2MB - matches the RISC-V side's own
+ * tradeoff and its documented reasoning (see axpaint.c). */
 #define PAINT_TOOLBAR_H 36
 #define PAINT_CANVAS_H  (AREA_H - PAINT_TOOLBAR_H)
 #define PAINT_CANVAS ((unsigned int *)0x400000)
@@ -866,10 +869,12 @@ static void render_about(int cx0, int cy0, int cw, int ch) {
  * File manager window: lists FAT12 root-directory files
  * (fat12_readdir), previews one file's raw content as text
  * (fat12_load), and can delete a file (fat12_delete, with a confirm
- * step) - no rename/edit/write-new-content, that's still out of scope
- * (see FAT12_NO_WRITE in build.bat's Graphical Shell section, which
- * still compiles fat12_write/mkdir/list/cat out of fat12_shell.o;
- * fat12_delete itself is NOT under that guard, see src/fs/fat12.c). */
+ * step) - no rename/edit/create-arbitrary-content, that's still out of
+ * scope (see FAT12_NO_WRITE in build.bat's Graphical Shell section,
+ * which still compiles fat12_mkdir/list/cat out of fat12_shell.o;
+ * fat12_delete and fat12_write are NOT under that guard, see
+ * src/fs/fat12.c - fat12_write is what AxPaint's Save button uses,
+ * see the Paint section below). */
 #define FILES_MAX 64   /* FAT12 root-directory entry cap, see make_fat12.py */
 static int  fat12_ok;
 static int  files_count;
@@ -1116,11 +1121,24 @@ static void render_window_chrome(int idx, const char *title) {
 #define SWATCH_Y   (AREA_Y + (PAINT_TOOLBAR_H - SWATCH_SZ)/2)
 static int swatch_x(int i) { return SWATCH_X0 + i*(SWATCH_SZ+SWATCH_GAP); }
 
-/* CLEAR button hit-box - right-aligned text in the toolbar strip. */
+/* CLEAR/LOAD/SAVE button hit-boxes - right-aligned text in the toolbar
+ * strip, SAVE/LOAD/CLEAR left-to-right, each BTN_GAP apart. Plenty of
+ * room: swatches end at x=184 (SWATCH_X0 + 6*(SWATCH_SZ+SWATCH_GAP)),
+ * CLEAR starts at x=704 - over 500px of empty toolbar between them. */
 #define CLEAR_LABEL   "CLEAR"
 #define CLEAR_W       (5*CHAR_W)
 #define CLEAR_X       (SW - 16 - CLEAR_W)
 #define CLEAR_Y       (AREA_Y + (PAINT_TOOLBAR_H - CHAR_W)/2)
+
+#define BTN_GAP       16
+#define LOAD_LABEL    "LOAD"
+#define LOAD_W        (4*CHAR_W)
+#define LOAD_X        (CLEAR_X - BTN_GAP - LOAD_W)
+#define LOAD_Y        CLEAR_Y
+#define SAVE_LABEL    "SAVE"
+#define SAVE_W        (4*CHAR_W)
+#define SAVE_X        (LOAD_X - BTN_GAP - SAVE_W)
+#define SAVE_Y        CLEAR_Y
 
 static void canvas_clear(void) {
     unsigned int *c = PAINT_CANVAS;
@@ -1161,6 +1179,122 @@ static void canvas_paint_line(int x0, int y0, int x1, int y1, color_t c) {
     }
 }
 
+/* ── Paint save/load (CANVAS.BMP) ───────────────────────────────────
+ * 24bpp, uncompressed, bottom-up - same BITMAPFILEHEADER+BITMAPINFOHEADER
+ * layout bmp_decode() (bmp.h) already reads, so this file is also
+ * openable by anything that understands standard BMP. Downscaled by
+ * SAVE_SCALE (nearest-pixel sample on save, block-replicate on load) -
+ * see the Paint state comment above for why. Decoded straight into
+ * PAINT_CANVAS rather than through bmp_image_t (bmp.h) - that struct's
+ * BMP_MAX_W/H=64 cap is sized for icons, too small for this thumbnail. */
+#define SAVE_SCALE      5
+#define SAVE_THUMB_W    (SW / SAVE_SCALE)                          /* 160 */
+#define SAVE_THUMB_H    (PAINT_CANVAS_H / SAVE_SCALE)               /* 103 */
+#define SAVE_ROW_BYTES  (((SAVE_THUMB_W * 3u) + 3u) & ~3u)          /* 4-byte row alignment */
+#define SAVE_IMG_BYTES  (SAVE_ROW_BYTES * (unsigned int)SAVE_THUMB_H)
+#define SAVE_BUF_SIZE   (54u + SAVE_IMG_BYTES)                      /* ~48KB */
+
+static unsigned char save_buf[SAVE_BUF_SIZE];
+static char paint_status[40];
+static int  paint_status_timer = 0;   /* frames left to show paint_status, decremented in render_paint() */
+
+static void paint_status_set(const char *s) {
+    int i = 0;
+    while (s[i] && i < (int)sizeof(paint_status) - 1) { paint_status[i] = s[i]; i++; }
+    paint_status[i] = '\0';
+    paint_status_timer = 90;   /* a few seconds at this GUI's frame rate */
+}
+
+static void bmp_wr32(unsigned char *p, unsigned int v) {
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+static void bmp_wr16(unsigned char *p, unsigned short v) {
+    p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
+}
+
+static void paint_save(void) {
+    unsigned char *b = save_buf;
+    b[0] = 'B'; b[1] = 'M';
+    bmp_wr32(b + 2,  SAVE_BUF_SIZE);          // bfSize
+    bmp_wr32(b + 6,  0);                      // reserved
+    bmp_wr32(b + 10, 54);                     // bfOffBits
+    bmp_wr32(b + 14, 40);                     // biSize (BITMAPINFOHEADER)
+    bmp_wr32(b + 18, (unsigned int)SAVE_THUMB_W);
+    bmp_wr32(b + 22, (unsigned int)SAVE_THUMB_H);   // positive => bottom-up
+    bmp_wr16(b + 26, 1);                      // biPlanes
+    bmp_wr16(b + 28, 24);                     // biBitCount
+    bmp_wr32(b + 30, 0);                      // biCompression = BI_RGB
+    bmp_wr32(b + 34, SAVE_IMG_BYTES);
+    bmp_wr32(b + 38, 0);
+    bmp_wr32(b + 42, 0);
+    bmp_wr32(b + 46, 0);
+    bmp_wr32(b + 50, 0);
+
+    for (int ty = 0; ty < SAVE_THUMB_H; ty++) {
+        int src_y = ty * SAVE_SCALE;
+        int dst_row = SAVE_THUMB_H - 1 - ty;   // bottom-up storage
+        unsigned char *row = b + 54 + (unsigned int)dst_row * SAVE_ROW_BYTES;
+        for (int tx = 0; tx < SAVE_THUMB_W; tx++) {
+            int src_x = tx * SAVE_SCALE;
+            color_t c = PAINT_CANVAS[src_y * SW + src_x];
+            row[tx*3 + 0] = (unsigned char)(c & 0xFF);          // B
+            row[tx*3 + 1] = (unsigned char)((c >> 8) & 0xFF);   // G
+            row[tx*3 + 2] = (unsigned char)((c >> 16) & 0xFF);  // R
+        }
+    }
+
+    int ok = fat12_write("CANVAS.BMP", save_buf, SAVE_BUF_SIZE);
+    paint_status_set(ok ? "Saved: CANVAS.BMP" : "Save failed");
+}
+
+static void paint_load(void) {
+    unsigned int n = fat12_load("CANVAS.BMP", save_buf, SAVE_BUF_SIZE);
+    if (n < 54 || save_buf[0] != 'B' || save_buf[1] != 'M') {
+        paint_status_set("No saved file");
+        return;
+    }
+
+    unsigned int   data_off    = bmp_rd32(save_buf + 10);
+    unsigned int   dib_size    = bmp_rd32(save_buf + 14);
+    int            width       = (int)bmp_rd32(save_buf + 18);
+    int            height      = (int)bmp_rd32(save_buf + 22);
+    unsigned short bpp         = bmp_rd16(save_buf + 28);
+    unsigned int   compression = bmp_rd32(save_buf + 30);
+
+    if (dib_size < 40 || compression != 0 || bpp != 24 ||
+        width <= 0 || height <= 0 || data_off < 54 || data_off > n) {
+        paint_status_set("Load failed (bad file)");
+        return;
+    }
+
+    unsigned int row_bytes = ((unsigned int)width * 3u + 3u) & ~3u;
+    unsigned int pos = data_off;
+    for (int y = 0; y < height; y++) {
+        if (pos + row_bytes > n) break;
+        int dst_row = height - 1 - y;   // bottom-up source -> top-down canvas
+        for (int x = 0; x < width; x++) {
+            unsigned char pb = save_buf[pos + (unsigned int)x*3 + 0];
+            unsigned char pg = save_buf[pos + (unsigned int)x*3 + 1];
+            unsigned char pr = save_buf[pos + (unsigned int)x*3 + 2];
+            color_t c = ((color_t)pr << 16) | ((color_t)pg << 8) | (color_t)pb;
+
+            int cx0 = x * SAVE_SCALE, cy0 = dst_row * SAVE_SCALE;
+            for (int dy = 0; dy < SAVE_SCALE; dy++) {
+                int cy = cy0 + dy;
+                if ((unsigned)cy >= (unsigned)PAINT_CANVAS_H) continue;
+                for (int dx = 0; dx < SAVE_SCALE; dx++) {
+                    int cx = cx0 + dx;
+                    if ((unsigned)cx >= (unsigned)SW) continue;
+                    PAINT_CANVAS[cy*SW + cx] = c;
+                }
+            }
+        }
+        pos += row_bytes;
+    }
+    paint_status_set("Loaded: CANVAS.BMP");
+}
+
 static void render_paint(void) {
     if (!paint_ready) { canvas_clear(); paint_ready = 1; }
 
@@ -1198,7 +1332,14 @@ static void render_paint(void) {
         }
     }
 
+    text(SAVE_X, SAVE_Y, SAVE_LABEL, C_WHITE);
+    text(LOAD_X, LOAD_Y, LOAD_LABEL, C_WHITE);
     text(CLEAR_X, CLEAR_Y, CLEAR_LABEL, C_WHITE);
+
+    if (paint_status_timer > 0) {
+        text(4, cy0+4, paint_status, C_YELLOW);
+        paint_status_timer--;
+    }
 
     draw_taskbar("Paint  (right-click=clear, ESC=exit)");
 }
@@ -1360,6 +1501,14 @@ static void handle_click(int mx, int my) {
             if (mx >= CLEAR_X && mx < CLEAR_X+CLEAR_W &&
                 my >= CLEAR_Y && my < CLEAR_Y+CHAR_W) {
                 canvas_clear();
+            }
+            if (mx >= SAVE_X && mx < SAVE_X+SAVE_W &&
+                my >= SAVE_Y && my < SAVE_Y+CHAR_W) {
+                paint_save();
+            }
+            if (mx >= LOAD_X && mx < LOAD_X+LOAD_W &&
+                my >= LOAD_Y && my < LOAD_Y+CHAR_W) {
+                paint_load();
             }
         }
     }

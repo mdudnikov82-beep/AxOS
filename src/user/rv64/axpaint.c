@@ -8,12 +8,13 @@
  * kernel_cursor_render() in src/arch/riscv64/syscall.c) - this app no
  * longer needs to manage it.
  *
- * Top strip = palette (click a swatch to select color).
- * Rest of the screen = canvas. Hold left button to paint, right to clear.
- * Meant to run in the background (`run AXPAINT.ELF &`); stop it with
- * `kill <pid>` from AxSH.
+ * Top strip = palette (click a swatch to select color) + [Save]/[Load]
+ * buttons on the right. Rest of the screen = canvas. Hold left button to
+ * paint, right to clear. Meant to run in the background
+ * (`run AXPAINT.ELF &`); stop it with `kill <pid>` from AxSH.
  *
- * 's'/'l' (virtio-keyboard) save/load a small THUMBNAIL snapshot of the
+ * [Save]/[Load] (click, or 's'/'l' on a virtio-keyboard - both call the
+ * same do_save()/do_load()) save/load a small THUMBNAIL snapshot of the
  * canvas as CANVAS.BMP - not the full-resolution drawing. sys_open()
  * deliberately caps any file read at 32KB (see bmp.h's bmp_load_indexed
  * comment); a full-resolution 800x564 canvas is ~441KB, nowhere close,
@@ -82,18 +83,42 @@ static void do_load(unsigned int w, unsigned int h) {
     gfx_draw_text(4, TOOLBAR_H + 4, "Loaded: CANVAS.BMP (thumbnail)", gfx_rgb(0, 255, 120));
 }
 
+/* [Save]/[Load] hit-boxes - plain bracketed text buttons, same style as
+ * AxFiles' [Delete]/[< Back] (axfiles.c) rather than the swatches' own
+ * rounded-card look, since this is a one-off action button pair, not a
+ * palette. BTN_CHAR_W=16 matches virtio_gpu.h's GFX_FONT_SCALE=2 (8*2)
+ * - that constant itself is kernel-side, not visible to userspace, so
+ * it's hardcoded here rather than included across the syscall boundary. */
+#define BTN_CHAR_W  16
+#define BTN_W       (6 * BTN_CHAR_W)   /* "[Save]"/"[Load]" = 6 chars */
+#define BTN_GAP     8
+#define BTN_MARGIN  12
+#define BUTTONS_W   (BTN_W*2 + BTN_GAP + BTN_MARGIN)
+#define BTN_Y       ((TOOLBAR_H - BTN_CHAR_W) / 2)
+
 /* Redraws one swatch button - shadowed rounded card, white border if it's
  * the selected color, black otherwise. Canvas itself stays flat black on
  * purpose (unlike the desktop's gradient wallpaper): a paint surface
- * should read as neutral, not tint whatever the user draws on it. */
+ * should read as neutral, not tint whatever the user draws on it.
+ * Swatches only span (w - BUTTONS_W) now, leaving room on the right for
+ * the [Save]/[Load] buttons below - matches x86 AxPaint's own layout
+ * (swatches left, action buttons right-aligned). */
 static void draw_swatch(unsigned int w, unsigned int idx, int selected) {
-    unsigned int swatch_w = w / NUM_COLORS;
+    unsigned int swatch_w = (w - BUTTONS_W) / NUM_COLORS;
     int x = (int)(idx * swatch_w) + SWATCH_GAP / 2;
     int sw = (int)swatch_w - SWATCH_GAP;
     int y = SWATCH_GAP / 2, sh = TOOLBAR_H - SWATCH_GAP;
     unsigned int border = selected ? gfx_rgb(255, 255, 255) : gfx_rgb(0, 0, 0);
     ui_shadow(x, y, sw, sh, 3, 90);
     ui_round_rect(x, y, sw, sh, SWATCH_R, border, palette[idx]);
+}
+
+static unsigned int btn_load_x(unsigned int w) { return w - BTN_MARGIN - BTN_W; }
+static unsigned int btn_save_x(unsigned int w) { return btn_load_x(w) - BTN_GAP - BTN_W; }
+
+static void draw_buttons(unsigned int w) {
+    gfx_draw_text(btn_save_x(w), BTN_Y, "[Save]", gfx_rgb(255, 255, 255));
+    gfx_draw_text(btn_load_x(w), BTN_Y, "[Load]", gfx_rgb(255, 255, 255));
 }
 
 int main(void) {
@@ -118,19 +143,20 @@ int main(void) {
     save_palette[5] = palette[4];
     save_palette[6] = palette[5];
 
-    unsigned int swatch_w = w / NUM_COLORS;
+    unsigned int swatch_w = (w - BUTTONS_W) / NUM_COLORS;
 
     ui_vgrad(0, 0, w, TOOLBAR_H, gfx_rgb(50, 50, 70), gfx_rgb(20, 20, 35));
     unsigned int cur_idx = 0;
     for (unsigned int i = 0; i < NUM_COLORS; i++)
         draw_swatch(w, i, i == cur_idx);
+    draw_buttons(w);
     gfx_fill_rect(0, TOOLBAR_H, w, h - TOOLBAR_H, gfx_rgb(0, 0, 0));
     gfx_draw_text(4, TOOLBAR_H + 4, "Left=draw  Right=clear",
                  gfx_rgb(180, 180, 180));
     gfx_flush();
 
     unsigned int cur_color = palette[0];
-    unsigned int mx = 0, my = 0, buttons = 0;
+    unsigned int mx = 0, my = 0, buttons = 0, prev_buttons = 0;
 
     for (;;) {
         if (!mouse_state(&mx, &my, &buttons)) {
@@ -140,14 +166,24 @@ int main(void) {
 
         if (buttons & 1) {                       /* left button: draw */
             if (my < TOOLBAR_H) {
-                unsigned int idx = mx / swatch_w;
-                if (idx >= NUM_COLORS) idx = NUM_COLORS - 1;
-                if (idx != cur_idx) {
-                    unsigned int prev = cur_idx;
-                    cur_idx = idx;
-                    cur_color = palette[idx];
-                    draw_swatch(w, prev, 0);   /* drop the old highlight */
-                    draw_swatch(w, idx, 1);    /* show the new one */
+                unsigned int sx = btn_save_x(w), lx = btn_load_x(w);
+                int on_save = mx >= sx && mx < sx+BTN_W && my >= BTN_Y && my < BTN_Y+BTN_CHAR_W;
+                int on_load = mx >= lx && mx < lx+BTN_W && my >= BTN_Y && my < BTN_Y+BTN_CHAR_W;
+                int edge = !(prev_buttons & 1);   /* fire once per press, not every ~20ms while held - avoids spamming disk writes */
+                if (on_save) {
+                    if (edge) do_save(w, h);
+                } else if (on_load) {
+                    if (edge) do_load(w, h);
+                } else {
+                    unsigned int idx = mx / swatch_w;
+                    if (idx >= NUM_COLORS) idx = NUM_COLORS - 1;
+                    if (idx != cur_idx) {
+                        unsigned int prev = cur_idx;
+                        cur_idx = idx;
+                        cur_color = palette[idx];
+                        draw_swatch(w, prev, 0);   /* drop the old highlight */
+                        draw_swatch(w, idx, 1);    /* show the new one */
+                    }
                 }
             } else {
                 unsigned int bx = (mx > BRUSH / 2) ? mx - BRUSH / 2 : 0;
@@ -157,6 +193,7 @@ int main(void) {
         } else if (buttons & 2) {                /* right button: clear */
             gfx_fill_rect(0, TOOLBAR_H, w, h - TOOLBAR_H, gfx_rgb(0, 0, 0));
         }
+        prev_buttons = buttons;
 
         int c;
         while ((c = kbd_getc()) >= 0) {

@@ -31,12 +31,13 @@
 #endif
 #define FAT12_TOTAL_SECTORS 4096 // 2 МБ / 512 = TOTAL_SECTORS в make_fat12.py
 
-// FAT12_NO_WRITE отключает только fat12_write/mkdir/list/cat (не delete -
-// AxFiles на gfx_shell.c теперь умеет удалять файлы, см. ide_write_sector
-// там же) - используется сборкой gfx_shell.c (x86 GUI-шелл, -m32), где нет
-// print_string/print_uint (текстовые функции основного ядра, нужны только
-// list/cat). fat12_init/is_ready/readdir/load/delete и их общие хелперы
-// этим макросом не затрагиваются.
+// FAT12_NO_WRITE отключает только fat12_mkdir/list/cat (не write и не
+// delete - AxFiles на gfx_shell.c умеет удалять файлы, AxPaint умеет
+// сохранять холст, см. ide_write_sector там же) - используется сборкой
+// gfx_shell.c (x86 GUI-шелл, -m32), где нет print_string/print_uint
+// (текстовые функции основного ядра, нужны только list/cat).
+// fat12_init/is_ready/readdir/load/write/delete и их общие хелперы этим
+// макросом не затрагиваются.
 #ifndef FAT12_NO_WRITE
 extern void print_string(char* str);
 extern void print_uint(unsigned long val);
@@ -503,7 +504,11 @@ int fat12_delete(char* filename) {
     return 1;
 }
 
-#ifndef FAT12_NO_WRITE
+// Не под FAT12_NO_WRITE - AxPaint (и x86 gfx_shell.c, и RISC-V axpaint.c)
+// умеет сохранять холст в файл, см. paint_save()/paint_load() в
+// gfx_shell.c и do_save()/do_load() в axpaint.c. Сама функция не
+// вызывает print_string/print_uint (та же причина, что уже развязала
+// fat12_delete() выше - см. её комментарий).
 int fat12_write(char* filename, unsigned char* data, unsigned int size) {
     if (!fat12_ready) return 0;
     if (fat12_locked) return 0;
@@ -547,4 +552,3 @@ int fat12_write(char* filename, unsigned char* data, unsigned int size) {
     fat12_flush();
     return 1;
 }
-#endif // FAT12_NO_WRITE
