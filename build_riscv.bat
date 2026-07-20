@@ -539,12 +539,23 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\axfiles_rv64.elf) do echo   axfiles_rv64.elf: %%~zF bytes
 
+echo [U81] ai.c...
+"%CC%" %UFLAGS% -c %USRC%\ai.c -o %OUT%\uai.o
+if %errorlevel% neq 0 goto :error
+
+echo [U82] Linking ai...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\ai_rv64.elf %OUT%\ucrt0.o %OUT%\uai.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\ai_rv64.elf) do echo   ai_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
 if not exist rv64build\fs\rv64 mkdir rv64build\fs\rv64
 copy /b %OUT%\hello_rv64.elf     rv64build\fs\rv64\HELLO.ELF
 copy /b %OUT%\axsh_rv64.elf      rv64build\fs\rv64\AXSH.ELF
+copy /b %OUT%\ai_rv64.elf        rv64build\fs\rv64\AI.ELF
 copy /b %OUT%\counter_rv64.elf   rv64build\fs\rv64\COUNTER.ELF
 copy /b %OUT%\uptime_rv64.elf    rv64build\fs\rv64\UPTIME.ELF
 copy /b %OUT%\fdtest_rv64.elf    rv64build\fs\rv64\FDTEST.ELF
