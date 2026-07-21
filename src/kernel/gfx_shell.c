@@ -487,19 +487,23 @@ static void draw_num2(int x, int y, int v, color_t fg) {
 }
 
 /* ── UI state ─────────────────────────────────────────────────────── */
-typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT, SCR_FILES, SCR_CALC } Screen;
+typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT, SCR_FILES, SCR_CALC, SCR_NOTEPAD } Screen;
 static Screen scr = SCR_DESKTOP;
 
-/* Icon hit-boxes (desktop) */
+/* Icon hit-boxes (desktop). Repacked from a 152px pitch (40px margin,
+ * 40px gap) to 128px (24px margin, 16px gap) when AxNotepad became the
+ * 6th icon - the old pitch had zero room left before hitting SW=800.
+ * Purely a data change: hit-testing is already parametric per-icon. */
 struct icon { int x,y,w,h; Screen dst; const char *label; color_t color; };
 static const struct icon icons[] = {
-    { 40, 60, 112, 96, SCR_TERMINAL, "TERM",  C_BLUE   },
-    { 192, 60, 112, 96, SCR_ABOUT,    "ABOUT", C_MAROON },
-    { 344, 60, 112, 96, SCR_PAINT,    "PAINT", C_DGREEN },
-    { 496, 60, 112, 96, SCR_FILES,    "FILES", C_TEAL   },
-    { 648, 60, 112, 96, SCR_CALC,     "CALC",  C_YELLOW },
+    { 24,  60, 112, 96, SCR_TERMINAL, "TERM",  C_BLUE   },
+    { 152, 60, 112, 96, SCR_ABOUT,    "ABOUT", C_MAROON },
+    { 280, 60, 112, 96, SCR_PAINT,    "PAINT", C_DGREEN },
+    { 408, 60, 112, 96, SCR_FILES,    "FILES", C_TEAL   },
+    { 536, 60, 112, 96, SCR_CALC,     "CALC",  C_YELLOW },
+    { 664, 60, 112, 96, SCR_NOTEPAD,  "NOTE",  C_CYAN   },
 };
-#define N_ICONS 5
+#define N_ICONS 6
 
 /* ── Window manager (Terminal + About only - see plan/memory for why
  * Paint stays a full-screen mode, matching the RISC-V reference's own
@@ -519,11 +523,12 @@ typedef struct {
     int open;
 } win_t;
 
-#define WIN_TERM  0
-#define WIN_ABOUT 1
-#define WIN_FILES 2
-#define WIN_CALC  3
-#define N_WINDOWS 4
+#define WIN_TERM    0
+#define WIN_ABOUT   1
+#define WIN_FILES   2
+#define WIN_CALC    3
+#define WIN_NOTEPAD 4
+#define N_WINDOWS   5
 
 /* Sizes fit each screen's existing content (TROWS x TCOLS grid for
  * Terminal, the logo+info+feature-list block for About) plus the
@@ -538,8 +543,9 @@ static win_t windows[N_WINDOWS] = {
     { 230, 180, 560, 380, 0 },   /* WIN_ABOUT */
     { 120, 165, 620, 380, 0 },   /* WIN_FILES */
     { 400, 190, 220, 300, 0 },   /* WIN_CALC  */
+    { 90,  175, 660, 380, 0 },   /* WIN_NOTEPAD */
 };
-static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT, WIN_FILES, WIN_CALC };  /* [0]=back .. [N-1]=front/focused */
+static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT, WIN_FILES, WIN_CALC, WIN_NOTEPAD };  /* [0]=back .. [N-1]=front/focused */
 
 static int dragging_win = -1;
 static int drag_off_x = 0, drag_off_y = 0;
@@ -1217,6 +1223,157 @@ static void handle_calc_content_click(int mx, int my) {
     calc_press(calc_btn_keys[row*4+col]);
 }
 
+/* ── AxNotepad (WIN_NOTEPAD) state ────────────────────────────────────
+ * Typewriter-style append editor: cursor is always at (np_row,np_col),
+ * typing appends there, Enter starts a new row, Backspace deletes the
+ * last char (stepping onto the end of the previous row once the
+ * current one is empty - not real line-merging, just lets the user
+ * keep deleting backward across the line break). No arrow keys, no
+ * mid-line insert, no word wrap - same "cap, don't scroll" simplicity
+ * Terminal's own single-line tinput/TCOLS-1 cap already uses. Fixed
+ * filename "NOTES.TXT" (v1 scope, same as AxPaint's original single
+ * CANVAS.BMP before slots were added later). */
+#define NP_MAX_ROWS 24
+#define NP_MAX_COLS 48
+static char np_lines[NP_MAX_ROWS][NP_MAX_COLS+1];
+static int  np_len[NP_MAX_ROWS];
+static int  np_row = 0, np_col = 0;
+static char np_status[40];
+static int  np_status_timer = 0;
+static unsigned long np_blink = 0;   /* own counter - blink_timer above is only
+                                       * incremented inside render_terminal(),
+                                       * so it stalls whenever Terminal is closed */
+static char np_scratch[NP_MAX_ROWS * (NP_MAX_COLS + 1) + 1];
+
+static void np_status_set(const char *s) {
+    int i = 0;
+    while (s[i] && i < (int)sizeof(np_status) - 1) { np_status[i] = s[i]; i++; }
+    np_status[i] = '\0';
+    np_status_timer = 90;
+}
+
+#define NP_PAD 8
+
+/* Shared by render_notepad()/handle_notepad_content_click()/np_press()
+ * so hit-testing and the input cap can't drift from what's drawn -
+ * same reasoning as files_layout()/calc_layout(). */
+static void np_layout(int cx0, int cy0, int cw, int ch,
+                       int *text_x0, int *text_y0, int *visible_rows, int *visible_cols,
+                       int *save_x, int *load_x, int *btn_y) {
+    *btn_y  = cy0 + NP_PAD;
+    *save_x = cx0 + NP_PAD;
+    *load_x = *save_x + 7*CHAR_W;   /* "[Save] " = 7 chars */
+    *text_x0 = cx0 + NP_PAD;
+    *text_y0 = cy0 + NP_PAD + CHAR_W + 6;
+
+    int rows = (cy0 + ch - NP_PAD - *text_y0) / CHAR_W;
+    if (rows > NP_MAX_ROWS) rows = NP_MAX_ROWS;
+    if (rows < 1) rows = 1;
+    *visible_rows = rows;
+
+    int cols = (cw - 2*NP_PAD) / CHAR_W;
+    if (cols > NP_MAX_COLS) cols = NP_MAX_COLS;
+    if (cols < 1) cols = 1;
+    *visible_cols = cols;
+}
+
+static void np_press(char c) {
+    if (c == 0) return;   /* unmapped/break scancode */
+
+    int cx0, cy0, cw, ch;
+    win_content_rect(WIN_NOTEPAD, &cx0, &cy0, &cw, &ch);
+    int tx0, ty0, vrows, vcols, sx, lx, by;
+    np_layout(cx0, cy0, cw, ch, &tx0, &ty0, &vrows, &vcols, &sx, &lx, &by);
+
+    if (c == '\n') {
+        if (np_row < vrows - 1) {
+            np_row++; np_col = 0;
+            np_lines[np_row][0] = '\0';
+            np_len[np_row] = 0;
+        }
+        return;
+    }
+    if (c == '\b') {
+        if (np_col > 0) {
+            np_col--;
+            np_lines[np_row][np_col] = '\0';
+            np_len[np_row] = np_col;
+        } else if (np_row > 0) {
+            np_row--;
+            np_col = np_len[np_row];
+        }
+        return;
+    }
+    if (np_col < vcols - 1) {
+        np_lines[np_row][np_col] = c;
+        np_col++;
+        np_lines[np_row][np_col] = '\0';
+        np_len[np_row] = np_col;
+    }
+}
+
+static void np_save(void) {
+    int p = 0;
+    for (int r = 0; r <= np_row; r++) {
+        for (int i = 0; i < np_len[r]; i++) np_scratch[p++] = np_lines[r][i];
+        if (r < np_row) np_scratch[p++] = '\n';
+    }
+    int ok = fat12_write("NOTES.TXT", np_scratch, p);
+    np_status_set(ok ? "Saved: NOTES.TXT" : "Save failed");
+}
+
+static void np_load(void) {
+    unsigned int n = fat12_load("NOTES.TXT", np_scratch, sizeof(np_scratch));
+    if (n == 0) { np_status_set("No saved file"); return; }
+
+    int cx0, cy0, cw, ch;
+    win_content_rect(WIN_NOTEPAD, &cx0, &cy0, &cw, &ch);
+    int tx0, ty0, vrows, vcols, sx, lx, by;
+    np_layout(cx0, cy0, cw, ch, &tx0, &ty0, &vrows, &vcols, &sx, &lx, &by);
+
+    for (int r = 0; r < NP_MAX_ROWS; r++) { np_lines[r][0] = '\0'; np_len[r] = 0; }
+    int r = 0, c = 0;
+    for (unsigned int i = 0; i < n && r < vrows; i++) {
+        char ch2 = np_scratch[i];
+        if (ch2 == '\n') { np_lines[r][c] = '\0'; np_len[r] = c; r++; c = 0; continue; }
+        if (c < vcols - 1) np_lines[r][c++] = ch2;
+    }
+    if (r < vrows) { np_lines[r][c] = '\0'; np_len[r] = c; } else { r = vrows - 1; c = np_len[r]; }
+    np_row = r; np_col = c;
+    np_status_set("Loaded: NOTES.TXT");
+}
+
+static void render_notepad(int cx0, int cy0, int cw, int ch) {
+    int tx0, ty0, vrows, vcols, sx, lx, by;
+    np_layout(cx0, cy0, cw, ch, &tx0, &ty0, &vrows, &vcols, &sx, &lx, &by);
+
+    text(sx, by, "[Save]", C_GREEN);
+    text(lx, by, "[Load]", C_YELLOW);
+    if (np_status_timer > 0) {
+        text(lx + 7*CHAR_W, by, np_status, C_CYAN);
+        np_status_timer--;
+    }
+
+    for (int r = 0; r < vrows; r++) text(tx0, ty0 + r*CHAR_W, np_lines[r], C_WHITE);
+
+    np_blink++;
+    if ((np_blink >> 14) & 1) {
+        fill(tx0 + np_col*CHAR_W, ty0 + np_row*CHAR_W, CHAR_W/2, CHAR_W, C_WHITE);
+    }
+}
+
+static void handle_notepad_content_click(int mx, int my) {
+    int cx0, cy0, cw, ch;
+    win_content_rect(WIN_NOTEPAD, &cx0, &cy0, &cw, &ch);
+    int tx0, ty0, vrows, vcols, sx, lx, by;
+    np_layout(cx0, cy0, cw, ch, &tx0, &ty0, &vrows, &vcols, &sx, &lx, &by);
+    (void)tx0; (void)ty0; (void)vrows; (void)vcols;
+
+    if (my < by || my >= by + CHAR_W) return;
+    if (mx >= sx && mx < sx + 6*CHAR_W) { np_save(); return; }
+    if (mx >= lx && mx < lx + 6*CHAR_W) { np_load(); return; }
+}
+
 /* ── Window chrome (shared by Terminal + About) ─────────────────────
  * Shadow + rounded body (reusing the same card_round() the old
  * full-screen "cards" used) + a mini titlebar strip with a close button -
@@ -1644,6 +1801,8 @@ static void handle_click(int mx, int my) {
                     handle_files_content_click(mx, my);
                 } else if (hit == WIN_CALC) {
                     handle_calc_content_click(mx, my);
+                } else if (hit == WIN_NOTEPAD) {
+                    handle_notepad_content_click(mx, my);
                 }
                 /* else: click landed in the window's content - no
                  * per-content click handling needed for Terminal/About. */
@@ -1672,6 +1831,8 @@ static void handle_click(int mx, int my) {
                             }
                         } else if (icons[i].dst == SCR_CALC) {
                             win_open(WIN_CALC);
+                        } else if (icons[i].dst == SCR_NOTEPAD) {
+                            win_open(WIN_NOTEPAD);
                         }
                     }
                 }
@@ -1785,12 +1946,17 @@ static void handle_keys(void) {
             esc_down = 0;
             return;
         }
-        /* Character input only reaches Terminal when it's the focused
-         * window - standard "only the focused window gets keyboard
-         * input" behavior. */
-        if (!(scr == SCR_DESKTOP && win_focused() == WIN_TERM)) continue;
+        /* Character input only reaches the focused window (Terminal or
+         * Notepad, the only two with real keyboard input) - standard
+         * "only the focused window gets keyboard input" behavior. */
+        int focused = win_focused();
+        if (!(scr == SCR_DESKTOP && (focused == WIN_TERM || focused == WIN_NOTEPAD))) continue;
         char ch = sc_to_char(sc);
         if (!ch) continue;
+        if (focused == WIN_NOTEPAD) {
+            np_press(ch);
+            continue;
+        }
         if (ch == '\n') {
             trun();
         } else if (ch == '\b') {
@@ -1857,20 +2023,23 @@ void gfx_main(void) {
                     if (!windows[idx].open) continue;
                     const char *title = idx == WIN_TERM ? "AxTerminal" :
                                         idx == WIN_ABOUT ? "AxAbout" :
-                                        idx == WIN_FILES ? "AxFiles" : "AxCalc";
+                                        idx == WIN_FILES ? "AxFiles" :
+                                        idx == WIN_CALC ? "AxCalc" : "AxNotepad";
                     render_window_chrome(idx, title);
                     int cx0, cy0, cw, ch;
                     win_content_rect(idx, &cx0, &cy0, &cw, &ch);
                     if (idx == WIN_TERM)       render_terminal(cx0, cy0, cw, ch);
                     else if (idx == WIN_ABOUT) render_about(cx0, cy0, cw, ch);
                     else if (idx == WIN_FILES) render_files(cx0, cy0, cw, ch);
-                    else                       render_calc(cx0, cy0, cw, ch);
+                    else if (idx == WIN_CALC)  render_calc(cx0, cy0, cw, ch);
+                    else                       render_notepad(cx0, cy0, cw, ch);
                 }
                 break;
             case SCR_TERMINAL: break;   /* scr never actually becomes this anymore - Terminal is a window now */
             case SCR_ABOUT:    break;   /* same */
             case SCR_FILES:    break;   /* same */
             case SCR_CALC:     break;   /* same */
+            case SCR_NOTEPAD:  break;   /* same */
             case SCR_PAINT:    render_paint(); break;
         }
 
