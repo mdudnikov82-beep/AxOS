@@ -13,10 +13,10 @@
  * overlapping AxSH's own console text). This only draws icons + dispatches
  * clicks; it doesn't try to track/composite the windows it launches. */
 
-/* Shrunk from 112/20 when AxNotepad became the 7th icon - the old
- * pitch (7*112 + 6*20 = 904px) no longer fit an 800px-wide screen.
- * BMP icon art (<=64x64, see bmp.h) still centers fine at this width. */
-#define ICON_W   100
+/* Shrunk from 100/12 when AxSnake became the 8th icon - the old pitch
+ * (8*100 + 7*12 = 884px) no longer fit an 800px-wide screen. BMP icon
+ * art (<=64x64, see bmp.h) still centers fine at this width. */
+#define ICON_W   88
 #define ICON_H   96
 #define ICON_GAP 12
 #define ICON_TOP 70
@@ -44,7 +44,7 @@ int main(void) {
         exit(1);
     }
 
-    icon_t icons[7];
+    icon_t icons[8];
     icons[0].label = "Term";  icons[0].file = "AXTERM.ELF";  icons[0].icon_bmp = "TERM.BMP";  icons[0].color = gfx_rgb(0, 150, 255);
     icons[1].label = "About"; icons[1].file = "AXABOUT.ELF"; icons[1].icon_bmp = "ABOUT.BMP"; icons[1].color = gfx_rgb(255, 140, 0);
     icons[2].label = "Paint"; icons[2].file = "AXPAINT.ELF"; icons[2].icon_bmp = "PAINT.BMP"; icons[2].color = gfx_rgb(0, 200, 120);
@@ -55,7 +55,8 @@ int main(void) {
     icons[4].label = "Files"; icons[4].file = "AXFILES.ELF"; icons[4].icon_bmp = 0;          icons[4].color = gfx_rgb(80, 200, 120);
     icons[5].label = "Calc";  icons[5].file = "AXCALC.ELF";  icons[5].icon_bmp = 0;          icons[5].color = gfx_rgb(255, 210, 0);
     icons[6].label = "Note";  icons[6].file = "AXNOTE.ELF";  icons[6].icon_bmp = 0;          icons[6].color = gfx_rgb(0, 200, 200);
-    unsigned int n_icons = 7;
+    icons[7].label = "Snake"; icons[7].file = "AXSNAKE.ELF"; icons[7].icon_bmp = 0;          icons[7].color = gfx_rgb(60, 220, 60);
+    unsigned int n_icons = 8;
 
     unsigned int total_w = n_icons * ICON_W + (n_icons - 1) * ICON_GAP;
     unsigned int start_x = (w > total_w) ? (w - total_w) / 2 : 0;

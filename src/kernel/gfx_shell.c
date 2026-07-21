@@ -487,23 +487,26 @@ static void draw_num2(int x, int y, int v, color_t fg) {
 }
 
 /* ── UI state ─────────────────────────────────────────────────────── */
-typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT, SCR_FILES, SCR_CALC, SCR_NOTEPAD } Screen;
+typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT, SCR_FILES, SCR_CALC, SCR_NOTEPAD, SCR_SNAKE } Screen;
 static Screen scr = SCR_DESKTOP;
 
-/* Icon hit-boxes (desktop). Repacked from a 152px pitch (40px margin,
- * 40px gap) to 128px (24px margin, 16px gap) when AxNotepad became the
- * 6th icon - the old pitch had zero room left before hitting SW=800.
- * Purely a data change: hit-testing is already parametric per-icon. */
+/* Icon hit-boxes (desktop). Shrunk from 112px-wide/128px-pitch cards to
+ * 96px-wide/108px-pitch when AxSnake became the 7th icon - the old
+ * width had zero room left before hitting SW=800. draw_icon() (below)
+ * is fully parametric on ic->w (shadow/card/BMP-centering/text_center
+ * all read it, nothing hardcodes 112) so this is a safe data-only
+ * change, verified by reading draw_icon() before making it. */
 struct icon { int x,y,w,h; Screen dst; const char *label; color_t color; };
 static const struct icon icons[] = {
-    { 24,  60, 112, 96, SCR_TERMINAL, "TERM",  C_BLUE   },
-    { 152, 60, 112, 96, SCR_ABOUT,    "ABOUT", C_MAROON },
-    { 280, 60, 112, 96, SCR_PAINT,    "PAINT", C_DGREEN },
-    { 408, 60, 112, 96, SCR_FILES,    "FILES", C_TEAL   },
-    { 536, 60, 112, 96, SCR_CALC,     "CALC",  C_YELLOW },
-    { 664, 60, 112, 96, SCR_NOTEPAD,  "NOTE",  C_CYAN   },
+    { 28,  60, 96, 96, SCR_TERMINAL, "TERM",  C_BLUE   },
+    { 136, 60, 96, 96, SCR_ABOUT,    "ABOUT", C_MAROON },
+    { 244, 60, 96, 96, SCR_PAINT,    "PAINT", C_DGREEN },
+    { 352, 60, 96, 96, SCR_FILES,    "FILES", C_TEAL   },
+    { 460, 60, 96, 96, SCR_CALC,     "CALC",  C_YELLOW },
+    { 568, 60, 96, 96, SCR_NOTEPAD,  "NOTE",  C_CYAN   },
+    { 676, 60, 96, 96, SCR_SNAKE,    "SNAKE", C_GREEN  },
 };
-#define N_ICONS 6
+#define N_ICONS 7
 
 /* ── Window manager (Terminal + About only - see plan/memory for why
  * Paint stays a full-screen mode, matching the RISC-V reference's own
@@ -528,7 +531,8 @@ typedef struct {
 #define WIN_FILES   2
 #define WIN_CALC    3
 #define WIN_NOTEPAD 4
-#define N_WINDOWS   5
+#define WIN_SNAKE   5
+#define N_WINDOWS   6
 
 /* Sizes fit each screen's existing content (TROWS x TCOLS grid for
  * Terminal, the logo+info+feature-list block for About) plus the
@@ -544,8 +548,9 @@ static win_t windows[N_WINDOWS] = {
     { 120, 165, 620, 380, 0 },   /* WIN_FILES */
     { 400, 190, 220, 300, 0 },   /* WIN_CALC  */
     { 90,  175, 660, 380, 0 },   /* WIN_NOTEPAD */
+    { 230, 195, 340, 294, 0 },   /* WIN_SNAKE */
 };
-static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT, WIN_FILES, WIN_CALC, WIN_NOTEPAD };  /* [0]=back .. [N-1]=front/focused */
+static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT, WIN_FILES, WIN_CALC, WIN_NOTEPAD, WIN_SNAKE };  /* [0]=back .. [N-1]=front/focused */
 
 static int dragging_win = -1;
 static int drag_off_x = 0, drag_off_y = 0;
@@ -1374,6 +1379,117 @@ static void handle_notepad_content_click(int mx, int my) {
     if (mx >= lx && mx < lx + 6*CHAR_W) { np_load(); return; }
 }
 
+/* ── AxSnake (WIN_SNAKE) state ────────────────────────────────────────
+ * Classic grid-based Snake. WASD-only movement - neither platform's
+ * keyboard path supports arrow keys (x86's kbd_get() has no 0xE0
+ * extended-scancode handling; RISC-V's virtio_keyboard.c discards any
+ * keycode >= 89 before translation, which covers all four arrow keys).
+ * Advances on a tick counter, not every frame (this GUI's main loop
+ * runs close to 60Hz via wait_vsync() - see gfx_main() - so 10
+ * ticks/move is ~166ms/move, a normal Snake pace). */
+#define GRID_W 20
+#define GRID_H 14
+#define CELL   16
+#define SNAKE_MAX (GRID_W * GRID_H)
+#define SNAKE_TICK_N 10
+
+static int snake_x[SNAKE_MAX], snake_y[SNAKE_MAX];
+static int snake_len;
+static int snake_dx, snake_dy;
+static int food_x, food_y;
+static int score;
+static int game_over;
+static unsigned long snake_tick;
+static unsigned long snake_seed = 12345;
+
+static unsigned long snake_rand(void) {
+    snake_seed = snake_seed * 1103515245UL + 12345UL;
+    return (snake_seed >> 16) & 0x7fffUL;
+}
+
+static int snake_occupied(int x, int y) {
+    for (int i = 0; i < snake_len; i++)
+        if (snake_x[i] == x && snake_y[i] == y) return 1;
+    return 0;
+}
+
+static void snake_spawn_food(void) {
+    for (int attempt = 0; attempt < 100; attempt++) {
+        int x = (int)(snake_rand() % GRID_W);
+        int y = (int)(snake_rand() % GRID_H);
+        if (!snake_occupied(x, y)) { food_x = x; food_y = y; return; }
+    }
+    /* Fallback: full scan for the first free cell - only reached once
+     * the snake nearly fills the grid, not a realistic play scenario. */
+    for (int y = 0; y < GRID_H; y++)
+        for (int x = 0; x < GRID_W; x++)
+            if (!snake_occupied(x, y)) { food_x = x; food_y = y; return; }
+}
+
+static void snake_reset(void) {
+    snake_len = 3;
+    snake_x[0] = GRID_W/2;     snake_y[0] = GRID_H/2;
+    snake_x[1] = GRID_W/2 - 1; snake_y[1] = GRID_H/2;
+    snake_x[2] = GRID_W/2 - 2; snake_y[2] = GRID_H/2;
+    snake_dx = 1; snake_dy = 0;
+    score = 0;
+    game_over = 0;
+    snake_spawn_food();
+}
+
+static void snake_set_dir(int dx, int dy) {
+    if (game_over) { snake_reset(); return; }
+    if (dx == -snake_dx && dy == -snake_dy) return;   /* no instant reversal */
+    snake_dx = dx; snake_dy = dy;
+}
+
+/* Self-collision is checked against the PRE-move body (including the
+ * current tail cell, which is actually about to vacate unless the
+ * snake is growing) - a deliberately simple, slightly conservative
+ * rule; not worth the extra bookkeeping a fully precise check would
+ * need for a v1 game. */
+static void snake_advance(void) {
+    if (game_over) return;
+
+    int newx = snake_x[0] + snake_dx;
+    int newy = snake_y[0] + snake_dy;
+
+    if (newx < 0 || newx >= GRID_W || newy < 0 || newy >= GRID_H) { game_over = 1; return; }
+    if (snake_occupied(newx, newy)) { game_over = 1; return; }
+
+    int grow = (newx == food_x && newy == food_y);
+    if (grow && snake_len < SNAKE_MAX) snake_len++;
+    for (int i = snake_len - 1; i >= 1; i--) {
+        snake_x[i] = snake_x[i-1];
+        snake_y[i] = snake_y[i-1];
+    }
+    snake_x[0] = newx; snake_y[0] = newy;
+    if (grow) { score++; snake_spawn_food(); }
+}
+
+#define SNAKE_PAD 8
+#define SNAKE_BAR_H (CHAR_W + 6)
+
+static void render_snake(int cx0, int cy0, int cw, int ch) {
+    (void)cw; (void)ch;
+    if (game_over) {
+        text(cx0 + SNAKE_PAD, cy0 + SNAKE_PAD, "GAME OVER - WASD to restart", C_RED);
+    } else {
+        text(cx0 + SNAKE_PAD, cy0 + SNAKE_PAD, "Score:", C_CYAN);
+        draw_uint(cx0 + SNAKE_PAD + 7*CHAR_W, cy0 + SNAKE_PAD, (unsigned int)score, C_YELLOW);
+    }
+
+    int grid_x0 = cx0 + SNAKE_PAD;
+    int grid_y0 = cy0 + SNAKE_PAD + SNAKE_BAR_H;
+
+    for (int i = 0; i < snake_len; i++)
+        fill(grid_x0 + snake_x[i]*CELL + 1, grid_y0 + snake_y[i]*CELL + 1, CELL-2, CELL-2, C_GREEN);
+    fill(grid_x0 + food_x*CELL + 1, grid_y0 + food_y*CELL + 1, CELL-2, CELL-2, C_RED);
+
+    snake_tick++;
+    if (snake_tick % SNAKE_TICK_N == 0) snake_advance();
+}
+
 /* ── Window chrome (shared by Terminal + About) ─────────────────────
  * Shadow + rounded body (reusing the same card_round() the old
  * full-screen "cards" used) + a mini titlebar strip with a close button -
@@ -1833,6 +1949,10 @@ static void handle_click(int mx, int my) {
                             win_open(WIN_CALC);
                         } else if (icons[i].dst == SCR_NOTEPAD) {
                             win_open(WIN_NOTEPAD);
+                        } else if (icons[i].dst == SCR_SNAKE) {
+                            int was_open = windows[WIN_SNAKE].open;
+                            win_open(WIN_SNAKE);
+                            if (!was_open) snake_reset();
                         }
                     }
                 }
@@ -1946,15 +2066,23 @@ static void handle_keys(void) {
             esc_down = 0;
             return;
         }
-        /* Character input only reaches the focused window (Terminal or
-         * Notepad, the only two with real keyboard input) - standard
-         * "only the focused window gets keyboard input" behavior. */
+        /* Character input only reaches the focused window (Terminal,
+         * Notepad, or Snake - the only three with real keyboard input) -
+         * standard "only the focused window gets keyboard input"
+         * behavior. */
         int focused = win_focused();
-        if (!(scr == SCR_DESKTOP && (focused == WIN_TERM || focused == WIN_NOTEPAD))) continue;
+        if (!(scr == SCR_DESKTOP && (focused == WIN_TERM || focused == WIN_NOTEPAD || focused == WIN_SNAKE))) continue;
         char ch = sc_to_char(sc);
         if (!ch) continue;
         if (focused == WIN_NOTEPAD) {
             np_press(ch);
+            continue;
+        }
+        if (focused == WIN_SNAKE) {
+            if (ch == 'w')      snake_set_dir(0, -1);
+            else if (ch == 's') snake_set_dir(0, 1);
+            else if (ch == 'a') snake_set_dir(-1, 0);
+            else if (ch == 'd') snake_set_dir(1, 0);
             continue;
         }
         if (ch == '\n') {
@@ -2024,15 +2152,17 @@ void gfx_main(void) {
                     const char *title = idx == WIN_TERM ? "AxTerminal" :
                                         idx == WIN_ABOUT ? "AxAbout" :
                                         idx == WIN_FILES ? "AxFiles" :
-                                        idx == WIN_CALC ? "AxCalc" : "AxNotepad";
+                                        idx == WIN_CALC ? "AxCalc" :
+                                        idx == WIN_NOTEPAD ? "AxNotepad" : "AxSnake";
                     render_window_chrome(idx, title);
                     int cx0, cy0, cw, ch;
                     win_content_rect(idx, &cx0, &cy0, &cw, &ch);
-                    if (idx == WIN_TERM)       render_terminal(cx0, cy0, cw, ch);
-                    else if (idx == WIN_ABOUT) render_about(cx0, cy0, cw, ch);
-                    else if (idx == WIN_FILES) render_files(cx0, cy0, cw, ch);
-                    else if (idx == WIN_CALC)  render_calc(cx0, cy0, cw, ch);
-                    else                       render_notepad(cx0, cy0, cw, ch);
+                    if (idx == WIN_TERM)          render_terminal(cx0, cy0, cw, ch);
+                    else if (idx == WIN_ABOUT)    render_about(cx0, cy0, cw, ch);
+                    else if (idx == WIN_FILES)    render_files(cx0, cy0, cw, ch);
+                    else if (idx == WIN_CALC)     render_calc(cx0, cy0, cw, ch);
+                    else if (idx == WIN_NOTEPAD)  render_notepad(cx0, cy0, cw, ch);
+                    else                          render_snake(cx0, cy0, cw, ch);
                 }
                 break;
             case SCR_TERMINAL: break;   /* scr never actually becomes this anymore - Terminal is a window now */
@@ -2040,6 +2170,7 @@ void gfx_main(void) {
             case SCR_FILES:    break;   /* same */
             case SCR_CALC:     break;   /* same */
             case SCR_NOTEPAD:  break;   /* same */
+            case SCR_SNAKE:    break;   /* same */
             case SCR_PAINT:    render_paint(); break;
         }
 

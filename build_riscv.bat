@@ -569,6 +569,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\axnotepad_rv64.elf) do echo   axnotepad_rv64.elf: %%~zF bytes
 
+echo [U87] axsnake.c...
+"%CC%" %UFLAGS% -c %USRC%\axsnake.c -o %OUT%\uaxsnake.o
+if %errorlevel% neq 0 goto :error
+
+echo [U88] Linking axsnake...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\axsnake_rv64.elf %OUT%\ucrt0.o %OUT%\uaxsnake.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\axsnake_rv64.elf) do echo   axsnake_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -595,6 +605,7 @@ copy /b %OUT%\axdesk_rv64.elf     rv64build\fs\rv64\AXDESK.ELF
 copy /b %OUT%\axfiles_rv64.elf    rv64build\fs\rv64\AXFILES.ELF
 copy /b %OUT%\axcalc_rv64.elf     rv64build\fs\rv64\AXCALC.ELF
 copy /b %OUT%\axnotepad_rv64.elf  rv64build\fs\rv64\AXNOTE.ELF
+copy /b %OUT%\axsnake_rv64.elf    rv64build\fs\rv64\AXSNAKE.ELF
 copy /b %OUT%\kptrtest_rv64.elf   rv64build\fs\rv64\KPTRTEST.ELF
 copy /b %OUT%\spin_rv64.elf       rv64build\fs\rv64\SPIN.ELF
 copy /b %OUT%\nettest_rv64.elf     rv64build\fs\rv64\NETTEST.ELF
