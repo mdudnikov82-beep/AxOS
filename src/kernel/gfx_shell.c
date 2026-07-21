@@ -1388,19 +1388,43 @@ static void handle_notepad_content_click(int mx, int my) {
  * runs close to 60Hz via wait_vsync() - see gfx_main() - so 10
  * ticks/move is ~166ms/move, a normal Snake pace). */
 #define GRID_W 20
-#define GRID_H 14
+#define GRID_H 13   /* was 14 - shrunk by one row to make room for the
+                     * high-score line below, without resizing the window */
 #define CELL   16
 #define SNAKE_MAX (GRID_W * GRID_H)
 #define SNAKE_TICK_N 10
+#define HISCORE_FILE "SNAKE.HI"
 
 static int snake_x[SNAKE_MAX], snake_y[SNAKE_MAX];
 static int snake_len;
 static int snake_dx, snake_dy;
 static int food_x, food_y;
 static int score;
+static int high_score;
 static int game_over;
 static unsigned long snake_tick;
 static unsigned long snake_seed = 12345;
+
+/* Plain decimal ASCII, not a binary struct - it's one number, and this
+ * keeps the file human-readable via AxFiles' own preview. */
+static void snake_save_highscore(void) {
+    char buf[12];
+    unsigned int v = (unsigned int)high_score;
+    int n = udigits(v);
+    for (int i = n - 1; i >= 0; i--) { buf[i] = (char)('0' + v % 10); v /= 10; }
+    fat12_write(HISCORE_FILE, buf, n);
+}
+
+static void snake_load_highscore(void) {
+    char buf[12];
+    unsigned int n = fat12_load(HISCORE_FILE, buf, sizeof(buf));
+    int v = 0;
+    for (unsigned int i = 0; i < n; i++) {
+        if (buf[i] < '0' || buf[i] > '9') break;
+        v = v * 10 + (buf[i] - '0');
+    }
+    high_score = v;
+}
 
 static unsigned long snake_rand(void) {
     snake_seed = snake_seed * 1103515245UL + 12345UL;
@@ -1464,11 +1488,15 @@ static void snake_advance(void) {
         snake_y[i] = snake_y[i-1];
     }
     snake_x[0] = newx; snake_y[0] = newy;
-    if (grow) { score++; snake_spawn_food(); }
+    if (grow) {
+        score++;
+        if (score > high_score) { high_score = score; snake_save_highscore(); }
+        snake_spawn_food();
+    }
 }
 
 #define SNAKE_PAD 8
-#define SNAKE_BAR_H (CHAR_W + 6)
+#define SNAKE_BAR_H (2*CHAR_W + 6)   /* two text rows + gap - was one row */
 
 static void render_snake(int cx0, int cy0, int cw, int ch) {
     (void)cw; (void)ch;
@@ -1478,6 +1506,8 @@ static void render_snake(int cx0, int cy0, int cw, int ch) {
         text(cx0 + SNAKE_PAD, cy0 + SNAKE_PAD, "Score:", C_CYAN);
         draw_uint(cx0 + SNAKE_PAD + 7*CHAR_W, cy0 + SNAKE_PAD, (unsigned int)score, C_YELLOW);
     }
+    text(cx0 + SNAKE_PAD, cy0 + SNAKE_PAD + CHAR_W, "Best:", C_CYAN);
+    draw_uint(cx0 + SNAKE_PAD + 6*CHAR_W, cy0 + SNAKE_PAD + CHAR_W, (unsigned int)high_score, C_GREEN);
 
     int grid_x0 = cx0 + SNAKE_PAD;
     int grid_y0 = cy0 + SNAKE_PAD + SNAKE_BAR_H;
@@ -1952,7 +1982,7 @@ static void handle_click(int mx, int my) {
                         } else if (icons[i].dst == SCR_SNAKE) {
                             int was_open = windows[WIN_SNAKE].open;
                             win_open(WIN_SNAKE);
-                            if (!was_open) snake_reset();
+                            if (!was_open) { snake_load_highscore(); snake_reset(); }
                         }
                     }
                 }

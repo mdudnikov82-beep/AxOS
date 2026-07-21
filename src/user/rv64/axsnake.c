@@ -16,18 +16,61 @@
  * advance every 10 ticks -> ~200ms/move. */
 
 #define GRID_W 20
-#define GRID_H 14
+#define GRID_H 13   /* was 14 - shrunk by one row to make room for the
+                     * high-score line below, without resizing the window */
 #define CELL   16
 #define SNAKE_MAX (GRID_W * GRID_H)
 #define SNAKE_TICK_N 10
+#define HISCORE_FILE "SNAKE.HI"
 
 static int snake_x[SNAKE_MAX], snake_y[SNAKE_MAX];
 static int snake_len;
 static int snake_dx, snake_dy;
 static int food_x, food_y;
 static int score;
+static int high_score;
 static int game_over;
 static unsigned long snake_seed = 12345;
+
+static int udigits(unsigned int v) {
+    int n = 1;
+    while (v >= 10) { v /= 10; n++; }
+    return n;
+}
+static void draw_uint(unsigned int x, unsigned int y, unsigned int v, unsigned int color) {
+    char buf[11];
+    int n = udigits(v);
+    buf[n] = '\0';
+    for (int i = n - 1; i >= 0; i--) { buf[i] = (char)('0' + v % 10); v /= 10; }
+    gfx_draw_text(x, y, buf, color);
+}
+
+/* Plain decimal ASCII, not a binary struct - it's one number, and this
+ * keeps the file human-readable via AxFiles' own preview. */
+static void snake_save_highscore(void) {
+    char buf[12];
+    unsigned int v = (unsigned int)high_score;
+    int n = udigits(v);
+    for (int i = n - 1; i >= 0; i--) { buf[i] = (char)('0' + v % 10); v /= 10; }
+    writefile(HISCORE_FILE, buf, n);
+}
+
+static void snake_load_highscore(void) {
+    char buf[12];
+    unsigned int n = 0;
+    int fd = open(HISCORE_FILE, 0);
+    if (fd >= 0) {
+        long r = read(fd, buf, sizeof(buf));
+        if (r > 0) n = (unsigned int)r;
+        close(fd);
+    }
+    int v = 0;
+    for (unsigned int i = 0; i < n; i++) {
+        if (buf[i] < '0' || buf[i] > '9') break;
+        v = v * 10 + (buf[i] - '0');
+    }
+    high_score = v;
+}
 
 static unsigned long snake_rand(void) {
     snake_seed = snake_seed * 1103515245UL + 12345UL;
@@ -87,24 +130,15 @@ static void snake_advance(void) {
         snake_y[i] = snake_y[i-1];
     }
     snake_x[0] = newx; snake_y[0] = newy;
-    if (grow) { score++; snake_spawn_food(); }
-}
-
-static int udigits(unsigned int v) {
-    int n = 1;
-    while (v >= 10) { v /= 10; n++; }
-    return n;
-}
-static void draw_uint(unsigned int x, unsigned int y, unsigned int v, unsigned int color) {
-    char buf[11];
-    int n = udigits(v);
-    buf[n] = '\0';
-    for (int i = n - 1; i >= 0; i--) { buf[i] = (char)('0' + v % 10); v /= 10; }
-    gfx_draw_text(x, y, buf, color);
+    if (grow) {
+        score++;
+        if (score > high_score) { high_score = score; snake_save_highscore(); }
+        snake_spawn_food();
+    }
 }
 
 #define SNAKE_PAD 8
-#define SNAKE_BAR_H (16 + 6)
+#define SNAKE_BAR_H (2*16 + 6)   /* two text rows + gap - was one row */
 
 static void render_snake(const window_t *win) {
     gfx_fill_rect(win->x + 2, win->content_y, win->w - 4, win->content_h, win->bg);
@@ -125,6 +159,8 @@ static void render_snake(const window_t *win) {
         gfx_draw_text(bx, by, "Score:", gfx_rgb(0, 220, 220));
         draw_uint(bx + 7*16, by, (unsigned int)score, gfx_rgb(255, 255, 0));
     }
+    gfx_draw_text(bx, by + 16, "Best:", gfx_rgb(0, 220, 220));
+    draw_uint(bx + 6*16, by + 16, (unsigned int)high_score, gfx_rgb(60, 220, 60));
 
     unsigned int grid_x0 = win->x + 2 + SNAKE_PAD;
     unsigned int grid_y0 = win->content_y + SNAKE_PAD + SNAKE_BAR_H;
@@ -146,6 +182,7 @@ int main(void) {
     window_init(&win, 220, 190, 340, 298, gfx_rgb(60, 220, 60), gfx_rgb(10, 15, 10),
                "AxSnake");
 
+    snake_load_highscore();
     snake_reset();
     render_snake(&win);
     gfx_flush();
