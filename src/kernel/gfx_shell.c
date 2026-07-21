@@ -898,6 +898,13 @@ static int  files_scroll;
 static int  files_preview_mode;
 static int  files_confirm_delete;   /* showing "Delete FOO.BIN? [Yes] [No]" for files_preview_name */
 
+/* New/Rename modal text-input state - files_input_mode: 0=off, 1=new,
+ * 2=rename (files_rename_from holds the file being replaced). */
+static int  files_input_mode;
+static char files_input_buf[13];
+static int  files_input_len;
+static char files_rename_from[13];
+
 static void files_scan(void) {
     files_count = 0;
     int is_dir;
@@ -914,6 +921,16 @@ static unsigned int  files_preview_len;
 static int           files_preview_truncated;
 static int           files_preview_scroll;
 
+/* Dedicated (larger than the preview buffer) scratch space for the
+ * rename load-old/write-new round trip - files_preview_buf is
+ * deliberately small (4KB, "well under sys_open's cap") and reusing it
+ * here would silently truncate any renamed file over 4KB (AxPaint's
+ * own saved BMPs are ~48-50KB). fat12_load() has no hard size ceiling
+ * of its own, so this is sized to comfortably cover the largest known
+ * real file with margin. */
+#define FILES_RENAME_MAX 65536
+static unsigned char files_rename_buf[FILES_RENAME_MAX];
+
 /* Loads the file at files_names[idx] into the preview buffer and flips
  * into preview mode. Large files get a visible "(truncated)" marker
  * rather than growing the buffer - this is a preview, not a full
@@ -927,6 +944,41 @@ static void files_open_preview(int idx) {
     files_preview_truncated = (files_preview_len < files_sizes[idx]);
     files_preview_scroll = 0;
     files_preview_mode = 1;
+}
+
+/* Confirms the pending New/Rename action (files_input_mode already
+ * validated non-empty by the caller), then always rescans so the
+ * change shows up immediately and drops the modal. */
+static void files_input_confirm(void) {
+    if (files_input_mode == 1) {
+        fat12_write(files_input_buf, files_rename_buf, 0);
+    } else if (files_input_mode == 2) {
+        unsigned int n = fat12_load(files_rename_from, files_rename_buf, FILES_RENAME_MAX);
+        fat12_write(files_input_buf, files_rename_buf, n);
+        fat12_delete(files_rename_from);
+        files_preview_mode = 0;
+    }
+    files_scan();
+    files_input_mode = 0;
+}
+
+static void files_input_press(char c) {
+    if (c == 0) return;
+    if (c == '\n') {
+        if (files_input_len > 0) files_input_confirm();
+        return;
+    }
+    if (c == '\b') {
+        if (files_input_len > 0) {
+            files_input_len--;
+            files_input_buf[files_input_len] = 0;
+        }
+        return;
+    }
+    if (files_input_len < 12) {
+        files_input_buf[files_input_len++] = c;
+        files_input_buf[files_input_len] = 0;
+    }
 }
 
 static int udigits(unsigned int v) {
@@ -955,7 +1007,8 @@ static void draw_uint_right(int x_right, int y, unsigned int v, color_t fg) {
  * for the window itself). */
 static void files_layout(int cx0, int cy0, int cw, int ch,
                           int *list_y0, int *visible_rows,
-                          int *up_x, int *down_x, int *btn_y, int *size_right) {
+                          int *up_x, int *down_x, int *btn_y, int *size_right,
+                          int *new_x) {
     int header_y = cy0 + FILES_PAD;
     *down_x = cx0 + cw - FILES_PAD - FILES_BTN_W;
     *up_x   = *down_x - FILES_BTN_W - 8;
@@ -964,6 +1017,7 @@ static void files_layout(int cx0, int cy0, int cw, int ch,
     *list_y0 = header_y + FILES_ROW_H + 6;
     *visible_rows = (cy0 + ch - FILES_PAD - *list_y0) / FILES_ROW_H;
     if (*visible_rows < 0) *visible_rows = 0;
+    *new_x = cx0 + FILES_PAD + 6*CHAR_W;   /* right after the "NAME" header label */
 }
 
 static void render_files_list(int cx0, int cy0, int cw, int ch) {
@@ -971,16 +1025,18 @@ static void render_files_list(int cx0, int cy0, int cw, int ch) {
     int y = cy0 + FILES_PAD;
 
     if (!fat12_ok) { text(x, y, "Disk not ready", C_GRAY); return; }
-    if (files_count == 0) { text(x, y, "(no files)", C_GRAY); return; }
 
-    int list_y0, visible_rows, up_x, down_x, btn_y, size_right;
-    files_layout(cx0, cy0, cw, ch, &list_y0, &visible_rows, &up_x, &down_x, &btn_y, &size_right);
+    int list_y0, visible_rows, up_x, down_x, btn_y, size_right, new_x;
+    files_layout(cx0, cy0, cw, ch, &list_y0, &visible_rows, &up_x, &down_x, &btn_y, &size_right, &new_x);
 
     text(x, y, "NAME", C_CYAN);
+    text(new_x, y, "[New]", C_GREEN);
     text(size_right - 4*CHAR_W, y, "SIZE", C_CYAN);
     text(up_x,   btn_y, "[^]", C_WHITE);
     text(down_x, btn_y, "[v]", C_WHITE);
     hline(x, list_y0 - 4, cw - 2*FILES_PAD, C_GRAY);
+
+    if (files_count == 0) { text(x, list_y0, "(no files)", C_GRAY); return; }
 
     int max_scroll = files_count - visible_rows;
     if (max_scroll < 0) max_scroll = 0;
@@ -999,7 +1055,8 @@ static void render_files_list(int cx0, int cy0, int cw, int ch) {
  * handler's "[< Back]" hit-test, same reasoning as files_layout(). */
 static void files_preview_layout(int cx0, int cy0, int cw, int ch,
                                   int *back_x, int *back_y,
-                                  int *text_y0, int *visible_rows, int *max_cols) {
+                                  int *text_y0, int *visible_rows, int *max_cols,
+                                  int *rename_x) {
     *back_x = cx0 + FILES_PAD;
     *back_y = cy0 + FILES_PAD;
     *text_y0 = *back_y + FILES_ROW_H + 6;
@@ -1008,14 +1065,19 @@ static void files_preview_layout(int cx0, int cy0, int cw, int ch,
     *max_cols = (cw - 2*FILES_PAD) / CHAR_W;
     if (*max_cols > TCOLS) *max_cols = TCOLS;
     if (*max_cols < 1) *max_cols = 1;
+    /* "[Rename]" (8 chars) sits just left of "[Delete]" (8 chars),
+     * both right-aligned - well clear of the filename label drawn at
+     * back_x+9*CHAR_W for any realistic 8.3 filename length. */
+    *rename_x = (cx0 + cw - FILES_PAD - 8*CHAR_W) - 9*CHAR_W;
 }
 
 static void render_files_preview(int cx0, int cy0, int cw, int ch) {
-    int back_x, back_y, text_y0, visible_rows, max_cols;
-    files_preview_layout(cx0, cy0, cw, ch, &back_x, &back_y, &text_y0, &visible_rows, &max_cols);
+    int back_x, back_y, text_y0, visible_rows, max_cols, rename_x;
+    files_preview_layout(cx0, cy0, cw, ch, &back_x, &back_y, &text_y0, &visible_rows, &max_cols, &rename_x);
 
     text(back_x, back_y, "[< Back]", C_YELLOW);
     text(back_x + 9*CHAR_W, back_y, files_preview_name, C_WHITE);
+    text(rename_x, back_y, "[Rename]", C_CYAN);
     /* "[Delete]" is the same 8-char width as "[< Back]" - right-align it
      * in the same header row, same reasoning files_layout() already
      * uses for the list view's [^]/[v] buttons. */
@@ -1089,8 +1151,40 @@ static void render_files_confirm_delete(int cx0, int cy0, int cw, int ch) {
     text(no_x,  btn_y, "[No]",  C_WHITE);
 }
 
+/* Modal New/Rename text-entry prompt - preempts list/preview/confirm-
+ * delete entirely while active. No blink needed for the cursor block
+ * (a short-lived modal, unlike Notepad's persistent one). */
+static void render_files_input(int cx0, int cy0, int cw, int ch) {
+    (void)cw; (void)ch;
+    int x = cx0 + FILES_PAD;
+    int y = cy0 + FILES_PAD;
+
+    if (files_input_mode == 1) {
+        text(x, y, "New file name:", C_CYAN);
+    } else {
+        char msg[13 + 16];
+        int p = 0;
+        const char *pre = "Rename ";
+        while (pre[p]) { msg[p] = pre[p]; p++; }
+        for (int i = 0; files_rename_from[i] && p < (int)sizeof(msg) - 8; i++) msg[p++] = files_rename_from[i];
+        const char *suf = " to:";
+        for (int i = 0; suf[i]; i++) msg[p++] = suf[i];
+        msg[p] = 0;
+        text(x, y, msg, C_CYAN);
+    }
+
+    int input_y = y + 2*FILES_ROW_H;
+    text(x, input_y, files_input_buf, C_WHITE);
+    fill(x + files_input_len*CHAR_W, input_y, CHAR_W/2, CHAR_W, C_WHITE);
+
+    int btn_y = input_y + 2*FILES_ROW_H;
+    text(x, btn_y, "[OK]", C_GREEN);
+    text(x + 5*CHAR_W, btn_y, "[Cancel]", C_RED);
+}
+
 static void render_files(int cx0, int cy0, int cw, int ch) {
-    if (files_confirm_delete)      render_files_confirm_delete(cx0, cy0, cw, ch);
+    if (files_input_mode)          render_files_input(cx0, cy0, cw, ch);
+    else if (files_confirm_delete) render_files_confirm_delete(cx0, cy0, cw, ch);
     else if (files_preview_mode)   render_files_preview(cx0, cy0, cw, ch);
     else                           render_files_list(cx0, cy0, cw, ch);
 }
@@ -1868,6 +1962,20 @@ static void handle_files_content_click(int mx, int my) {
     int cx0, cy0, cw, ch;
     win_content_rect(WIN_FILES, &cx0, &cy0, &cw, &ch);
 
+    if (files_input_mode) {
+        int x = cx0 + FILES_PAD;
+        int input_y = cy0 + FILES_PAD + 2*FILES_ROW_H;
+        int btn_y = input_y + 2*FILES_ROW_H;
+        if (my >= btn_y && my < btn_y + FILES_ROW_H) {
+            if (mx >= x && mx < x + 4*CHAR_W) {
+                if (files_input_len > 0) files_input_confirm();
+            } else if (mx >= x + 5*CHAR_W && mx < x + 5*CHAR_W + 8*CHAR_W) {
+                files_input_mode = 0;
+            }
+        }
+        return;
+    }
+
     if (files_confirm_delete) {
         int yes_x, no_x, btn_y;
         files_confirm_layout(cx0, cy0, &yes_x, &no_x, &btn_y);
@@ -1885,8 +1993,8 @@ static void handle_files_content_click(int mx, int my) {
     }
 
     if (files_preview_mode) {
-        int back_x, back_y, text_y0, visible_rows, max_cols;
-        files_preview_layout(cx0, cy0, cw, ch, &back_x, &back_y, &text_y0, &visible_rows, &max_cols);
+        int back_x, back_y, text_y0, visible_rows, max_cols, rename_x;
+        files_preview_layout(cx0, cy0, cw, ch, &back_x, &back_y, &text_y0, &visible_rows, &max_cols, &rename_x);
         if (mx >= back_x && mx < back_x + 8*CHAR_W &&
             my >= back_y && my < back_y + FILES_ROW_H) {
             files_preview_mode = 0;
@@ -1896,26 +2004,46 @@ static void handle_files_content_click(int mx, int my) {
         if (mx >= del_x && mx < del_x + 8*CHAR_W &&
             my >= back_y && my < back_y + FILES_ROW_H) {
             files_confirm_delete = 1;
+            return;
+        }
+        if (mx >= rename_x && mx < rename_x + 8*CHAR_W &&
+            my >= back_y && my < back_y + FILES_ROW_H) {
+            int i = 0;
+            for (; files_preview_name[i] && i < 12; i++) files_rename_from[i] = files_preview_name[i];
+            files_rename_from[i] = 0;
+            files_input_mode = 2;
+            files_input_len = 0;
+            files_input_buf[0] = 0;
         }
         return;
     }
 
-    if (!fat12_ok || files_count == 0) return;
+    if (!fat12_ok) return;
 
-    int list_y0, visible_rows, up_x, down_x, btn_y, size_right;
-    files_layout(cx0, cy0, cw, ch, &list_y0, &visible_rows, &up_x, &down_x, &btn_y, &size_right);
+    int list_y0, visible_rows, up_x, down_x, btn_y, size_right, new_x;
+    files_layout(cx0, cy0, cw, ch, &list_y0, &visible_rows, &up_x, &down_x, &btn_y, &size_right, &new_x);
 
     if (my >= btn_y && my < btn_y + FILES_ROW_H) {
-        if (mx >= up_x && mx < up_x + FILES_BTN_W) {
-            files_scroll -= visible_rows;
-            if (files_scroll < 0) files_scroll = 0;
+        if (mx >= new_x && mx < new_x + 5*CHAR_W) {
+            files_input_mode = 1;
+            files_input_len = 0;
+            files_input_buf[0] = 0;
             return;
         }
-        if (mx >= down_x && mx < down_x + FILES_BTN_W) {
-            files_scroll += visible_rows;   /* clamped in render_files_list() */
-            return;
+        if (files_count > 0) {
+            if (mx >= up_x && mx < up_x + FILES_BTN_W) {
+                files_scroll -= visible_rows;
+                if (files_scroll < 0) files_scroll = 0;
+                return;
+            }
+            if (mx >= down_x && mx < down_x + FILES_BTN_W) {
+                files_scroll += visible_rows;   /* clamped in render_files_list() */
+                return;
+            }
         }
     }
+
+    if (files_count == 0) return;
 
     if (my >= list_y0) {
         int row = (my - list_y0) / FILES_ROW_H;
@@ -2078,7 +2206,14 @@ static void handle_keys(void) {
                     scr = SCR_DESKTOP;
                 } else if (scr == SCR_DESKTOP) {
                     int top = win_focused();
-                    if (top == WIN_FILES && files_preview_mode) {
+                    if (top == WIN_FILES && files_input_mode) {
+                        /* Cancel the New/Rename prompt first - not
+                         * required for RISC-V parity ([Cancel] button
+                         * is the primary mechanism there), just a free
+                         * x86 convenience since ESC already has other
+                         * WIN_FILES special-casing right here. */
+                        files_input_mode = 0;
+                    } else if (top == WIN_FILES && files_preview_mode) {
                         /* Back out of preview first - closing outright
                          * would lose the "which file" context for no
                          * reason, matching the [< Back] button. */
@@ -2101,11 +2236,15 @@ static void handle_keys(void) {
          * standard "only the focused window gets keyboard input"
          * behavior. */
         int focused = win_focused();
-        if (!(scr == SCR_DESKTOP && (focused == WIN_TERM || focused == WIN_NOTEPAD || focused == WIN_SNAKE || focused == WIN_CALC))) continue;
+        if (!(scr == SCR_DESKTOP && (focused == WIN_TERM || focused == WIN_NOTEPAD || focused == WIN_SNAKE || focused == WIN_CALC || focused == WIN_FILES))) continue;
         char ch = sc_to_char(sc);
         if (!ch) continue;
         if (focused == WIN_NOTEPAD) {
             np_press(ch);
+            continue;
+        }
+        if (focused == WIN_FILES) {
+            if (files_input_mode) files_input_press(ch);
             continue;
         }
         if (focused == WIN_SNAKE) {
