@@ -41,7 +41,7 @@ int main(void) {
         exit(1);
     }
 
-    icon_t icons[5];
+    icon_t icons[6];
     icons[0].label = "Term";  icons[0].file = "AXTERM.ELF";  icons[0].icon_bmp = "TERM.BMP";  icons[0].color = gfx_rgb(0, 150, 255);
     icons[1].label = "About"; icons[1].file = "AXABOUT.ELF"; icons[1].icon_bmp = "ABOUT.BMP"; icons[1].color = gfx_rgb(255, 140, 0);
     icons[2].label = "Paint"; icons[2].file = "AXPAINT.ELF"; icons[2].icon_bmp = "PAINT.BMP"; icons[2].color = gfx_rgb(0, 200, 120);
@@ -50,7 +50,8 @@ int main(void) {
      * choice; bmp_load() is never even attempted, same NULL-guard the
      * Power icon's file=0 already exercises below. */
     icons[4].label = "Files"; icons[4].file = "AXFILES.ELF"; icons[4].icon_bmp = 0;          icons[4].color = gfx_rgb(80, 200, 120);
-    unsigned int n_icons = 5;
+    icons[5].label = "Calc";  icons[5].file = "AXCALC.ELF";  icons[5].icon_bmp = 0;          icons[5].color = gfx_rgb(255, 210, 0);
+    unsigned int n_icons = 6;
 
     unsigned int total_w = n_icons * ICON_W + (n_icons - 1) * ICON_GAP;
     unsigned int start_x = (w > total_w) ? (w - total_w) / 2 : 0;

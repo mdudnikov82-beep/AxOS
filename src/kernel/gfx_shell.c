@@ -487,7 +487,7 @@ static void draw_num2(int x, int y, int v, color_t fg) {
 }
 
 /* ── UI state ─────────────────────────────────────────────────────── */
-typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT, SCR_FILES } Screen;
+typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT, SCR_FILES, SCR_CALC } Screen;
 static Screen scr = SCR_DESKTOP;
 
 /* Icon hit-boxes (desktop) */
@@ -497,8 +497,9 @@ static const struct icon icons[] = {
     { 192, 60, 112, 96, SCR_ABOUT,    "ABOUT", C_MAROON },
     { 344, 60, 112, 96, SCR_PAINT,    "PAINT", C_DGREEN },
     { 496, 60, 112, 96, SCR_FILES,    "FILES", C_TEAL   },
+    { 648, 60, 112, 96, SCR_CALC,     "CALC",  C_YELLOW },
 };
-#define N_ICONS 4
+#define N_ICONS 5
 
 /* ── Window manager (Terminal + About only - see plan/memory for why
  * Paint stays a full-screen mode, matching the RISC-V reference's own
@@ -521,7 +522,8 @@ typedef struct {
 #define WIN_TERM  0
 #define WIN_ABOUT 1
 #define WIN_FILES 2
-#define N_WINDOWS 3
+#define WIN_CALC  3
+#define N_WINDOWS 4
 
 /* Sizes fit each screen's existing content (TROWS x TCOLS grid for
  * Terminal, the logo+info+feature-list block for About) plus the
@@ -535,8 +537,9 @@ static win_t windows[N_WINDOWS] = {
     { 70,  170, 660, 340, 0 },   /* WIN_TERM  */
     { 230, 180, 560, 380, 0 },   /* WIN_ABOUT */
     { 120, 165, 620, 380, 0 },   /* WIN_FILES */
+    { 400, 190, 220, 300, 0 },   /* WIN_CALC  */
 };
-static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT, WIN_FILES };  /* [0]=back .. [N-1]=front/focused */
+static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT, WIN_FILES, WIN_CALC };  /* [0]=back .. [N-1]=front/focused */
 
 static int dragging_win = -1;
 static int drag_off_x = 0, drag_off_y = 0;
@@ -1081,6 +1084,139 @@ static void render_files(int cx0, int cy0, int cw, int ch) {
     else                           render_files_list(cx0, cy0, cw, ch);
 }
 
+/* ── AxCalc (WIN_CALC) state ──────────────────────────────────────────
+ * Sequential-evaluation four-function calculator (2+3*4=20, not 14 -
+ * same rule a real basic calculator uses, no operator precedence).
+ * Plain int (32-bit on this MinGW/x86 build - see the LLP64 gotcha
+ * memory) - no float/double anywhere, the FPU is never initialized in
+ * this freestanding image. */
+static int  calc_acc = 0;
+static int  calc_cur = 0;
+static int  calc_has_digits = 0;
+static char calc_pending_op = 0;
+static int  calc_error = 0;
+
+static const char calc_btn_keys[16] = {
+    '7','8','9','/',
+    '4','5','6','*',
+    '1','2','3','-',
+    'C','0','=','+',
+};
+
+/* Returns 1 on division by zero (result left untouched), else 0. */
+static int calc_apply(int a, char op, int b, int *out) {
+    switch (op) {
+        case '+': *out = a + b; return 0;
+        case '-': *out = a - b; return 0;
+        case '*': *out = a * b; return 0;
+        case '/': if (b == 0) return 1; *out = a / b; return 0;
+    }
+    return 0;
+}
+
+static void calc_press(char key) {
+    if (key >= '0' && key <= '9') {
+        if (calc_error) { calc_error = 0; calc_cur = 0; calc_has_digits = 0; }
+        if (calc_cur < 99999999) calc_cur = calc_cur * 10 + (key - '0');
+        calc_has_digits = 1;
+        return;
+    }
+    if (key == 'C') {
+        calc_acc = 0; calc_cur = 0; calc_has_digits = 0;
+        calc_pending_op = 0; calc_error = 0;
+        return;
+    }
+    if (calc_error) return;   /* ignore ops/= until C clears the error */
+    if (key == '=') {
+        if (calc_pending_op) {
+            int b = calc_has_digits ? calc_cur : calc_acc;
+            int result;
+            if (calc_apply(calc_acc, calc_pending_op, b, &result)) { calc_error = 1; return; }
+            calc_acc = result;
+            calc_pending_op = 0;
+            calc_has_digits = 0;
+        }
+        return;
+    }
+    /* Operator key (+ - * /) */
+    if (calc_pending_op && calc_has_digits) {
+        int result;
+        if (calc_apply(calc_acc, calc_pending_op, calc_cur, &result)) { calc_error = 1; return; }
+        calc_acc = result;
+    } else if (!calc_pending_op) {
+        calc_acc = calc_has_digits ? calc_cur : calc_acc;
+    }
+    calc_pending_op = key;
+    calc_cur = 0;
+    calc_has_digits = 0;
+}
+
+static int calc_display(void) { return calc_has_digits ? calc_cur : calc_acc; }
+
+static void draw_int_right(int x_right, int y, int v, color_t fg) {
+    if (v < 0) {
+        unsigned int uv = (unsigned int)(-v);
+        char buf[12];
+        buf[0] = '-';
+        int n = udigits(uv);
+        for (int i = n - 1; i >= 0; i--) { buf[1+i] = (char)('0' + uv % 10); uv /= 10; }
+        buf[1+n] = 0;
+        text(x_right - (n+1) * CHAR_W, y, buf, fg);
+    } else {
+        draw_uint_right(x_right, y, (unsigned int)v, fg);
+    }
+}
+
+#define CALC_PAD    8
+#define CALC_DISP_H CHAR_W
+
+static void calc_layout(int cx0, int cy0, int cw, int ch,
+                         int *grid_x0, int *grid_y0, int *btn_sz) {
+    int avail_w = cw - 2*CALC_PAD;
+    int avail_h = ch - 2*CALC_PAD - CALC_DISP_H - 6;
+    int sz = avail_w / 4;
+    int sz_h = avail_h / 4;
+    if (sz_h < sz) sz = sz_h;
+    if (sz < 8) sz = 8;
+    *btn_sz = sz;
+    *grid_x0 = cx0 + CALC_PAD;
+    *grid_y0 = cy0 + CALC_PAD + CALC_DISP_H + 6;
+}
+
+static void render_calc(int cx0, int cy0, int cw, int ch) {
+    int grid_x0, grid_y0, btn_sz;
+    calc_layout(cx0, cy0, cw, ch, &grid_x0, &grid_y0, &btn_sz);
+
+    if (calc_error) text(cx0 + CALC_PAD, cy0 + CALC_PAD, "Error", C_RED);
+    else             draw_int_right(cx0 + cw - CALC_PAD, cy0 + CALC_PAD, calc_display(), C_GREEN);
+
+    for (int row = 0; row < 4; row++) {
+        for (int col = 0; col < 4; col++) {
+            int bx = grid_x0 + col*btn_sz;
+            int by = grid_y0 + row*btn_sz;
+            char key = calc_btn_keys[row*4+col];
+            color_t bg = (key == '=') ? C_DGREEN : (key == 'C') ? C_MAROON :
+                         (key=='+'||key=='-'||key=='*'||key=='/') ? C_NAVY : C_CARD_BG;
+            fill(bx+2, by+2, btn_sz-4, btn_sz-4, bg);
+            char lbl[2] = { key, 0 };
+            text(bx + btn_sz/2 - CHAR_W/2, by + btn_sz/2 - CHAR_W/2, lbl, C_WHITE);
+        }
+    }
+}
+
+static void handle_calc_content_click(int mx, int my) {
+    int cx0, cy0, cw, ch;
+    win_content_rect(WIN_CALC, &cx0, &cy0, &cw, &ch);
+    int grid_x0, grid_y0, btn_sz;
+    calc_layout(cx0, cy0, cw, ch, &grid_x0, &grid_y0, &btn_sz);
+
+    if (mx < grid_x0 || my < grid_y0) return;
+    int col = (mx - grid_x0) / btn_sz;
+    int row = (my - grid_y0) / btn_sz;
+    if (col < 0 || col >= 4 || row < 0 || row >= 4) return;
+    calc_press(calc_btn_keys[row*4+col]);
+}
+
 /* ── Window chrome (shared by Terminal + About) ─────────────────────
  * Shadow + rounded body (reusing the same card_round() the old
  * full-screen "cards" used) + a mini titlebar strip with a close button -
@@ -1506,6 +1642,8 @@ static void handle_click(int mx, int my) {
                     drag_off_y = my - windows[hit].y;
                 } else if (hit == WIN_FILES) {
                     handle_files_content_click(mx, my);
+                } else if (hit == WIN_CALC) {
+                    handle_calc_content_click(mx, my);
                 }
                 /* else: click landed in the window's content - no
                  * per-content click handling needed for Terminal/About. */
@@ -1532,6 +1670,8 @@ static void handle_click(int mx, int my) {
                                 files_preview_mode = 0;
                                 files_scroll = 0;
                             }
+                        } else if (icons[i].dst == SCR_CALC) {
+                            win_open(WIN_CALC);
                         }
                     }
                 }
@@ -1716,18 +1856,21 @@ void gfx_main(void) {
                     int idx = win_order[i];
                     if (!windows[idx].open) continue;
                     const char *title = idx == WIN_TERM ? "AxTerminal" :
-                                        idx == WIN_ABOUT ? "AxAbout" : "AxFiles";
+                                        idx == WIN_ABOUT ? "AxAbout" :
+                                        idx == WIN_FILES ? "AxFiles" : "AxCalc";
                     render_window_chrome(idx, title);
                     int cx0, cy0, cw, ch;
                     win_content_rect(idx, &cx0, &cy0, &cw, &ch);
                     if (idx == WIN_TERM)       render_terminal(cx0, cy0, cw, ch);
                     else if (idx == WIN_ABOUT) render_about(cx0, cy0, cw, ch);
-                    else                       render_files(cx0, cy0, cw, ch);
+                    else if (idx == WIN_FILES) render_files(cx0, cy0, cw, ch);
+                    else                       render_calc(cx0, cy0, cw, ch);
                 }
                 break;
             case SCR_TERMINAL: break;   /* scr never actually becomes this anymore - Terminal is a window now */
             case SCR_ABOUT:    break;   /* same */
             case SCR_FILES:    break;   /* same */
+            case SCR_CALC:     break;   /* same */
             case SCR_PAINT:    render_paint(); break;
         }
 
