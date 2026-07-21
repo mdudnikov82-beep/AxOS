@@ -206,6 +206,22 @@ int main(void) {
             prev_left = left;
         }
 
+        int c;
+        while ((c = kbd_getc()) >= 0) {
+            /* Unlike x86's PS/2 demo, this driver DOES track shift (see
+             * virtio_keyboard.c's shift_ch()), so both numpad-plus and
+             * shift-equals already arrive here as '+' - no special-casing
+             * needed beyond the same digit/op/Enter/'c' translation the
+             * x86 port uses. */
+            char key = (char)c;
+            if (key == '\n') key = '=';
+            else if (key == 'c') key = 'C';
+            if ((key >= '0' && key <= '9') || key=='+' || key=='-' || key=='*' || key=='/' || key=='=' || key=='C') {
+                calc_press(key);
+                render_calc(&win);
+            }
+        }
+
         gfx_flush();
         sleep_ms(20);
     }

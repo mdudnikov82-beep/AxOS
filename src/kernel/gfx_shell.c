@@ -2071,7 +2071,7 @@ static void handle_keys(void) {
          * standard "only the focused window gets keyboard input"
          * behavior. */
         int focused = win_focused();
-        if (!(scr == SCR_DESKTOP && (focused == WIN_TERM || focused == WIN_NOTEPAD || focused == WIN_SNAKE))) continue;
+        if (!(scr == SCR_DESKTOP && (focused == WIN_TERM || focused == WIN_NOTEPAD || focused == WIN_SNAKE || focused == WIN_CALC))) continue;
         char ch = sc_to_char(sc);
         if (!ch) continue;
         if (focused == WIN_NOTEPAD) {
@@ -2083,6 +2083,18 @@ static void handle_keys(void) {
             else if (ch == 's') snake_set_dir(0, 1);
             else if (ch == 'a') snake_set_dir(-1, 0);
             else if (ch == 'd') snake_set_dir(1, 0);
+            continue;
+        }
+        if (focused == WIN_CALC) {
+            /* sc2asc has no shift support at all (see its own comment),
+             * so '+' is only reachable via the numpad-plus key (already
+             * unshifted in the table) - '-'/'*'/'/ ' all have their own
+             * unshifted keys too, no translation needed for those. */
+            char key = ch;
+            if (key == '\n') key = '=';
+            else if (key == 'c') key = 'C';
+            if ((key >= '0' && key <= '9') || key=='+' || key=='-' || key=='*' || key=='/' || key=='=' || key=='C')
+                calc_press(key);
             continue;
         }
         if (ch == '\n') {
