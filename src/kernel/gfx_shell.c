@@ -546,7 +546,7 @@ static win_t windows[N_WINDOWS] = {
     { 70,  170, 660, 340, 0 },   /* WIN_TERM  */
     { 230, 180, 560, 380, 0 },   /* WIN_ABOUT */
     { 120, 165, 620, 380, 0 },   /* WIN_FILES */
-    { 400, 190, 220, 300, 0 },   /* WIN_CALC  */
+    { 380, 150, 260, 420, 0 },   /* WIN_CALC  */
     { 90,  175, 660, 380, 0 },   /* WIN_NOTEPAD */
     { 230, 195, 340, 294, 0 },   /* WIN_SNAKE */
 };
@@ -1190,16 +1190,376 @@ static void render_files(int cx0, int cy0, int cw, int ch) {
 }
 
 /* ── AxCalc (WIN_CALC) state ──────────────────────────────────────────
- * Sequential-evaluation four-function calculator (2+3*4=20, not 14 -
- * same rule a real basic calculator uses, no operator precedence).
- * Plain int (32-bit on this MinGW/x86 build - see the LLP64 gotcha
- * memory) - no float/double anywhere, the FPU is never initialized in
- * this freestanding image. */
-static int  calc_acc = 0;
-static int  calc_cur = 0;
+ * Arbitrary-precision decimal arithmetic (NOT IEEE 754 - this
+ * freestanding build never initializes the FPU, and this isn't
+ * fixed-width binary float either: every value is a heap-allocated
+ * decimal digit string of whatever length it needs). Sequential-
+ * evaluation four-function calculator (2+3*4=20, not 14 - same rule a
+ * real basic calculator uses, no operator precedence).
+ *
+ * gfx_shell.c has NO heap linked in at all (not src/kernel/heap.c, not
+ * libaxiom's malloc - this standalone flat-binary image links only 5
+ * objects, none of them any kind of allocator), so real malloc()/
+ * free() semantics here means a small first-fit free-list allocator
+ * from scratch, backed by one static arena - mirroring (in miniature)
+ * the same free-list-allocator concept src/kernel/heap.c and RISC-V's
+ * own malloc.h already use elsewhere in this codebase, without their
+ * MTE/redzone machinery (out of scope - this is a calculator, not a
+ * security feature). 1MB is generous enough a calculator user will
+ * realistically never hit it - this is what "no hard limit" means on
+ * this platform in practice. */
+#define CALC_ARENA_SIZE (1024*1024)
+static unsigned char calc_arena[CALC_ARENA_SIZE];
+
+typedef struct calc_block {
+    unsigned int size;   /* usable bytes, excludes this header */
+    int free;
+    struct calc_block *next;   /* always the physically-next block - the
+                                * free list is maintained in address
+                                * order by construction (split only
+                                * ever inserts a remainder right after
+                                * itself), so coalescing can trust
+                                * adjacency without a separate check. */
+} calc_block_t;
+
+static calc_block_t *calc_heap_head = 0;
+
+static void calc_heap_init(void) {
+    calc_block_t *b = (calc_block_t *)calc_arena;
+    b->size = CALC_ARENA_SIZE - sizeof(calc_block_t);
+    b->free = 1;
+    b->next = 0;
+    calc_heap_head = b;
+}
+
+static void *calc_malloc(unsigned int size) {
+    if (!calc_heap_head) calc_heap_init();
+    if (size == 0) size = 1;
+    size = (size + 3u) & ~3u;   /* 4-byte align, keeps headers aligned */
+
+    calc_block_t *b = calc_heap_head;
+    while (b) {
+        if (b->free && b->size >= size) {
+            if (b->size >= size + sizeof(calc_block_t) + 4) {
+                calc_block_t *rem = (calc_block_t *)((unsigned char *)b + sizeof(calc_block_t) + size);
+                rem->size = b->size - size - sizeof(calc_block_t);
+                rem->free = 1;
+                rem->next = b->next;
+                b->next = rem;
+                b->size = size;
+            }
+            b->free = 0;
+            return (void *)((unsigned char *)b + sizeof(calc_block_t));
+        }
+        b = b->next;
+    }
+    return 0;   /* out of memory */
+}
+
+static void calc_free(void *ptr) {
+    if (!ptr) return;
+    calc_block_t *b = (calc_block_t *)((unsigned char *)ptr - sizeof(calc_block_t));
+    b->free = 1;
+    calc_block_t *n = b->next;
+    if (n && n->free) {
+        b->size += sizeof(calc_block_t) + n->size;
+        b->next = n->next;
+    }
+}
+
+#define FRAC_DIGITS 20   /* every result's fractional part is capped/rounded to this many digits */
+
+typedef struct {
+    char *digits;   /* heap-allocated, MOST-significant digit first (natural
+                     * reading/typing order - no reversal needed anywhere) */
+    int   len;
+    int   scale;    /* trailing `len` digits after the decimal point; 0 = integer.
+                     * Invariant maintained everywhere: len >= scale >= 0. */
+    int   sign;     /* 0 or 1; canonical zero is always sign=0 */
+} bignum_t;
+
+static bignum_t bignum_from_digit(int d) {
+    bignum_t n;
+    n.digits = (char *)calc_malloc(1);
+    n.len = 1;
+    n.scale = 0;
+    n.sign = 0;
+    if (n.digits) n.digits[0] = (char)d;
+    return n;
+}
+
+static void bignum_free(bignum_t *n) {
+    if (n->digits) calc_free(n->digits);
+    n->digits = 0;
+}
+
+/* Returns 1 on OOM (digits left null). */
+static int bignum_alloc(bignum_t *n, int len) {
+    n->digits = (char *)calc_malloc((unsigned int)len);
+    n->len = len;
+    return n->digits == 0;
+}
+
+static int bignum_copy(const bignum_t *src, bignum_t *out) {
+    if (bignum_alloc(out, src->len)) return 1;
+    for (int i = 0; i < src->len; i++) out->digits[i] = src->digits[i];
+    out->scale = src->scale;
+    out->sign = src->sign;
+    return 0;
+}
+
+static int bignum_is_zero(const bignum_t *n) {
+    for (int i = 0; i < n->len; i++) if (n->digits[i] != 0) return 0;
+    return 1;
+}
+
+/* Trims leading zero digits (down to one integer digit minimum), and
+ * re-canonicalizes sign=0 for zero. In-place, never reallocates
+ * (shrinks len only - the extra allocated bytes just go unused). */
+static void bignum_trim(bignum_t *n) {
+    int min_len = n->scale + 1;
+    int i = 0;
+    while (n->len - i > min_len && n->digits[i] == 0) i++;
+    if (i > 0) {
+        for (int j = i; j < n->len; j++) n->digits[j - i] = n->digits[j];
+        n->len -= i;
+    }
+    if (bignum_is_zero(n)) n->sign = 0;
+}
+
+/* Produces two new heap copies of a/b, both at scale=max(a.scale,b.scale)
+ * and equal integer-part length (leading-zero-padded) - the one place
+ * scale-alignment logic lives; add/sub/div's magnitude-compare all
+ * build on this. Returns 1 on OOM (nothing left allocated in that case). */
+static int bignum_align(const bignum_t *a, const bignum_t *b, bignum_t *pa, bignum_t *pb) {
+    int scale = a->scale > b->scale ? a->scale : b->scale;
+    int a_int = a->len - a->scale;
+    int b_int = b->len - b->scale;
+    int int_len = a_int > b_int ? a_int : b_int;
+    int total = int_len + scale;
+
+    if (bignum_alloc(pa, total)) return 1;
+    if (bignum_alloc(pb, total)) { bignum_free(pa); return 1; }
+
+    int p = 0;
+    for (int i = 0; i < int_len - a_int; i++) pa->digits[p++] = 0;
+    for (int i = 0; i < a->len; i++) pa->digits[p++] = a->digits[i];
+    for (int i = 0; i < scale - a->scale; i++) pa->digits[p++] = 0;
+    pa->scale = scale;
+    pa->sign = a->sign;
+
+    p = 0;
+    for (int i = 0; i < int_len - b_int; i++) pb->digits[p++] = 0;
+    for (int i = 0; i < b->len; i++) pb->digits[p++] = b->digits[i];
+    for (int i = 0; i < scale - b->scale; i++) pb->digits[p++] = 0;
+    pb->scale = scale;
+    pb->sign = b->sign;
+
+    return 0;
+}
+
+/* Assumes a->len == b->len (already aligned). Ignores sign. */
+static int bignum_cmp_abs(const bignum_t *a, const bignum_t *b) {
+    for (int i = 0; i < a->len; i++)
+        if (a->digits[i] != b->digits[i]) return a->digits[i] > b->digits[i] ? 1 : -1;
+    return 0;
+}
+
+/* a+b magnitude, assumes a->len == b->len. out gets len+1 digits. */
+static int bignum_add_abs(const bignum_t *a, const bignum_t *b, bignum_t *out) {
+    int n = a->len;
+    if (bignum_alloc(out, n + 1)) return 1;
+    int carry = 0;
+    for (int i = 0; i < n; i++) {
+        int sum = a->digits[n - 1 - i] + b->digits[n - 1 - i] + carry;
+        carry = sum / 10;
+        out->digits[n - i] = (char)(sum % 10);
+    }
+    out->digits[0] = (char)carry;
+    out->scale = a->scale;
+    return 0;
+}
+
+/* a-b magnitude, assumes a->len == b->len and |a|>=|b|. */
+static int bignum_sub_abs(const bignum_t *a, const bignum_t *b, bignum_t *out) {
+    int n = a->len;
+    if (bignum_alloc(out, n)) return 1;
+    int borrow = 0;
+    for (int i = 0; i < n; i++) {
+        int idx = n - 1 - i;
+        int d = a->digits[idx] - b->digits[idx] - borrow;
+        if (d < 0) { d += 10; borrow = 1; } else borrow = 0;
+        out->digits[idx] = (char)d;
+    }
+    out->scale = a->scale;
+    return 0;
+}
+
+/* Returns 1 on OOM. */
+static int bignum_add(const bignum_t *a, const bignum_t *b, bignum_t *out) {
+    bignum_t pa, pb;
+    if (bignum_align(a, b, &pa, &pb)) return 1;
+    int fail;
+    if (a->sign == b->sign) {
+        fail = bignum_add_abs(&pa, &pb, out);
+        out->sign = a->sign;
+    } else {
+        int cmp = bignum_cmp_abs(&pa, &pb);
+        if (cmp >= 0) { fail = bignum_sub_abs(&pa, &pb, out); out->sign = a->sign; }
+        else          { fail = bignum_sub_abs(&pb, &pa, out); out->sign = b->sign; }
+    }
+    bignum_free(&pa);
+    bignum_free(&pb);
+    if (fail) return 1;
+    bignum_trim(out);
+    return 0;
+}
+
+static int bignum_sub(const bignum_t *a, const bignum_t *b, bignum_t *out) {
+    bignum_t neg_b = *b;
+    neg_b.sign = b->sign ? 0 : 1;
+    if (bignum_is_zero(b)) neg_b.sign = 0;
+    return bignum_add(a, &neg_b, out);
+}
+
+static int bignum_mul(const bignum_t *a, const bignum_t *b, bignum_t *out) {
+    int n = a->len, m = b->len;
+    int total_len = n + m;
+    char *tmp = (char *)calc_malloc((unsigned int)total_len);
+    if (!tmp) return 1;
+    for (int i = 0; i < total_len; i++) tmp[i] = 0;
+
+    for (int i = n - 1; i >= 0; i--) {
+        int carry = 0;
+        for (int j = m - 1; j >= 0; j--) {
+            int pos = i + j + 1;
+            int prod = a->digits[i] * b->digits[j] + tmp[pos] + carry;
+            tmp[pos] = (char)(prod % 10);
+            carry = prod / 10;
+        }
+        int pos = i;
+        while (carry && pos >= 0) {
+            int sum = tmp[pos] + carry;
+            tmp[pos] = (char)(sum % 10);
+            carry = sum / 10;
+            pos--;
+        }
+    }
+
+    out->digits = tmp;
+    out->len = total_len;
+    out->scale = a->scale + b->scale;
+    out->sign = (a->sign != b->sign) ? 1 : 0;
+
+    if (out->scale > FRAC_DIGITS) {
+        out->len -= (out->scale - FRAC_DIGITS);
+        out->scale = FRAC_DIGITS;
+    }
+    bignum_trim(out);
+    return 0;
+}
+
+static void strip_leading_zeros_arr(char *d, int *len) {
+    int i = 0;
+    while (*len - i > 1 && d[i] == 0) i++;
+    if (i > 0) {
+        for (int k = i; k < *len; k++) d[k - i] = d[k];
+        *len -= i;
+    }
+}
+
+/* Returns 0 ok, 1 OOM, 2 division by zero. Produces exactly FRAC_DIGITS
+ * fractional digits via schoolbook long division: after aligning a/b to
+ * the same scale (which makes their digit arrays plain equal-scaled
+ * integers - a/b's true ratio is unaffected since both were scaled by
+ * the same factor), run long division for (integer digit count) +
+ * FRAC_DIGITS steps - the first phase consumes the dividend's real
+ * digits, the second phase "brings down" implicit zeros, which is
+ * exactly what extends the quotient into FRAC_DIGITS fractional places.
+ * Each digit found via repeated trial subtraction (max 9 tries/step) -
+ * simple, safe, plenty fast for a calculator's realistic inputs. */
+static int bignum_div(const bignum_t *a, const bignum_t *b, bignum_t *out) {
+    if (bignum_is_zero(b)) return 2;
+
+    bignum_t pa, pb;
+    if (bignum_align(a, b, &pa, &pb)) return 1;
+    strip_leading_zeros_arr(pb.digits, &pb.len);
+
+    int qlen = pa.len + FRAC_DIGITS;
+    char *q = (char *)calc_malloc((unsigned int)qlen);
+    if (!q) { bignum_free(&pa); bignum_free(&pb); return 1; }
+
+    int rem_cap = pb.len + 1;
+    char *rem = (char *)calc_malloc((unsigned int)rem_cap);
+    if (!rem) { calc_free(q); bignum_free(&pa); bignum_free(&pb); return 1; }
+    int rem_len = 0;
+
+    int total_steps = pa.len + FRAC_DIGITS;
+    for (int step = 0; step < total_steps; step++) {
+        int next_digit = (step < pa.len) ? pa.digits[step] : 0;
+
+        if (rem_len < rem_cap) {
+            rem[rem_len++] = (char)next_digit;
+        } else {
+            for (int k = 1; k < rem_len; k++) rem[k - 1] = rem[k];
+            rem[rem_len - 1] = (char)next_digit;
+        }
+        strip_leading_zeros_arr(rem, &rem_len);
+
+        int qd = 0;
+        for (;;) {
+            int cmp;
+            if (rem_len != pb.len) cmp = (rem_len > pb.len) ? 1 : -1;
+            else {
+                cmp = 0;
+                for (int k = 0; k < rem_len; k++)
+                    if (rem[k] != pb.digits[k]) { cmp = (rem[k] > pb.digits[k]) ? 1 : -1; break; }
+            }
+            if (cmp < 0) break;
+
+            int borrow = 0;
+            int shift = rem_len - pb.len;
+            for (int k = rem_len - 1; k >= 0; k--) {
+                int bdig = (k < shift) ? 0 : pb.digits[k - shift];
+                int d = rem[k] - bdig - borrow;
+                if (d < 0) { d += 10; borrow = 1; } else borrow = 0;
+                rem[k] = (char)d;
+            }
+            strip_leading_zeros_arr(rem, &rem_len);
+            qd++;
+        }
+        q[step] = (char)qd;
+    }
+
+    calc_free(rem);
+    bignum_free(&pa);
+    bignum_free(&pb);
+
+    out->digits = q;
+    out->len = qlen;
+    out->scale = FRAC_DIGITS;
+    out->sign = (a->sign != b->sign) ? 1 : 0;
+    bignum_trim(out);
+    return 0;
+}
+
+/* Returns 0 ok, 1 OOM, 2 division by zero. */
+static int calc_do_op(const bignum_t *a, char op, const bignum_t *b, bignum_t *out) {
+    switch (op) {
+        case '+': return bignum_add(a, b, out);
+        case '-': return bignum_sub(a, b, out);
+        case '*': return bignum_mul(a, b, out);
+        case '/': return bignum_div(a, b, out);
+    }
+    return 1;
+}
+
+static bignum_t calc_acc;
+static bignum_t calc_cur;
 static int  calc_has_digits = 0;
 static char calc_pending_op = 0;
 static int  calc_error = 0;
+static int  calc_inited = 0;
 
 static const char calc_btn_keys[16] = {
     '7','8','9','/',
@@ -1208,35 +1568,50 @@ static const char calc_btn_keys[16] = {
     'C','0','=','+',
 };
 
-/* Returns 1 on division by zero (result left untouched), else 0. */
-static int calc_apply(int a, char op, int b, int *out) {
-    switch (op) {
-        case '+': *out = a + b; return 0;
-        case '-': *out = a - b; return 0;
-        case '*': *out = a * b; return 0;
-        case '/': if (b == 0) return 1; *out = a / b; return 0;
-    }
-    return 0;
-}
-
 static void calc_press(char key) {
+    if (!calc_inited) {
+        calc_acc = bignum_from_digit(0);
+        calc_cur = bignum_from_digit(0);
+        calc_inited = 1;
+    }
     if (key >= '0' && key <= '9') {
-        if (calc_error) { calc_error = 0; calc_cur = 0; calc_has_digits = 0; }
-        if (calc_cur < 99999999) calc_cur = calc_cur * 10 + (key - '0');
+        if (calc_error) {
+            calc_error = 0;
+            bignum_free(&calc_cur);
+            calc_cur = bignum_from_digit(0);
+            calc_has_digits = 0;
+        }
+        int d = key - '0';
+        char *nd = (char *)calc_malloc((unsigned int)(calc_cur.len + 1));
+        if (!nd) { calc_error = 1; return; }
+        for (int i = 0; i < calc_cur.len; i++) nd[i] = calc_cur.digits[i];
+        nd[calc_cur.len] = (char)d;
+        calc_free(calc_cur.digits);
+        calc_cur.digits = nd;
+        calc_cur.len++;
+        if (calc_cur.len == 2 && calc_cur.digits[0] == 0) {
+            calc_cur.digits[0] = calc_cur.digits[1];
+            calc_cur.len = 1;
+        }
         calc_has_digits = 1;
         return;
     }
     if (key == 'C') {
-        calc_acc = 0; calc_cur = 0; calc_has_digits = 0;
-        calc_pending_op = 0; calc_error = 0;
+        bignum_free(&calc_acc); calc_acc = bignum_from_digit(0);
+        bignum_free(&calc_cur); calc_cur = bignum_from_digit(0);
+        calc_has_digits = 0;
+        calc_pending_op = 0;
+        calc_error = 0;
         return;
     }
     if (calc_error) return;   /* ignore ops/= until C clears the error */
     if (key == '=') {
         if (calc_pending_op) {
-            int b = calc_has_digits ? calc_cur : calc_acc;
-            int result;
-            if (calc_apply(calc_acc, calc_pending_op, b, &result)) { calc_error = 1; return; }
+            const bignum_t *b = calc_has_digits ? &calc_cur : &calc_acc;
+            bignum_t result;
+            int fail = calc_do_op(&calc_acc, calc_pending_op, b, &result);
+            if (fail) { calc_error = 1; return; }
+            bignum_free(&calc_acc);
             calc_acc = result;
             calc_pending_op = 0;
             calc_has_digits = 0;
@@ -1245,55 +1620,121 @@ static void calc_press(char key) {
     }
     /* Operator key (+ - * /) */
     if (calc_pending_op && calc_has_digits) {
-        int result;
-        if (calc_apply(calc_acc, calc_pending_op, calc_cur, &result)) { calc_error = 1; return; }
+        bignum_t result;
+        int fail = calc_do_op(&calc_acc, calc_pending_op, &calc_cur, &result);
+        if (fail) { calc_error = 1; return; }
+        bignum_free(&calc_acc);
         calc_acc = result;
-    } else if (!calc_pending_op) {
-        calc_acc = calc_has_digits ? calc_cur : calc_acc;
+    } else if (!calc_pending_op && calc_has_digits) {
+        bignum_t copy;
+        if (bignum_copy(&calc_cur, &copy)) { calc_error = 1; return; }
+        bignum_free(&calc_acc);
+        calc_acc = copy;
     }
     calc_pending_op = key;
-    calc_cur = 0;
+    bignum_free(&calc_cur);
+    calc_cur = bignum_from_digit(0);
     calc_has_digits = 0;
 }
 
-static int calc_display(void) { return calc_has_digits ? calc_cur : calc_acc; }
+static const bignum_t *calc_display(void) { return calc_has_digits ? &calc_cur : &calc_acc; }
 
-static void draw_int_right(int x_right, int y, int v, color_t fg) {
-    if (v < 0) {
-        unsigned int uv = (unsigned int)(-v);
-        char buf[12];
-        buf[0] = '-';
-        int n = udigits(uv);
-        for (int i = n - 1; i >= 0; i--) { buf[1+i] = (char)('0' + uv % 10); uv /= 10; }
-        buf[1+n] = 0;
-        text(x_right - (n+1) * CHAR_W, y, buf, fg);
+/* Writes up to bufcap-1 chars of n's decimal representation (sign +
+ * integer part, or a synthetic leading '0' if the integer part is
+ * empty, + '.' + fractional digits) into buf, null-terminated.
+ * Returns the chars actually written (<=bufcap-1). */
+static int bignum_to_str(const bignum_t *n, char *buf, int bufcap) {
+    int p = 0;
+    if (n->sign && p < bufcap - 1) buf[p++] = '-';
+    int int_len = n->len - n->scale;
+    if (int_len == 0) {
+        if (p < bufcap - 1) buf[p++] = '0';
     } else {
-        draw_uint_right(x_right, y, (unsigned int)v, fg);
+        for (int i = 0; i < int_len && p < bufcap - 1; i++)
+            buf[p++] = (char)('0' + n->digits[i]);
     }
+    if (n->scale > 0 && p < bufcap - 1) {
+        buf[p++] = '.';
+        for (int i = int_len; i < n->len && p < bufcap - 1; i++)
+            buf[p++] = (char)('0' + n->digits[i]);
+    }
+    buf[p] = '\0';
+    return p;
 }
 
-#define CALC_PAD    8
-#define CALC_DISP_H CHAR_W
+/* Full logical display length (sign + int part-or-"0" + '.' + frac),
+ * without materializing the (potentially huge) string. */
+static int bignum_display_len(const bignum_t *n) {
+    int int_len = n->len - n->scale;
+    int total = (n->sign ? 1 : 0) + (int_len == 0 ? 1 : int_len);
+    if (n->scale > 0) total += 1 + n->scale;
+    return total;
+}
+
+#define CALC_PAD        8
+#define CALC_DISP_LINES 6
 
 static void calc_layout(int cx0, int cy0, int cw, int ch,
-                         int *grid_x0, int *grid_y0, int *btn_sz) {
+                         int *grid_x0, int *grid_y0, int *btn_sz,
+                         int *text_x0, int *text_y0, int *cols_per_line) {
     int avail_w = cw - 2*CALC_PAD;
-    int avail_h = ch - 2*CALC_PAD - CALC_DISP_H - 6;
+    *text_x0 = cx0 + CALC_PAD;
+    *text_y0 = cy0 + CALC_PAD;
+    *cols_per_line = avail_w / CHAR_W;
+    if (*cols_per_line < 1) *cols_per_line = 1;
+
+    *grid_y0 = *text_y0 + CALC_DISP_LINES*CHAR_W + 6;
+    int avail_h = (cy0 + ch) - *grid_y0 - CALC_PAD;
     int sz = avail_w / 4;
     int sz_h = avail_h / 4;
     if (sz_h < sz) sz = sz_h;
     if (sz < 8) sz = 8;
     *btn_sz = sz;
     *grid_x0 = cx0 + CALC_PAD;
-    *grid_y0 = cy0 + CALC_PAD + CALC_DISP_H + 6;
 }
 
 static void render_calc(int cx0, int cy0, int cw, int ch) {
-    int grid_x0, grid_y0, btn_sz;
-    calc_layout(cx0, cy0, cw, ch, &grid_x0, &grid_y0, &btn_sz);
+    int grid_x0, grid_y0, btn_sz, text_x0, text_y0, cols_per_line;
+    calc_layout(cx0, cy0, cw, ch, &grid_x0, &grid_y0, &btn_sz, &text_x0, &text_y0, &cols_per_line);
 
-    if (calc_error) text(cx0 + CALC_PAD, cy0 + CALC_PAD, "Error", C_RED);
-    else             draw_int_right(cx0 + cw - CALC_PAD, cy0 + CALC_PAD, calc_display(), C_GREEN);
+    if (calc_error) {
+        text(text_x0, text_y0, "Error", C_RED);
+    } else {
+        const bignum_t *v = calc_display();
+        int total = bignum_display_len(v);
+        int cap = cols_per_line * CALC_DISP_LINES;
+        int shown_cap = (total < cap ? total : cap) + 1;
+        char buf[6*16 + 8];
+        if (shown_cap > (int)sizeof(buf)) shown_cap = sizeof(buf);
+        int shown = bignum_to_str(v, buf, shown_cap);
+
+        int pos = 0, line = 0;
+        while (pos < shown && line < CALC_DISP_LINES) {
+            char linebuf[32];
+            int n = shown - pos;
+            if (n > cols_per_line) n = cols_per_line;
+            if (n > (int)sizeof(linebuf) - 1) n = sizeof(linebuf) - 1;
+            for (int i = 0; i < n; i++) linebuf[i] = buf[pos + i];
+            linebuf[n] = '\0';
+            text(text_x0, text_y0 + line*CHAR_W, linebuf, C_GREEN);
+            pos += n;
+            line++;
+        }
+        if (total > shown && line <= CALC_DISP_LINES) {
+            char more[24];
+            int more_n = total - shown;
+            int p = 0;
+            more[p++] = '(';
+            int md = udigits((unsigned int)more_n);
+            for (int i = md - 1; i >= 0; i--) { more[1+i] = (char)('0' + more_n % 10); more_n /= 10; }
+            p += md;
+            const char *suf = " more)";
+            for (int i = 0; suf[i]; i++) more[p++] = suf[i];
+            more[p] = '\0';
+            text(text_x0, text_y0 + (line < CALC_DISP_LINES ? line : CALC_DISP_LINES-1)*CHAR_W,
+                more, C_YELLOW);
+        }
+    }
 
     for (int row = 0; row < 4; row++) {
         for (int col = 0; col < 4; col++) {
@@ -1312,8 +1753,8 @@ static void render_calc(int cx0, int cy0, int cw, int ch) {
 static void handle_calc_content_click(int mx, int my) {
     int cx0, cy0, cw, ch;
     win_content_rect(WIN_CALC, &cx0, &cy0, &cw, &ch);
-    int grid_x0, grid_y0, btn_sz;
-    calc_layout(cx0, cy0, cw, ch, &grid_x0, &grid_y0, &btn_sz);
+    int grid_x0, grid_y0, btn_sz, text_x0, text_y0, cols_per_line;
+    calc_layout(cx0, cy0, cw, ch, &grid_x0, &grid_y0, &btn_sz, &text_x0, &text_y0, &cols_per_line);
 
     if (mx < grid_x0 || my < grid_y0) return;
     int col = (mx - grid_x0) / btn_sz;
