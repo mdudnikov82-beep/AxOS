@@ -311,17 +311,77 @@ static int calc_do_op(const bignum_t *a, char op, const bignum_t *b, bignum_t *o
     return 1;
 }
 
+/* Percent's "/100" is an exact decimal-point shift, not a division -
+ * prepend two zero digits and bump scale by 2, then let the existing
+ * bignum_trim() clean up any now-redundant leading zeros. O(n), exact
+ * (no rounding, unlike routing this through bignum_div which would
+ * force the result to exactly FRAC_DIGITS scale). Returns 1 on OOM. */
+static int bignum_div100(const bignum_t *a, bignum_t *out) {
+    if (bignum_alloc(out, a->len + 2)) return 1;
+    out->digits[0] = 0;
+    out->digits[1] = 0;
+    for (int i = 0; i < a->len; i++) out->digits[2 + i] = a->digits[i];
+    out->scale = a->scale + 2;
+    out->sign = a->sign;
+    bignum_trim(out);
+    return 0;
+}
+
+/* Newton-Raphson square root using only the existing add/div - no new
+ * low-level primitive needed. Returns 0 ok, 1 OOM, 2 negative input
+ * (no real square root). x0 = a+1 is always >= the true root, so the
+ * iteration converges monotonically from above regardless of a's
+ * magnitude. 60 fixed iterations is a generous constant - quadratic
+ * convergence means this is far more than enough for any realistically
+ * hand-typed input, matching bignum_div's own "simple, safe, plenty
+ * fast" trial-subtraction approach. */
+static int calc_sqrt(const bignum_t *a, bignum_t *out) {
+    if (a->sign) return 2;
+    if (bignum_is_zero(a)) { *out = bignum_from_digit(0); return out->digits ? 0 : 1; }
+
+    bignum_t one = bignum_from_digit(1);
+    bignum_t x;
+    int fail = bignum_add(a, &one, &x);
+    bignum_free(&one);
+    if (fail) return 1;
+
+    bignum_t two = bignum_from_digit(2);
+    for (int i = 0; i < 60; i++) {
+        bignum_t q;
+        if (bignum_div(a, &x, &q)) { bignum_free(&x); bignum_free(&two); return 1; }
+        bignum_t s;
+        fail = bignum_add(&x, &q, &s);
+        bignum_free(&q);
+        if (fail) { bignum_free(&x); bignum_free(&two); return 1; }
+        bignum_t nx;
+        fail = bignum_div(&s, &two, &nx);
+        bignum_free(&s);
+        if (fail) { bignum_free(&x); bignum_free(&two); return 1; }
+        bignum_free(&x);
+        x = nx;
+    }
+    bignum_free(&two);
+    *out = x;
+    return 0;
+}
+
 static bignum_t calc_acc;
 static bignum_t calc_cur;
+static bignum_t calc_memory;
 static int  calc_has_digits = 0;
 static char calc_pending_op = 0;
 static int  calc_error = 0;
 
-static const char calc_btn_keys[16] = {
-    '7','8','9','/',
-    '4','5','6','*',
-    '1','2','3','-',
-    'C','0','=','+',
+/* 4 cols x 6 rows: row0 = scientific (%, sqrt, MR, MC), rows 1-4 are
+ * the original 4x4 digit/operator grid unchanged, row5 = M+/M- centered
+ * with the outer two cells blank. '\0' is the blank-cell sentinel. */
+static const char calc_btn_keys[24] = {
+    '%', 's', 'r', 'k',
+    '7', '8', '9', '/',
+    '4', '5', '6', '*',
+    '1', '2', '3', '-',
+    'C', '0', '=', '+',
+     0 , 'p', 'n',  0 ,
 };
 
 static void calc_press(char key) {
@@ -356,6 +416,54 @@ static void calc_press(char key) {
         return;
     }
     if (calc_error) return;
+    if (key == 'p' || key == 'n') {   /* M+ / M- */
+        const bignum_t *cur_val = calc_has_digits ? &calc_cur : &calc_acc;
+        bignum_t result;
+        int fail = (key == 'p') ? bignum_add(&calc_memory, cur_val, &result)
+                                 : bignum_sub(&calc_memory, cur_val, &result);
+        if (fail) { calc_error = 1; return; }
+        bignum_free(&calc_memory);
+        calc_memory = result;
+        return;
+    }
+    if (key == 'r') {   /* MR */
+        bignum_t copy;
+        if (bignum_copy(&calc_memory, &copy)) { calc_error = 1; return; }
+        bignum_free(&calc_cur);
+        calc_cur = copy;
+        calc_has_digits = 1;
+        return;
+    }
+    if (key == 'k') {   /* MC */
+        bignum_free(&calc_memory);
+        calc_memory = bignum_from_digit(0);
+        return;
+    }
+    if (key == '%') {
+        const bignum_t *cur_val = calc_has_digits ? &calc_cur : &calc_acc;
+        bignum_t result;
+        int fail;
+        if (calc_pending_op && calc_has_digits) {
+            bignum_t prod;
+            fail = bignum_mul(&calc_acc, &calc_cur, &prod);
+            if (!fail) { fail = bignum_div100(&prod, &result); bignum_free(&prod); }
+        } else {
+            fail = bignum_div100(cur_val, &result);
+        }
+        if (fail) { calc_error = 1; return; }
+        if (calc_has_digits) { bignum_free(&calc_cur); calc_cur = result; }
+        else                 { bignum_free(&calc_acc); calc_acc = result; }
+        return;
+    }
+    if (key == 's') {   /* sqrt */
+        const bignum_t *cur_val = calc_has_digits ? &calc_cur : &calc_acc;
+        bignum_t result;
+        int fail = calc_sqrt(cur_val, &result);
+        if (fail) { calc_error = 1; return; }
+        if (calc_has_digits) { bignum_free(&calc_cur); calc_cur = result; }
+        else                 { bignum_free(&calc_acc); calc_acc = result; }
+        return;
+    }
     if (key == '=') {
         if (calc_pending_op) {
             const bignum_t *b = calc_has_digits ? &calc_cur : &calc_acc;
@@ -429,8 +537,24 @@ static int udigits(unsigned int v) {
     return n;
 }
 
+/* Fills buf with key's button label and returns its length - most keys
+ * are still a single char, but the new scientific/memory keys need
+ * multi-char labels ("sqrt", "MR", "MC", "M+", "M-"). */
+static int calc_key_label(char key, char *buf) {
+    switch (key) {
+        case 's': buf[0]='s'; buf[1]='q'; buf[2]='r'; buf[3]='t'; buf[4]=0; return 4;
+        case 'r': buf[0]='M'; buf[1]='R'; buf[2]=0; return 2;
+        case 'k': buf[0]='M'; buf[1]='C'; buf[2]=0; return 2;
+        case 'p': buf[0]='M'; buf[1]='+'; buf[2]=0; return 2;
+        case 'n': buf[0]='M'; buf[1]='-'; buf[2]=0; return 2;
+        default:  buf[0]=key; buf[1]=0; return 1;
+    }
+}
+
 #define CALC_PAD       8
 #define CALC_DISP_LINES 6
+#define CALC_GRID_ROWS 6
+#define CALC_GRID_COLS 4
 
 static void calc_layout(const window_t *win, unsigned int *grid_x0, unsigned int *grid_y0,
                          unsigned int *btn_sz, unsigned int *text_x0, unsigned int *text_y0,
@@ -443,8 +567,8 @@ static void calc_layout(const window_t *win, unsigned int *grid_x0, unsigned int
 
     *grid_y0 = *text_y0 + CALC_DISP_LINES*ROW_H + 6;
     int avail_h = (int)(win->content_y + win->content_h) - (int)*grid_y0 - CALC_PAD;
-    int sz = avail_w / 4;
-    int sz_h = avail_h / 4;
+    int sz = avail_w / CALC_GRID_COLS;
+    int sz_h = avail_h / CALC_GRID_ROWS;
     if (sz_h < sz) sz = sz_h;
     if (sz < 8) sz = 8;
     *btn_sz = (unsigned int)sz;
@@ -497,19 +621,21 @@ static void render_calc(const window_t *win) {
         }
     }
 
-    for (unsigned int row = 0; row < 4; row++) {
-        for (unsigned int col = 0; col < 4; col++) {
+    for (unsigned int row = 0; row < CALC_GRID_ROWS; row++) {
+        for (unsigned int col = 0; col < CALC_GRID_COLS; col++) {
+            char key = calc_btn_keys[row*CALC_GRID_COLS+col];
+            if (key == 0) continue;
             unsigned int bx = grid_x0 + col*btn_sz;
             unsigned int by = grid_y0 + row*btn_sz;
-            char key = calc_btn_keys[row*4+col];
             unsigned int bg = (key == '=') ? gfx_rgb(0, 170, 0) :
                               (key == 'C') ? gfx_rgb(170, 0, 0) :
                               (key=='+'||key=='-'||key=='*'||key=='/') ? gfx_rgb(0, 0, 170) :
+                              (key=='%'||key=='s'||key=='r'||key=='k'||key=='p'||key=='n') ? gfx_rgb(110, 60, 150) :
                               gfx_rgb(20, 30, 45);
             gfx_fill_rect(bx+2, by+2, btn_sz-4, btn_sz-4, bg);
-            char lbl[2];
-            lbl[0] = key; lbl[1] = '\0';
-            gfx_draw_text(bx + btn_sz/2 - ROW_H/2, by + btn_sz/2 - ROW_H/2, lbl, gfx_rgb(255, 255, 255));
+            char lbl[6];
+            int llen = calc_key_label(key, lbl);
+            gfx_draw_text(bx + btn_sz/2 - (unsigned int)(llen*ROW_H)/2, by + btn_sz/2 - ROW_H/2, lbl, gfx_rgb(255, 255, 255));
         }
     }
 }
@@ -523,8 +649,10 @@ static int handle_content_click(const window_t *win, unsigned int mx, unsigned i
     if (mx < grid_x0 || my < grid_y0) return 0;
     unsigned int col = (mx - grid_x0) / btn_sz;
     unsigned int row = (my - grid_y0) / btn_sz;
-    if (col >= 4 || row >= 4) return 0;
-    calc_press(calc_btn_keys[row*4+col]);
+    if (col >= CALC_GRID_COLS || row >= CALC_GRID_ROWS) return 0;
+    char key = calc_btn_keys[row*CALC_GRID_COLS+col];
+    if (key == 0) return 0;
+    calc_press(key);
     return 1;
 }
 
@@ -534,9 +662,10 @@ int main(void) {
 
     calc_acc = bignum_from_digit(0);
     calc_cur = bignum_from_digit(0);
+    calc_memory = bignum_from_digit(0);
 
     window_t win;
-    window_init(&win, 380, 140, 260, 420, gfx_rgb(255, 210, 0), gfx_rgb(10, 15, 25),
+    window_init(&win, 380, 60, 260, 520, gfx_rgb(255, 210, 0), gfx_rgb(10, 15, 25),
                "AxCalc");
 
     render_calc(&win);
