@@ -268,35 +268,48 @@ unsigned int fat12_load(char *filename, unsigned char *buffer, unsigned int max_
     return total_read;
 }
 
+/* Write ordering is deliberately "data before metadata", the standard
+ * lighter alternative to full journaling: allocate a FRESH cluster
+ * chain (old_cluster's clusters are still marked used in the FAT at
+ * this point, so alloc_chain() can't land on them), write + flush its
+ * data FIRST, only THEN free the old chain and flush the FAT, and
+ * commit the directory entry LAST - the smallest possible final write,
+ * with every cluster it could reference already durably on disk. A
+ * crash at any point before that final flush leaves the OLD file (if
+ * any) completely intact rather than a directory entry pointing at
+ * not-yet-written data. Found this matters the hard way: the previous
+ * FAT-then-dir-then-data order let many repeated QEMU force-kills
+ * during one heavy live-testing session (dozens of boots, each
+ * rewriting BOOT.LOG) garble root-directory entries after enough
+ * repetitions - see project_axsnake_highscore memory for the repro. */
 int fat12_write(char *filename, unsigned char *data, unsigned int size) {
     if (!ready) return 0;
     char name[8], ext[3];
     parse_83(filename, name, ext);
 
     struct fat12_dir_entry *entry = find_entry(name, ext);
-    if (!entry) {
+    int is_new = !entry;
+    if (is_new) {
         entry = find_free_entry();
         if (!entry) return 0;
-        for (int i = 0; i < 8; i++) entry->name[i] = name[i];
-        for (int i = 0; i < 3; i++) entry->ext[i]  = ext[i];
-        entry->attr = 0x20;
-        for (int i = 0; i < 10; i++) entry->reserved[i] = 0;
-        entry->time = 0; entry->date = 0;
-    } else if (entry->start_cluster) {
-        free_chain(entry->start_cluster);
     }
+    unsigned int old_cluster = is_new ? 0 : entry->start_cluster;
 
-    entry->start_cluster = 0;
-    entry->file_size = 0;
+    unsigned int fat_start    = bpb->reserved_sectors;
+    unsigned int fat_end      = fat_start + (unsigned int)bpb->num_fats * bpb->sectors_per_fat;
+    unsigned int root_start   = fat_end;
+    unsigned int root_sectors = ((unsigned int)bpb->root_entries * 32) / bpb->bytes_per_sector;
+    unsigned int root_end     = root_start + root_sectors;
 
+    unsigned int new_cluster = 0;
     if (size) {
         unsigned int csz = (unsigned int)bpb->sectors_per_cluster * bpb->bytes_per_sector;
         unsigned int nc = (size + csz - 1) / csz;
-        unsigned int start = alloc_chain(nc);
-        if (!start) return 0;
+        new_cluster = alloc_chain(nc);
+        if (!new_cluster) return 0;
 
         unsigned char *data_area = ram + fat12_data_offset();
-        unsigned int cluster = start, written = 0;
+        unsigned int cluster = new_cluster, written = 0;
         while (cluster >= 2 && cluster < 0xFF8 && written < size) {
             unsigned int chunk = csz;
             if (chunk > size - written) chunk = size - written;
@@ -305,32 +318,33 @@ int fat12_write(char *filename, unsigned char *data, unsigned int size) {
             written += chunk;
             cluster = fat_get(cluster);
         }
-        entry->start_cluster = (unsigned short)start;
-        entry->file_size = size;
-    }
 
-    /* Write only changed sectors: FAT, root dir, and data clusters.
-     * Writing all 2048 sectors causes virtio queue desync after the
-     * 2048 reads already done by fat12_init. */
-    {
-        unsigned int fat_start    = bpb->reserved_sectors;
-        unsigned int fat_end      = fat_start + (unsigned int)bpb->num_fats * bpb->sectors_per_fat;
-        unsigned int root_start   = fat_end;
-        unsigned int root_sectors = ((unsigned int)bpb->root_entries * 32) / bpb->bytes_per_sector;
-        unsigned int root_end     = root_start + root_sectors;
-
-        fat12_flush_range(fat_start, fat_end);    /* FAT */
-        fat12_flush_range(root_start, root_end);  /* root directory */
-
-        if (size && entry->start_cluster) {
-            unsigned int cl = entry->start_cluster;
-            while (cl >= 2 && cl < 0xFF8) {
-                unsigned int data_lba = root_end + (cl - 2) * bpb->sectors_per_cluster;
-                fat12_flush_range(data_lba, data_lba + bpb->sectors_per_cluster);
-                cl = fat_get(cl);
-            }
+        /* Step 1: new data, durably on disk before anything references it. */
+        unsigned int cl = new_cluster;
+        while (cl >= 2 && cl < 0xFF8) {
+            unsigned int data_lba = root_end + (cl - 2) * bpb->sectors_per_cluster;
+            fat12_flush_range(data_lba, data_lba + bpb->sectors_per_cluster);
+            cl = fat_get(cl);
         }
     }
+
+    /* Step 2: free the old chain (now that the new one's data is safe)
+     * and flush the FAT once, covering both the new chain's entries
+     * (already set by alloc_chain()) and the old chain's now-freed ones. */
+    if (old_cluster) free_chain(old_cluster);
+    fat12_flush_range(fat_start, fat_end);
+
+    /* Step 3: commit - the directory entry is the last, smallest write. */
+    if (is_new) {
+        for (int i = 0; i < 8; i++) entry->name[i] = name[i];
+        for (int i = 0; i < 3; i++) entry->ext[i]  = ext[i];
+        entry->attr = 0x20;
+        for (int i = 0; i < 10; i++) entry->reserved[i] = 0;
+        entry->time = 0; entry->date = 0;
+    }
+    entry->start_cluster = (unsigned short)new_cluster;
+    entry->file_size = size;
+    fat12_flush_range(root_start, root_end);
 
     return 1;
 }
