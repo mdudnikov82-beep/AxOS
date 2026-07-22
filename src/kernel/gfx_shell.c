@@ -283,6 +283,36 @@ static void rtc_time(int *h, int *m, int *s) {
     outb(0x70,0x00); *s = bcd(inb(0x71));
     *h = (*h + UTC_OFFSET) % 24;
 }
+/* Day/month/year for AxClock's date line - same regs/bcd() idiom as
+ * rtc_time(), just the 3 calendar registers instead of the 3 clock
+ * ones. CMOS year is a 2-digit register - century isn't tracked
+ * anywhere in this codebase, "20xx" is a safe assumption for a hobby
+ * OS's foreseeable lifetime. */
+static void rtc_date(int *day, int *mon, int *year) {
+    outb(0x70,0x07); *day  = bcd(inb(0x71));
+    outb(0x70,0x08); *mon  = bcd(inb(0x71));
+    outb(0x70,0x09); *year = 2000 + bcd(inb(0x71));
+}
+
+/* ── PC speaker (AxClock's alarm tone) ────────────────────────────────
+ * Same PIT-channel-2 + port-0x61 bit-banging as src/drivers/speaker.c's
+ * speaker_on()/speaker_off() (used elsewhere via the SYS_BEEP syscall)
+ * - reimplemented here as plain static functions since gfx_shell.c is
+ * monolithic ring-0 and already does its own direct inb/outb (see
+ * rtc_time() above), not going through the syscall path at all. */
+static void speaker_on(unsigned int freq) {
+    if (freq == 0) return;
+    unsigned int divisor = 1193182 / freq;
+    outb(0x43, 0xB6);
+    outb(0x42, (unsigned char)(divisor & 0xFF));
+    outb(0x42, (unsigned char)((divisor >> 8) & 0xFF));
+    unsigned char gate = inb(0x61);
+    outb(0x61, gate | 0x03);
+}
+static void speaker_off(void) {
+    unsigned char gate = inb(0x61);
+    outb(0x61, gate & ~0x03);
+}
 
 /* ── 8×8 bitmap font (ASCII 0x20–0x7F, public-domain VGA font) ───── */
 static const unsigned char F[96][8] = {
@@ -487,26 +517,27 @@ static void draw_num2(int x, int y, int v, color_t fg) {
 }
 
 /* ── UI state ─────────────────────────────────────────────────────── */
-typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT, SCR_FILES, SCR_CALC, SCR_NOTEPAD, SCR_SNAKE } Screen;
+typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT, SCR_FILES, SCR_CALC, SCR_NOTEPAD, SCR_SNAKE, SCR_CLOCK } Screen;
 static Screen scr = SCR_DESKTOP;
 
-/* Icon hit-boxes (desktop). Shrunk from 112px-wide/128px-pitch cards to
- * 96px-wide/108px-pitch when AxSnake became the 7th icon - the old
+/* Icon hit-boxes (desktop). Shrunk from 96px-wide/108px-pitch cards to
+ * 84px-wide/94px-pitch when AxClock became the 8th icon - the old
  * width had zero room left before hitting SW=800. draw_icon() (below)
  * is fully parametric on ic->w (shadow/card/BMP-centering/text_center
- * all read it, nothing hardcodes 112) so this is a safe data-only
- * change, verified by reading draw_icon() before making it. */
+ * all read it, nothing hardcodes a fixed size) so this is a safe
+ * data-only change, verified by reading draw_icon() before making it. */
 struct icon { int x,y,w,h; Screen dst; const char *label; color_t color; };
 static const struct icon icons[] = {
-    { 28,  60, 96, 96, SCR_TERMINAL, "TERM",  C_BLUE   },
-    { 136, 60, 96, 96, SCR_ABOUT,    "ABOUT", C_MAROON },
-    { 244, 60, 96, 96, SCR_PAINT,    "PAINT", C_DGREEN },
-    { 352, 60, 96, 96, SCR_FILES,    "FILES", C_TEAL   },
-    { 460, 60, 96, 96, SCR_CALC,     "CALC",  C_YELLOW },
-    { 568, 60, 96, 96, SCR_NOTEPAD,  "NOTE",  C_CYAN   },
-    { 676, 60, 96, 96, SCR_SNAKE,    "SNAKE", C_GREEN  },
+    { 28,  60, 84, 84, SCR_TERMINAL, "TERM",  C_BLUE   },
+    { 122, 60, 84, 84, SCR_ABOUT,    "ABOUT", C_MAROON },
+    { 216, 60, 84, 84, SCR_PAINT,    "PAINT", C_DGREEN },
+    { 310, 60, 84, 84, SCR_FILES,    "FILES", C_TEAL   },
+    { 404, 60, 84, 84, SCR_CALC,     "CALC",  C_YELLOW },
+    { 498, 60, 84, 84, SCR_NOTEPAD,  "NOTE",  C_CYAN   },
+    { 592, 60, 84, 84, SCR_SNAKE,    "SNAKE", C_GREEN  },
+    { 686, 60, 84, 84, SCR_CLOCK,    "CLOCK", 0xFFA500u },
 };
-#define N_ICONS 7
+#define N_ICONS 8
 
 /* ── Window manager (Terminal + About only - see plan/memory for why
  * Paint stays a full-screen mode, matching the RISC-V reference's own
@@ -532,7 +563,8 @@ typedef struct {
 #define WIN_CALC    3
 #define WIN_NOTEPAD 4
 #define WIN_SNAKE   5
-#define N_WINDOWS   6
+#define WIN_CLOCK   6
+#define N_WINDOWS   7
 
 /* Sizes fit each screen's existing content (TROWS x TCOLS grid for
  * Terminal, the logo+info+feature-list block for About) plus the
@@ -549,8 +581,9 @@ static win_t windows[N_WINDOWS] = {
     { 380, 60,  260, 520, 0 },   /* WIN_CALC  */
     { 90,  175, 660, 380, 0 },   /* WIN_NOTEPAD */
     { 230, 195, 340, 294, 0 },   /* WIN_SNAKE */
+    { 430, 230, 350, 300, 0 },   /* WIN_CLOCK */
 };
-static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT, WIN_FILES, WIN_CALC, WIN_NOTEPAD, WIN_SNAKE };  /* [0]=back .. [N-1]=front/focused */
+static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT, WIN_FILES, WIN_CALC, WIN_NOTEPAD, WIN_SNAKE, WIN_CLOCK };  /* [0]=back .. [N-1]=front/focused */
 
 static int dragging_win = -1;
 static int drag_off_x = 0, drag_off_y = 0;
@@ -2624,6 +2657,151 @@ static void handle_files_content_click(int mx, int my) {
     }
 }
 
+/* ── AxClock (WIN_CLOCK) state ────────────────────────────────────────
+ * First spinner-style widget in this codebase - a target alarm hour/
+ * minute adjustable via [-]/[+] buttons, plus one state button that
+ * doubles as arm/cancel/dismiss depending on current state (avoids
+ * needing 3 separate buttons for 3 states). Real wall clock via the
+ * existing rtc_time()/rtc_date() CMOS RTC (same source the titlebar
+ * clock already uses) - RISC-V has no RTC hardware at all, so its
+ * mirror of this file shows uptime instead of a real date/time; see
+ * the AxClock memory for why.
+ *
+ * Deliberate simplification: the alarm compares only hour:minute, no
+ * day-wraparound - arming it for a time earlier than the current
+ * clock reading fires immediately rather than waiting for "tomorrow".
+ * Fine for a hobby-OS alarm tested by setting it a minute or two
+ * ahead; full calendar arithmetic is out of scope. */
+static int clock_alarm_h = 0;
+static int clock_alarm_m = 0;
+static int clock_armed = 0;
+static int clock_fired = 0;
+static int clock_flash_tick = 0;
+
+static void clock_check_alarm(void) {
+    if (!clock_armed || clock_fired) return;
+    int h, m, s;
+    rtc_time(&h, &m, &s);
+    if (h > clock_alarm_h || (h == clock_alarm_h && m >= clock_alarm_m)) {
+        clock_fired = 1;
+        speaker_on(880);
+    }
+}
+
+/* CLOCK_SPIN_SZ/CLOCK_BTN_H must both exceed 24px (comfortably, not
+ * just barely) - the x86 PS/2 mouse driver quantizes position to an
+ * 80x25 grid (see the main loop's "10x/24x" comment), a REAL 24px
+ * vertical pitch affecting every user's clicks, not just this test
+ * tooling. A button exactly 24px tall can straddle two grid rows with
+ * neither one's snapped position landing inside it, depending on the
+ * button's absolute Y offset - found live: the alarm spinner buttons
+ * silently ate ~4 of 5 clicks at the original 24px size. Every other
+ * clickable widget in this file (AxCalc's buttons, AxFiles' rows) was
+ * already comfortably bigger than 24px, so nothing else hit this. */
+#define CLOCK_PAD          8
+#define CLOCK_SPIN_SZ      48
+#define CLOCK_BTN_H        40
+#define CLOCK_DATE_Y_OFF   (CLOCK_PAD + CHAR_W + 4)
+#define CLOCK_ALARM_LBL_Y_OFF (CLOCK_DATE_Y_OFF + CHAR_W + 14)
+#define CLOCK_SPIN_Y_OFF   (CLOCK_ALARM_LBL_Y_OFF + CHAR_W + 8)
+#define CLOCK_BTN_Y_OFF    (CLOCK_SPIN_Y_OFF + CLOCK_SPIN_SZ + 14)
+#define CLOCK_HMINUS_X_OFF CLOCK_PAD
+#define CLOCK_NUMH_X_OFF   (CLOCK_HMINUS_X_OFF + CLOCK_SPIN_SZ + 6)
+#define CLOCK_HPLUS_X_OFF  (CLOCK_NUMH_X_OFF + 3*CHAR_W)
+#define CLOCK_MMINUS_X_OFF (CLOCK_HPLUS_X_OFF + CLOCK_SPIN_SZ + 20)
+#define CLOCK_NUMM_X_OFF   (CLOCK_MMINUS_X_OFF + CLOCK_SPIN_SZ + 6)
+#define CLOCK_MPLUS_X_OFF  (CLOCK_NUMM_X_OFF + 3*CHAR_W)
+
+static void render_clock(int cx0, int cy0, int cw, int ch) {
+    clock_check_alarm();
+    clock_flash_tick++;
+
+    int h, m, s;
+    rtc_time(&h, &m, &s);
+    char tbuf[9];
+    tbuf[0]=(char)('0'+h/10); tbuf[1]=(char)('0'+h%10); tbuf[2]=':';
+    tbuf[3]=(char)('0'+m/10); tbuf[4]=(char)('0'+m%10); tbuf[5]=':';
+    tbuf[6]=(char)('0'+s/10); tbuf[7]=(char)('0'+s%10); tbuf[8]=0;
+    text(cx0 + CLOCK_PAD, cy0 + CLOCK_PAD, tbuf, C_GREEN);
+
+    int day, mon, year;
+    rtc_date(&day, &mon, &year);
+    char dbuf[11];
+    dbuf[0]=(char)('0'+day/10); dbuf[1]=(char)('0'+day%10); dbuf[2]='.';
+    dbuf[3]=(char)('0'+mon/10); dbuf[4]=(char)('0'+mon%10); dbuf[5]='.';
+    dbuf[6]=(char)('0'+(year/1000)%10); dbuf[7]=(char)('0'+(year/100)%10);
+    dbuf[8]=(char)('0'+(year/10)%10);   dbuf[9]=(char)('0'+year%10);
+    dbuf[10]=0;
+    text(cx0 + CLOCK_PAD, cy0 + CLOCK_DATE_Y_OFF, dbuf, C_GRAY);
+
+    text(cx0 + CLOCK_PAD, cy0 + CLOCK_ALARM_LBL_Y_OFF, "Alarm:", C_WHITE);
+
+    int spin_y = cy0 + CLOCK_SPIN_Y_OFF;
+    fill(cx0+CLOCK_HMINUS_X_OFF, spin_y, CLOCK_SPIN_SZ, CLOCK_SPIN_SZ, C_NAVY);
+    text(cx0+CLOCK_HMINUS_X_OFF+CLOCK_SPIN_SZ/2-CHAR_W/2, spin_y+CLOCK_SPIN_SZ/2-CHAR_W/2, "-", C_WHITE);
+    char hb[3]; hb[0]=(char)('0'+clock_alarm_h/10); hb[1]=(char)('0'+clock_alarm_h%10); hb[2]=0;
+    text(cx0+CLOCK_NUMH_X_OFF, spin_y+CLOCK_SPIN_SZ/2-CHAR_W/2, hb, C_YELLOW);
+    fill(cx0+CLOCK_HPLUS_X_OFF, spin_y, CLOCK_SPIN_SZ, CLOCK_SPIN_SZ, C_NAVY);
+    text(cx0+CLOCK_HPLUS_X_OFF+CLOCK_SPIN_SZ/2-CHAR_W/2, spin_y+CLOCK_SPIN_SZ/2-CHAR_W/2, "+", C_WHITE);
+
+    fill(cx0+CLOCK_MMINUS_X_OFF, spin_y, CLOCK_SPIN_SZ, CLOCK_SPIN_SZ, C_NAVY);
+    text(cx0+CLOCK_MMINUS_X_OFF+CLOCK_SPIN_SZ/2-CHAR_W/2, spin_y+CLOCK_SPIN_SZ/2-CHAR_W/2, "-", C_WHITE);
+    char mb[3]; mb[0]=(char)('0'+clock_alarm_m/10); mb[1]=(char)('0'+clock_alarm_m%10); mb[2]=0;
+    text(cx0+CLOCK_NUMM_X_OFF, spin_y+CLOCK_SPIN_SZ/2-CHAR_W/2, mb, C_YELLOW);
+    fill(cx0+CLOCK_MPLUS_X_OFF, spin_y, CLOCK_SPIN_SZ, CLOCK_SPIN_SZ, C_NAVY);
+    text(cx0+CLOCK_MPLUS_X_OFF+CLOCK_SPIN_SZ/2-CHAR_W/2, spin_y+CLOCK_SPIN_SZ/2-CHAR_W/2, "+", C_WHITE);
+
+    int btn_y = cy0 + CLOCK_BTN_Y_OFF;
+    int btn_w = cw - 2*CLOCK_PAD;
+    color_t btn_bg; const char *btn_lbl;
+    if (clock_fired) {
+        btn_bg = (clock_flash_tick/10)%2 ? C_MAROON : 0x500000u;
+        btn_lbl = "ALARM! tap to stop";
+    } else if (clock_armed) {
+        btn_bg = C_DGREEN;
+        btn_lbl = "Armed (tap to cancel)";
+    } else {
+        btn_bg = C_NAVY;
+        btn_lbl = "Arm";
+    }
+    fill(cx0+CLOCK_PAD, btn_y, btn_w, CLOCK_BTN_H, btn_bg);
+    int lbl_len = 0; while (btn_lbl[lbl_len]) lbl_len++;
+    text(cx0+CLOCK_PAD + btn_w/2 - (lbl_len*CHAR_W)/2, btn_y + CLOCK_BTN_H/2 - CHAR_W/2, btn_lbl, C_WHITE);
+}
+
+static void handle_clock_content_click(int mx, int my) {
+    int cx0, cy0, cw, ch;
+    win_content_rect(WIN_CLOCK, &cx0, &cy0, &cw, &ch);
+
+    int spin_y = cy0 + CLOCK_SPIN_Y_OFF;
+    if (my >= spin_y && my < spin_y + CLOCK_SPIN_SZ) {
+        if (mx >= cx0+CLOCK_HMINUS_X_OFF && mx < cx0+CLOCK_HMINUS_X_OFF+CLOCK_SPIN_SZ) {
+            clock_alarm_h = (clock_alarm_h + 23) % 24; return;
+        }
+        if (mx >= cx0+CLOCK_HPLUS_X_OFF && mx < cx0+CLOCK_HPLUS_X_OFF+CLOCK_SPIN_SZ) {
+            clock_alarm_h = (clock_alarm_h + 1) % 24; return;
+        }
+        if (mx >= cx0+CLOCK_MMINUS_X_OFF && mx < cx0+CLOCK_MMINUS_X_OFF+CLOCK_SPIN_SZ) {
+            clock_alarm_m = (clock_alarm_m + 59) % 60; return;
+        }
+        if (mx >= cx0+CLOCK_MPLUS_X_OFF && mx < cx0+CLOCK_MPLUS_X_OFF+CLOCK_SPIN_SZ) {
+            clock_alarm_m = (clock_alarm_m + 1) % 60; return;
+        }
+    }
+
+    int btn_y = cy0 + CLOCK_BTN_Y_OFF;
+    int btn_w = cw - 2*CLOCK_PAD;
+    if (my >= btn_y && my < btn_y + CLOCK_BTN_H && mx >= cx0+CLOCK_PAD && mx < cx0+CLOCK_PAD+btn_w) {
+        if (clock_fired) {
+            clock_fired = 0; clock_armed = 0; speaker_off();
+        } else if (clock_armed) {
+            clock_armed = 0;
+        } else {
+            clock_armed = 1; clock_fired = 0;
+        }
+    }
+}
+
 /* ── Mouse click detection ───────────────────────────────────────── */
 static int prev_btn = 0;
 
@@ -2638,6 +2816,9 @@ static void handle_click(int mx, int my) {
                  * the window, matching conventional WM behavior. */
                 win_raise(hit);
                 if (win_hit_close(hit, mx, my)) {
+                    if (hit == WIN_CLOCK && clock_fired) {
+                        clock_fired = 0; clock_armed = 0; speaker_off();
+                    }
                     win_close(hit);
                 } else if (win_hit_titlebar(hit, mx, my)) {
                     dragging_win = hit;
@@ -2649,6 +2830,8 @@ static void handle_click(int mx, int my) {
                     handle_calc_content_click(mx, my);
                 } else if (hit == WIN_NOTEPAD) {
                     handle_notepad_content_click(mx, my);
+                } else if (hit == WIN_CLOCK) {
+                    handle_clock_content_click(mx, my);
                 }
                 /* else: click landed in the window's content - no
                  * per-content click handling needed for Terminal/About. */
@@ -2683,6 +2866,8 @@ static void handle_click(int mx, int my) {
                             int was_open = windows[WIN_SNAKE].open;
                             win_open(WIN_SNAKE);
                             if (!was_open) { snake_load_highscore(); snake_reset(); }
+                        } else if (icons[i].dst == SCR_CLOCK) {
+                            win_open(WIN_CLOCK);
                         }
                     }
                 }
@@ -2906,7 +3091,8 @@ void gfx_main(void) {
                                         idx == WIN_ABOUT ? "AxAbout" :
                                         idx == WIN_FILES ? "AxFiles" :
                                         idx == WIN_CALC ? "AxCalc" :
-                                        idx == WIN_NOTEPAD ? "AxNotepad" : "AxSnake";
+                                        idx == WIN_NOTEPAD ? "AxNotepad" :
+                                        idx == WIN_SNAKE ? "AxSnake" : "AxClock";
                     render_window_chrome(idx, title);
                     int cx0, cy0, cw, ch;
                     win_content_rect(idx, &cx0, &cy0, &cw, &ch);
@@ -2915,7 +3101,8 @@ void gfx_main(void) {
                     else if (idx == WIN_FILES)    render_files(cx0, cy0, cw, ch);
                     else if (idx == WIN_CALC)     render_calc(cx0, cy0, cw, ch);
                     else if (idx == WIN_NOTEPAD)  render_notepad(cx0, cy0, cw, ch);
-                    else                          render_snake(cx0, cy0, cw, ch);
+                    else if (idx == WIN_SNAKE)    render_snake(cx0, cy0, cw, ch);
+                    else                          render_clock(cx0, cy0, cw, ch);
                 }
                 break;
             case SCR_TERMINAL: break;   /* scr never actually becomes this anymore - Terminal is a window now */
@@ -2924,6 +3111,7 @@ void gfx_main(void) {
             case SCR_CALC:     break;   /* same */
             case SCR_NOTEPAD:  break;   /* same */
             case SCR_SNAKE:    break;   /* same */
+            case SCR_CLOCK:    break;   /* same */
             case SCR_PAINT:    render_paint(); break;
         }
 
