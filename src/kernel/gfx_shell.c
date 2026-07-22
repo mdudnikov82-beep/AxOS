@@ -517,27 +517,28 @@ static void draw_num2(int x, int y, int v, color_t fg) {
 }
 
 /* ── UI state ─────────────────────────────────────────────────────── */
-typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT, SCR_FILES, SCR_CALC, SCR_NOTEPAD, SCR_SNAKE, SCR_CLOCK } Screen;
+typedef enum { SCR_DESKTOP = 0, SCR_TERMINAL, SCR_ABOUT, SCR_PAINT, SCR_FILES, SCR_CALC, SCR_NOTEPAD, SCR_SNAKE, SCR_CLOCK, SCR_TODO } Screen;
 static Screen scr = SCR_DESKTOP;
 
-/* Icon hit-boxes (desktop). Shrunk from 96px-wide/108px-pitch cards to
- * 84px-wide/94px-pitch when AxClock became the 8th icon - the old
+/* Icon hit-boxes (desktop). Shrunk from 84px-wide/94px-pitch cards to
+ * 76px-wide/85px-pitch when AxTodo became the 9th icon - the old
  * width had zero room left before hitting SW=800. draw_icon() (below)
  * is fully parametric on ic->w (shadow/card/BMP-centering/text_center
  * all read it, nothing hardcodes a fixed size) so this is a safe
  * data-only change, verified by reading draw_icon() before making it. */
 struct icon { int x,y,w,h; Screen dst; const char *label; color_t color; };
 static const struct icon icons[] = {
-    { 28,  60, 84, 84, SCR_TERMINAL, "TERM",  C_BLUE   },
-    { 122, 60, 84, 84, SCR_ABOUT,    "ABOUT", C_MAROON },
-    { 216, 60, 84, 84, SCR_PAINT,    "PAINT", C_DGREEN },
-    { 310, 60, 84, 84, SCR_FILES,    "FILES", C_TEAL   },
-    { 404, 60, 84, 84, SCR_CALC,     "CALC",  C_YELLOW },
-    { 498, 60, 84, 84, SCR_NOTEPAD,  "NOTE",  C_CYAN   },
-    { 592, 60, 84, 84, SCR_SNAKE,    "SNAKE", C_GREEN  },
-    { 686, 60, 84, 84, SCR_CLOCK,    "CLOCK", 0xFFA500u },
+    { 22,  60, 76, 76, SCR_TERMINAL, "TERM",  C_BLUE   },
+    { 107, 60, 76, 76, SCR_ABOUT,    "ABOUT", C_MAROON },
+    { 192, 60, 76, 76, SCR_PAINT,    "PAINT", C_DGREEN },
+    { 277, 60, 76, 76, SCR_FILES,    "FILES", C_TEAL   },
+    { 362, 60, 76, 76, SCR_CALC,     "CALC",  C_YELLOW },
+    { 447, 60, 76, 76, SCR_NOTEPAD,  "NOTE",  C_CYAN   },
+    { 532, 60, 76, 76, SCR_SNAKE,    "SNAKE", C_GREEN  },
+    { 617, 60, 76, 76, SCR_CLOCK,    "CLOCK", 0xFFA500u },
+    { 702, 60, 76, 76, SCR_TODO,     "TODO",  0xDCB400u },
 };
-#define N_ICONS 8
+#define N_ICONS 9
 
 /* ── Window manager (Terminal + About only - see plan/memory for why
  * Paint stays a full-screen mode, matching the RISC-V reference's own
@@ -564,7 +565,8 @@ typedef struct {
 #define WIN_NOTEPAD 4
 #define WIN_SNAKE   5
 #define WIN_CLOCK   6
-#define N_WINDOWS   7
+#define WIN_TODO    7
+#define N_WINDOWS   8
 
 /* Sizes fit each screen's existing content (TROWS x TCOLS grid for
  * Terminal, the logo+info+feature-list block for About) plus the
@@ -582,8 +584,9 @@ static win_t windows[N_WINDOWS] = {
     { 90,  175, 660, 380, 0 },   /* WIN_NOTEPAD */
     { 230, 195, 340, 294, 0 },   /* WIN_SNAKE */
     { 430, 230, 350, 300, 0 },   /* WIN_CLOCK */
+    { 260, 60,  480, 420, 0 },   /* WIN_TODO  */
 };
-static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT, WIN_FILES, WIN_CALC, WIN_NOTEPAD, WIN_SNAKE, WIN_CLOCK };  /* [0]=back .. [N-1]=front/focused */
+static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT, WIN_FILES, WIN_CALC, WIN_NOTEPAD, WIN_SNAKE, WIN_CLOCK, WIN_TODO };  /* [0]=back .. [N-1]=front/focused */
 
 static int dragging_win = -1;
 static int drag_off_x = 0, drag_off_y = 0;
@@ -2802,6 +2805,202 @@ static void handle_clock_content_click(int mx, int my) {
     }
 }
 
+/* ── AxTodo (WIN_TODO) state ───────────────────────────────────────────
+ * Checklist with disk persistence via fat12_write()/fat12_load() (same
+ * ones AxNotepad/AxPaint/AxFiles already use) - auto-saved on every
+ * mutation (add/toggle/delete) instead of a manual Save/Load pair, a
+ * checklist's edits are small and frequent unlike a text document or a
+ * painting. Row list + inline delete glyph + single-line Add modal are
+ * the exact same shapes AxFiles already established for its own list/
+ * New-file prompt. */
+#define TODO_MAX 10
+#define TODO_TEXT_MAX 27
+typedef struct {
+    char text[TODO_TEXT_MAX + 1];
+    int  done;
+} todo_item_t;
+static todo_item_t todos[TODO_MAX];
+static int todo_count = 0;
+static int todo_inited = 0;
+
+static int  todo_input_mode;   /* 0=off, 1=adding */
+static char todo_input_buf[TODO_TEXT_MAX + 1];
+static int  todo_input_len;
+
+#define TODO_FILE "TODO.TXT"
+#define TODO_BUF_MAX 512   /* 10 tasks * (1 flag + 1 space + 27 text + 1 nl) = 300, generous */
+
+static void todo_save(void) {
+    static unsigned char buf[TODO_BUF_MAX];
+    unsigned int p = 0;
+    for (int i = 0; i < todo_count && p + TODO_TEXT_MAX + 3 < TODO_BUF_MAX; i++) {
+        buf[p++] = todos[i].done ? '1' : '0';
+        buf[p++] = ' ';
+        for (int j = 0; todos[i].text[j] && j < TODO_TEXT_MAX; j++) buf[p++] = (unsigned char)todos[i].text[j];
+        buf[p++] = '\n';
+    }
+    fat12_write(TODO_FILE, buf, p);
+}
+
+static void todo_load(void) {
+    todo_count = 0;
+    static unsigned char buf[TODO_BUF_MAX];
+    unsigned int n = fat12_load(TODO_FILE, buf, TODO_BUF_MAX);
+    if (!n) return;
+
+    unsigned int i = 0;
+    while (i < n && todo_count < TODO_MAX) {
+        if (i + 2 > n) break;
+        int done = (buf[i] == '1');
+        i += 2;   /* flag + space */
+        int j = 0;
+        while (i < n && buf[i] != '\n' && j < TODO_TEXT_MAX) todos[todo_count].text[j++] = (char)buf[i++];
+        todos[todo_count].text[j] = 0;
+        todos[todo_count].done = done;
+        todo_count++;
+        while (i < n && buf[i] != '\n') i++;   /* skip any overflow to the real newline */
+        if (i < n) i++;   /* skip the newline itself */
+    }
+}
+
+static void todo_input_confirm(void) {
+    if (todo_input_len > 0 && todo_count < TODO_MAX) {
+        int i = 0;
+        for (; i < todo_input_len; i++) todos[todo_count].text[i] = todo_input_buf[i];
+        todos[todo_count].text[i] = 0;
+        todos[todo_count].done = 0;
+        todo_count++;
+        todo_save();
+    }
+    todo_input_mode = 0;
+}
+
+static void todo_input_press(char c) {
+    if (c == 0) return;
+    if (c == '\n') { todo_input_confirm(); return; }
+    if (c == '\b') {
+        if (todo_input_len > 0) { todo_input_len--; todo_input_buf[todo_input_len] = 0; }
+        return;
+    }
+    if (todo_input_len < TODO_TEXT_MAX) {
+        todo_input_buf[todo_input_len++] = c;
+        todo_input_buf[todo_input_len] = 0;
+    }
+}
+
+#define TODO_PAD 10
+/* Row/button pitch must exceed 24px, NOT the CHAR_W(16) text glyph
+ * height - the x86 PS/2 mouse driver quantizes clicks to an 80x25 grid
+ * (24px vertical pitch, see gfx_shell.c's main loop comment), a REAL
+ * pitch affecting every user's clicks. A 16px-tall row/button can land
+ * entirely between two grid lines depending on its absolute Y offset -
+ * found live exactly like AxClock's spinner bug: every "[Add]"/row/
+ * [OK]/[Cancel] click silently missed at the original CHAR_W pitch.
+ * Text still renders at its natural CHAR_W glyph height, just with more
+ * vertical space between rows now. */
+#define TODO_ROW_H 32
+
+/* Shared by render + click hit-testing so they can't drift, same
+ * reasoning as AxFiles' files_layout(). */
+static void todo_layout(int cx0, int cy0, int cw, int ch,
+                        int *list_y0, int *del_x, int *add_y) {
+    (void)ch;
+    *list_y0 = cy0 + TODO_PAD;
+    *del_x   = cx0 + cw - TODO_PAD - 3*CHAR_W;
+    *add_y   = *list_y0 + TODO_MAX*TODO_ROW_H + 10;
+}
+
+static void render_todo_list(int cx0, int cy0, int cw, int ch) {
+    int list_y0, del_x, add_y;
+    todo_layout(cx0, cy0, cw, ch, &list_y0, &del_x, &add_y);
+
+    if (todo_count == 0) text(cx0 + TODO_PAD, list_y0, "(no tasks yet)", C_GRAY);
+
+    for (int i = 0; i < todo_count; i++) {
+        int ry = list_y0 + i*TODO_ROW_H;
+        const char *box = todos[i].done ? "[x] " : "[ ] ";
+        color_t color = todos[i].done ? C_GRAY : C_WHITE;
+        text(cx0 + TODO_PAD, ry, box, color);
+        text(cx0 + TODO_PAD + 4*CHAR_W, ry, todos[i].text, color);
+        text(del_x, ry, "[x]", C_RED);
+    }
+
+    fill(cx0 + TODO_PAD, add_y - 6, cw - 2*TODO_PAD, 1, C_GRAY);
+    text(cx0 + TODO_PAD, add_y, "[ Add ]", C_DGREEN);
+}
+
+/* Modal Add-task text-entry prompt - preempts the list entirely while
+ * active, same shape as AxFiles' render_files_input(). */
+static void render_todo_input(int cx0, int cy0, int cw, int ch) {
+    (void)cw; (void)ch;
+    int x = cx0 + TODO_PAD;
+    int y = cy0 + TODO_PAD;
+    text(x, y, "New task:", C_TEAL);
+
+    int input_y = y + 2*TODO_ROW_H;
+    text(x, input_y, todo_input_buf, C_WHITE);
+    fill(x + todo_input_len*CHAR_W, input_y, CHAR_W/2, CHAR_W, C_WHITE);
+
+    int btn_y = input_y + 2*TODO_ROW_H;
+    text(x, btn_y, "[OK]", C_DGREEN);
+    text(x + 5*CHAR_W, btn_y, "[Cancel]", C_RED);
+}
+
+static void render_todo(int cx0, int cy0, int cw, int ch) {
+    if (!todo_inited) { todo_load(); todo_inited = 1; }
+    if (todo_input_mode) render_todo_input(cx0, cy0, cw, ch);
+    else                 render_todo_list(cx0, cy0, cw, ch);
+}
+
+/* Returns 1 if the click changed something worth re-rendering. */
+static int handle_todo_content_click(int mx, int my) {
+    int cx0, cy0, cw, ch;
+    win_content_rect(WIN_TODO, &cx0, &cy0, &cw, &ch);
+
+    if (todo_input_mode) {
+        int x = cx0 + TODO_PAD;
+        int input_y = cy0 + TODO_PAD + 2*TODO_ROW_H;
+        int btn_y = input_y + 2*TODO_ROW_H;
+        if (my >= btn_y && my < btn_y + TODO_ROW_H) {
+            if (mx >= x && mx < x + 4*CHAR_W) { todo_input_confirm(); return 1; }
+            if (mx >= x + 5*CHAR_W && mx < x + 5*CHAR_W + 8*CHAR_W) { todo_input_mode = 0; return 1; }
+        }
+        return 0;
+    }
+
+    int list_y0, del_x, add_y;
+    todo_layout(cx0, cy0, cw, ch, &list_y0, &del_x, &add_y);
+
+    if (my >= add_y && my < add_y + TODO_ROW_H && mx >= cx0 + TODO_PAD && mx < cx0 + TODO_PAD + 7*CHAR_W) {
+        todo_input_mode = 1;
+        todo_input_len = 0;
+        todo_input_buf[0] = 0;
+        return 1;
+    }
+
+    if (my >= list_y0 && my < list_y0 + todo_count*TODO_ROW_H) {
+        int row = (my - list_y0) / TODO_ROW_H;
+        if (row < 0 || row >= todo_count) return 0;
+        if (mx >= del_x && mx < del_x + 3*CHAR_W) {
+            for (int i = row; i < todo_count - 1; i++) {
+                int k = 0;
+                for (; todos[i+1].text[k] && k < TODO_TEXT_MAX; k++) todos[i].text[k] = todos[i+1].text[k];
+                todos[i].text[k] = 0;
+                todos[i].done = todos[i+1].done;
+            }
+            todo_count--;
+            todo_save();
+            return 1;
+        }
+        if (mx >= cx0 + TODO_PAD && mx < del_x) {
+            todos[row].done = !todos[row].done;
+            todo_save();
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* ── Mouse click detection ───────────────────────────────────────── */
 static int prev_btn = 0;
 
@@ -2832,6 +3031,8 @@ static void handle_click(int mx, int my) {
                     handle_notepad_content_click(mx, my);
                 } else if (hit == WIN_CLOCK) {
                     handle_clock_content_click(mx, my);
+                } else if (hit == WIN_TODO) {
+                    handle_todo_content_click(mx, my);
                 }
                 /* else: click landed in the window's content - no
                  * per-content click handling needed for Terminal/About. */
@@ -2868,6 +3069,8 @@ static void handle_click(int mx, int my) {
                             if (!was_open) { snake_load_highscore(); snake_reset(); }
                         } else if (icons[i].dst == SCR_CLOCK) {
                             win_open(WIN_CLOCK);
+                        } else if (icons[i].dst == SCR_TODO) {
+                            win_open(WIN_TODO);
                         }
                     }
                 }
@@ -2975,6 +3178,10 @@ static void handle_keys(void) {
                          * would lose the "which file" context for no
                          * reason, matching the [< Back] button. */
                         files_preview_mode = 0;
+                    } else if (top == WIN_TODO && todo_input_mode) {
+                        /* Same free ESC-cancels-the-modal convenience
+                         * as WIN_FILES above. */
+                        todo_input_mode = 0;
                     } else if (top >= 0) {
                         /* Closes the focused window, matching its own
                          * close button - no-op if nothing is open. */
@@ -2993,7 +3200,7 @@ static void handle_keys(void) {
          * standard "only the focused window gets keyboard input"
          * behavior. */
         int focused = win_focused();
-        if (!(scr == SCR_DESKTOP && (focused == WIN_TERM || focused == WIN_NOTEPAD || focused == WIN_SNAKE || focused == WIN_CALC || focused == WIN_FILES))) continue;
+        if (!(scr == SCR_DESKTOP && (focused == WIN_TERM || focused == WIN_NOTEPAD || focused == WIN_SNAKE || focused == WIN_CALC || focused == WIN_FILES || focused == WIN_TODO))) continue;
         char ch = sc_to_char(sc);
         if (!ch) continue;
         if (focused == WIN_NOTEPAD) {
@@ -3002,6 +3209,10 @@ static void handle_keys(void) {
         }
         if (focused == WIN_FILES) {
             if (files_input_mode) files_input_press(ch);
+            continue;
+        }
+        if (focused == WIN_TODO) {
+            if (todo_input_mode) todo_input_press(ch);
             continue;
         }
         if (focused == WIN_SNAKE) {
@@ -3092,7 +3303,8 @@ void gfx_main(void) {
                                         idx == WIN_FILES ? "AxFiles" :
                                         idx == WIN_CALC ? "AxCalc" :
                                         idx == WIN_NOTEPAD ? "AxNotepad" :
-                                        idx == WIN_SNAKE ? "AxSnake" : "AxClock";
+                                        idx == WIN_SNAKE ? "AxSnake" :
+                                        idx == WIN_CLOCK ? "AxClock" : "AxTodo";
                     render_window_chrome(idx, title);
                     int cx0, cy0, cw, ch;
                     win_content_rect(idx, &cx0, &cy0, &cw, &ch);
@@ -3102,7 +3314,8 @@ void gfx_main(void) {
                     else if (idx == WIN_CALC)     render_calc(cx0, cy0, cw, ch);
                     else if (idx == WIN_NOTEPAD)  render_notepad(cx0, cy0, cw, ch);
                     else if (idx == WIN_SNAKE)    render_snake(cx0, cy0, cw, ch);
-                    else                          render_clock(cx0, cy0, cw, ch);
+                    else if (idx == WIN_CLOCK)    render_clock(cx0, cy0, cw, ch);
+                    else                          render_todo(cx0, cy0, cw, ch);
                 }
                 break;
             case SCR_TERMINAL: break;   /* scr never actually becomes this anymore - Terminal is a window now */
@@ -3112,6 +3325,7 @@ void gfx_main(void) {
             case SCR_NOTEPAD:  break;   /* same */
             case SCR_SNAKE:    break;   /* same */
             case SCR_CLOCK:    break;   /* same */
+            case SCR_TODO:     break;   /* same */
             case SCR_PAINT:    render_paint(); break;
         }
 
