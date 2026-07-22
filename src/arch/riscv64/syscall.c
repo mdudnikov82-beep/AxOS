@@ -868,9 +868,31 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         break;
     }
 
-    case SYS_KBD_GETC:
-        ret = virtio_keyboard_ready() ? (long)virtio_keyboard_getc() : -1;
+    case SYS_KBD_GETC: {
+        if (!virtio_keyboard_ready()) { ret = -1; break; }
+        /* Keyboard-focus gate: the virtio keyboard queue is a single
+         * shared FIFO, destructively drained (unlike mouse_state(),
+         * which just reports live state to every reader) - whichever
+         * process calls this first steals the character. With 2+
+         * windows open, that meant keystrokes got non-deterministically
+         * split between whichever apps happened to poll first each
+         * tick, not routed to the one the user is actually looking at.
+         * Reuse the same win_z ranking clicks already maintain: only
+         * the topmost registered window may pop a character; anyone
+         * else gets -1 (same as "nothing pending") WITHOUT touching the
+         * queue, so the real recipient sees it on its own next poll -
+         * never silently dropped, never duplicated. */
+        int topmost = -1;
+        unsigned long topmost_z = 0;
+        for (int i = 0; i < MAX_PROCS; i++) {
+            if (!procs[i].win_registered) continue;
+            if (procs[i].state == PROC_UNUSED || procs[i].state == PROC_ZOMBIE) continue;
+            if (topmost < 0 || procs[i].win_z > topmost_z) { topmost = i; topmost_z = procs[i].win_z; }
+        }
+        int allowed = (topmost < 0) || (topmost == current_pid);
+        ret = allowed ? (long)virtio_keyboard_getc() : -1;
         break;
+    }
 
     case SYS_SET_PRIORITY:
         proc_set_priority((int)arg0, (int)arg1);
