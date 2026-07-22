@@ -92,19 +92,24 @@ int main(void) {
     gfx_flush();
 
     int prev_left = 0;
-    unsigned int mx = 0, my = 0, buttons = 0;
+    unsigned int mx = 0, my = 0, buttons = 0, focused = 1;
 
     for (;;) {
-        /* AxDesk never registers a window (win_set_rect()), so the
-         * kernel's click-ownership tracker always reports it as
-         * focused anyway - no need to look at the 4th param here. */
-        if (!mouse_state(&mx, &my, &buttons, 0)) {
+        /* AxDesk never registers a window of its own, but it's NOT
+         * exempt from ownership either - a window drawn on top of the
+         * icon row must still block the icon underneath it (see the
+         * kernel's SYS_MOUSE_STATE handler: for a non-windowed process,
+         * "focused" means "no registered window claimed this click",
+         * not "always true" - closes a real gap found live in the
+         * window-manager work, where clicking a window sitting over
+         * the icon row also re-launched whatever icon was underneath). */
+        if (!mouse_state(&mx, &my, &buttons, &focused)) {
             puts_rv("axdesk: no mouse device found\r\n");
             exit(1);
         }
 
         int left = buttons & 1;
-        if (left && !prev_left) {   /* click edge, not held-down repeat */
+        if (left && !prev_left && focused) {   /* click edge, not held-down repeat */
             for (unsigned int i = 0; i < n_icons; i++) {
                 unsigned int x = start_x + i * (ICON_W + ICON_GAP);
                 if (mx >= x && mx < x + ICON_W && my >= ICON_TOP && my < ICON_TOP + ICON_H) {

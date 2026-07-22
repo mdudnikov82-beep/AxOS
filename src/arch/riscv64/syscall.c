@@ -608,11 +608,20 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         }
         g_mouse_prev_left = left;   /* unconditional - must see every release too */
 
-        /* Non-windowed processes (AxDesk) never registered a rect, so
-         * they keep seeing every click exactly as before. Among
-         * registered windows, only the click's owner is "focused". */
-        int focused = !procs[current_pid].win_registered ||
-                      (g_click_owner_pid == current_pid);
+        /* Registered windows: only the click's owner is "focused".
+         * Non-windowed processes (AxDesk) have no rect of their own to
+         * compete on, but they're NOT exempt from ownership either -
+         * a window drawn on top of the icon row must still block the
+         * icon underneath (found live: a window's default position can
+         * geometrically cover the icon row, and without this, clicking
+         * the visible window would ALSO re-launch whatever icon sits
+         * underneath it). So a non-windowed process is "focused" only
+         * when no registered window claimed this particular click at
+         * all (g_click_owner_pid < 0) - i.e. the click actually landed
+         * on bare desktop, not on some window's rect. */
+        int focused = procs[current_pid].win_registered
+                    ? (g_click_owner_pid == current_pid)
+                    : (g_click_owner_pid < 0);
         ret = (long)(st | ((unsigned long)(focused & 1) << 8));
         break;
     }
