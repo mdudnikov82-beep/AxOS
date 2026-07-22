@@ -290,6 +290,18 @@ static void kernel_cursor_render(void) {
     kcursor_x = x; kcursor_y = y; kcursor_shown = 1;
 }
 
+/* ---- Window manager: click ownership + z-order ────────────────────
+ * Every GUI process is a separate ELF process polling mouse_state()
+ * independently, with no shared framebuffer mapping - every draw and
+ * input call already traps in here, which is what makes a kernel-side
+ * registry cheap: the kernel just needs to remember each registered
+ * process's last rect (proc_t's win_x/y/w/h/win_registered/win_z, see
+ * proc.h) and decide, per click, who owns it. See SYS_WIN_SET_RECT and
+ * SYS_MOUSE_STATE below. */
+static int           g_mouse_prev_left = 0;
+static int           g_click_owner_pid = -1;
+static unsigned long g_next_z_counter  = 0;
+
 /* ---- Kernel-side dispatch ---- */
 
 void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
@@ -317,6 +329,8 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         int kpid = current_pid;
         procs[kpid].state     = PROC_ZOMBIE;
         procs[kpid].exit_code = -1;
+        procs[kpid].win_registered = 0;   /* see SYS_EXIT's comment on why this can't wait for slot reuse */
+        if (g_click_owner_pid == kpid) g_click_owner_pid = -1;
         pipe_mark_writer_done(procs[kpid].stdout_pipe_id);
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_WAITING && procs[i].wait_pid == kpid) {
@@ -391,6 +405,13 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         int epid = current_pid;
         procs[epid].state     = PROC_ZOMBIE;
         procs[epid].exit_code = (int)arg0;
+        /* Most GUI apps are launched via exec()/background "run X &" and
+         * are never wait()'d, so they'd otherwise sit PROC_ZOMBIE with a
+         * stale registered window rect forever, silently absorbing
+         * clicks in their old screen region - clear it here, not just
+         * when the slot eventually becomes PROC_UNUSED. */
+        procs[epid].win_registered = 0;
+        if (g_click_owner_pid == epid) g_click_owner_pid = -1;
         pipe_mark_writer_done(procs[epid].stdout_pipe_id);
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_WAITING && procs[i].wait_pid == epid) {
@@ -489,6 +510,8 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
             int epid = current_pid;
             procs[epid].state     = PROC_ZOMBIE;
             procs[epid].exit_code = (int)arg0;
+            procs[epid].win_registered = 0;   /* see SYS_EXIT's comment on why this can't wait for slot reuse */
+            if (g_click_owner_pid == epid) g_click_owner_pid = -1;
             procs[waiter].state        = PROC_RUNNABLE;
             procs[waiter].regs[REG_A0] = arg0;
             procs[epid].state          = PROC_UNUSED;  /* collected synchronously */
@@ -558,7 +581,53 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
          * composited cursor) once SYS_GFX_FLUSH started drawing an
          * authoritative software cursor itself, see
          * kernel_cursor_render() above. */
-        ret = (long)virtio_input_state();
+        unsigned long st = virtio_input_state();
+        int left = (int)(st & 1);
+
+        /* New press edge - detected once globally, since every polling
+         * process traps through this same handler; whichever process's
+         * poll happens to observe the transition first "claims" it,
+         * subsequent polls within the same physical press see
+         * g_mouse_prev_left already 1 and don't re-trigger. Ownership
+         * (g_click_owner_pid) then stays stable for the whole press,
+         * matching every app's own "left && !prev_left" edge gate. */
+        if (left && !g_mouse_prev_left) {
+            unsigned int mx = (unsigned int)((st >> 32) & 0xFFFF);
+            unsigned int my = (unsigned int)((st >> 16) & 0xFFFF);
+            int best = -1;
+            unsigned long best_z = 0;
+            for (int i = 0; i < MAX_PROCS; i++) {
+                if (!procs[i].win_registered) continue;
+                if (procs[i].state == PROC_UNUSED || procs[i].state == PROC_ZOMBIE) continue;
+                if ((int)mx < procs[i].win_x || (int)mx >= procs[i].win_x + procs[i].win_w) continue;
+                if ((int)my < procs[i].win_y || (int)my >= procs[i].win_y + procs[i].win_h) continue;
+                if (best < 0 || procs[i].win_z > best_z) { best = i; best_z = procs[i].win_z; }
+            }
+            g_click_owner_pid = best;
+            if (best >= 0) procs[best].win_z = ++g_next_z_counter;   /* focus-follows-click */
+        }
+        g_mouse_prev_left = left;   /* unconditional - must see every release too */
+
+        /* Non-windowed processes (AxDesk) never registered a rect, so
+         * they keep seeing every click exactly as before. Among
+         * registered windows, only the click's owner is "focused". */
+        int focused = !procs[current_pid].win_registered ||
+                      (g_click_owner_pid == current_pid);
+        ret = (long)(st | ((unsigned long)(focused & 1) << 8));
+        break;
+    }
+
+    case SYS_WIN_SET_RECT: {
+        unsigned long arg3 = frame[REG_A3];
+        procs[current_pid].win_x = (int)arg0;
+        procs[current_pid].win_y = (int)arg1;
+        procs[current_pid].win_w = (int)arg2;
+        procs[current_pid].win_h = (int)arg3;
+        if (!procs[current_pid].win_registered) {
+            procs[current_pid].win_registered = 1;
+            procs[current_pid].win_z = ++g_next_z_counter;   /* new windows start on top */
+        }
+        ret = 0;
         break;
     }
 
@@ -724,6 +793,8 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
             procs[kpid].state == PROC_UNUSED) { ret = -1; break; }
         procs[kpid].state     = PROC_ZOMBIE;
         procs[kpid].exit_code = -1;
+        procs[kpid].win_registered = 0;   /* see SYS_EXIT's comment on why this can't wait for slot reuse */
+        if (g_click_owner_pid == kpid) g_click_owner_pid = -1;
         pipe_mark_writer_done(procs[kpid].stdout_pipe_id);
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_WAITING && procs[i].wait_pid == kpid) {

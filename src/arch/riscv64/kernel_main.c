@@ -114,6 +114,13 @@ void trap_handler(unsigned long cause, unsigned long epc,
             int epid = current_pid;
             procs[epid].state     = PROC_ZOMBIE;
             procs[epid].exit_code = -1;
+            /* GUI apps launched via exec()/background "run X &" are never
+             * wait()'d, so they'd otherwise sit PROC_ZOMBIE with a stale
+             * registered window rect forever - clear it here too (see
+             * syscall.c's SYS_EXIT for the same fix; g_click_owner_pid
+             * itself is file-scope in syscall.c, but SYS_MOUSE_STATE's
+             * hit-test already skips PROC_ZOMBIE slots regardless). */
+            procs[epid].win_registered = 0;
             pipe_mark_writer_done(procs[epid].stdout_pipe_id);
             for (int i = 0; i < MAX_PROCS; i++) {
                 if (procs[i].state == PROC_WAITING && procs[i].wait_pid == epid) {

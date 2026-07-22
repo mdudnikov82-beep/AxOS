@@ -95,7 +95,10 @@ int main(void) {
     unsigned int mx = 0, my = 0, buttons = 0;
 
     for (;;) {
-        if (!mouse_state(&mx, &my, &buttons)) {
+        /* AxDesk never registers a window (win_set_rect()), so the
+         * kernel's click-ownership tracker always reports it as
+         * focused anyway - no need to look at the 4th param here. */
+        if (!mouse_state(&mx, &my, &buttons, 0)) {
             puts_rv("axdesk: no mouse device found\r\n");
             exit(1);
         }

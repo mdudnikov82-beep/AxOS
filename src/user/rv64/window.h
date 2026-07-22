@@ -106,6 +106,7 @@ static void window_move(window_t *win, unsigned int new_x, unsigned int new_y, u
     win->x = new_x; win->y = new_y;
     win->content_y = new_y + WIN_TITLE_H + 4;
     window_draw_ghost(win);
+    win_set_rect((int)win->x, (int)win->y, (int)win->w, (int)win->h);
 }
 
 static void window_init(window_t *win, unsigned int x, unsigned int y,
@@ -124,6 +125,7 @@ static void window_init(window_t *win, unsigned int x, unsigned int y,
     ui_round_window((int)x, (int)y, (int)w, (int)h, WIN_RADIUS, WIN_TITLE_H,
                     border, bg, title);
     window_draw_close(win);
+    win_set_rect((int)x, (int)y, (int)w, (int)h);
 }
 
 /* Truncates s to fit within the window's own right edge before drawing

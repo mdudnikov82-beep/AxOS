@@ -13,6 +13,9 @@ void proc_init(void) {
         procs[i].wake_tick      = 0;
         procs[i].stdout_pipe_id = -1;
         procs[i].stdin_pipe_id  = -1;
+        procs[i].win_registered = 0;
+        procs[i].win_x = procs[i].win_y = procs[i].win_w = procs[i].win_h = 0;
+        procs[i].win_z          = 0;
     }
 }
 
@@ -29,6 +32,9 @@ int proc_create(const char *name, unsigned long entry,
         procs[i].stdin_pipe_id  = -1;
         procs[i].syscall_mask   = 0;
         procs[i].mls_level      = 0;
+        procs[i].win_registered = 0;
+        procs[i].win_x = procs[i].win_y = procs[i].win_w = procs[i].win_h = 0;
+        procs[i].win_z          = 0;
         procs[i].pagetable   = pt;
         procs[i].priority    = PRIORITY_DEFAULT;
         procs[i].slice_left  = PRIORITY_DEFAULT;

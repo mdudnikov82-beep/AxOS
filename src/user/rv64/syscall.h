@@ -38,6 +38,7 @@
 #define SYS_SECCOMP       32
 #define SYS_SET_LEVEL     33
 #define SYS_KBD_GETC      34
+#define SYS_WIN_SET_RECT  35
 
 static inline long __syscall0(long nr) {
     register long _nr  __asm__("a7") = nr;
@@ -312,16 +313,33 @@ static inline void gfx_draw_text(unsigned int x, unsigned int y,
     __syscall4(SYS_GFX_DRAWTEXT, x, y, (long)str, bgra);
 }
 
-/* mouse_state(&x, &y, &buttons) — 1 if a mouse device is present, 0 if not
- * (in which case x/y/buttons are left untouched). buttons: bit0=left,
- * bit1=right, bit2=middle. */
-static inline int mouse_state(unsigned int *x, unsigned int *y, unsigned int *buttons) {
+/* mouse_state(&x, &y, &buttons, &focused) — 1 if a mouse device is
+ * present, 0 if not (in which case x/y/buttons/focused are left
+ * untouched). buttons: bit0=left, bit1=right, bit2=middle. focused
+ * (NULL-able, like the others): 1 if THIS process currently owns the
+ * active click - always 1 for a process that never called
+ * win_set_rect() (e.g. AxDesk), and among registered windows, only
+ * whichever one the last button-down landed on, until the next press
+ * (see the kernel's SYS_MOUSE_STATE handler). Apps that draw a window
+ * (window.h users) should AND this into their own click-handling
+ * conditions so an overlapping window underneath doesn't also react. */
+static inline int mouse_state(unsigned int *x, unsigned int *y, unsigned int *buttons,
+                              unsigned int *focused) {
     unsigned long v = (unsigned long)__syscall0(SYS_MOUSE_STATE);
     if (v == (unsigned long)-1) return 0;  /* no device */
     if (x)       *x       = (unsigned int)((v >> 32) & 0xFFFF);
     if (y)       *y       = (unsigned int)((v >> 16) & 0xFFFF);
     if (buttons) *buttons = (unsigned int)(v & 0xFF);
+    if (focused) *focused = (unsigned int)((v >> 8) & 1);
     return 1;
+}
+
+/* win_set_rect(x,y,w,h) — registers/updates the calling process's
+ * on-screen window rectangle with the kernel's click-ownership tracker
+ * (see SYS_MOUSE_STATE). Called by window_init()/window_move() in
+ * window.h - most GUI apps never need to call this directly. */
+static inline int win_set_rect(int x, int y, int w, int h) {
+    return (int)__syscall4(SYS_WIN_SET_RECT, x, y, w, h);
 }
 
 /* kbd_getc() -> next ASCII char from the keyboard, or -1 if none

@@ -187,18 +187,18 @@ int main(void) {
     for (;;) {
         int changed = 0;
 
-        unsigned int mx = 0, my = 0, buttons = 0;
-        if (mouse_state(&mx, &my, &buttons)) {
+        unsigned int mx = 0, my = 0, buttons = 0, focused = 1;
+        if (mouse_state(&mx, &my, &buttons, &focused)) {
             int left = buttons & 1;
-            if (!dragging && left && !prev_left && window_hit_close(&win, mx, my)) {
+            if (!dragging && left && !prev_left && focused && window_hit_close(&win, mx, my)) {
                 window_erase_desktop_bg((int)win.x, (int)win.y, (int)win.w, (int)win.h, screen_h);
                 gfx_flush();
                 exit(0);
-            } else if (!dragging && left && !prev_left && window_hit_titlebar(&win, mx, my)) {
+            } else if (!dragging && left && !prev_left && focused && window_hit_titlebar(&win, mx, my)) {
                 dragging = 1;
                 drag_off_x = mx - win.x;
                 drag_off_y = my - win.y;
-            } else if (!dragging && left && !prev_left && mx >= win.x && mx < win.x + win.w &&
+            } else if (!dragging && left && !prev_left && focused && mx >= win.x && mx < win.x + win.w &&
                       my >= win.content_y && my < win.content_y + win.content_h) {
                 if (handle_content_click(&win, mx, my)) changed = 1;
             } else if (dragging && left) {

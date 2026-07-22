@@ -466,20 +466,20 @@ int main(void) {
     unsigned int drag_off_x = 0, drag_off_y = 0;
 
     for (;;) {
-        unsigned int mx = 0, my = 0, buttons = 0;
-        if (mouse_state(&mx, &my, &buttons)) {
+        unsigned int mx = 0, my = 0, buttons = 0, focused = 1;
+        if (mouse_state(&mx, &my, &buttons, &focused)) {
             int left = buttons & 1;
-            if (!dragging && left && !prev_left && window_hit_close(&win, mx, my)) {
+            if (!dragging && left && !prev_left && focused && window_hit_close(&win, mx, my)) {
                 /* Nothing else ever erases a closed window's footprint
                  * (no compositor) - see axterm.c's identical fix. */
                 window_erase_desktop_bg((int)win.x, (int)win.y, (int)win.w, (int)win.h, screen_h);
                 gfx_flush();
                 exit(0);
-            } else if (!dragging && left && !prev_left && window_hit_titlebar(&win, mx, my)) {
+            } else if (!dragging && left && !prev_left && focused && window_hit_titlebar(&win, mx, my)) {
                 dragging = 1;
                 drag_off_x = mx - win.x;
                 drag_off_y = my - win.y;
-            } else if (!dragging && left && !prev_left && in_content(&win, mx, my)) {
+            } else if (!dragging && left && !prev_left && focused && in_content(&win, mx, my)) {
                 if (handle_content_click(&win, mx, my)) render_files(&win);
             } else if (dragging && left) {
                 unsigned int nx = (mx > drag_off_x) ? mx - drag_off_x : 0;

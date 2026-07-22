@@ -168,6 +168,11 @@ int main(void) {
         puts_rv("axpaint: no GPU available\r\n");
         exit(1);
     }
+    /* AxPaint has no window_t/window.h (it spans the whole framebuffer
+     * like a second full-screen layer, closer to AxDesk than to the
+     * windowed apps), so it registers its click-ownership rect directly
+     * instead of getting it for free from window_init(). */
+    win_set_rect(0, 0, (int)w, (int)h);
 
     palette[0] = gfx_rgb(255, 0, 0);
     palette[1] = gfx_rgb(0, 255, 0);
@@ -197,15 +202,15 @@ int main(void) {
     gfx_flush();
 
     unsigned int cur_color = palette[0];
-    unsigned int mx = 0, my = 0, buttons = 0, prev_buttons = 0;
+    unsigned int mx = 0, my = 0, buttons = 0, prev_buttons = 0, focused = 1;
 
     for (;;) {
-        if (!mouse_state(&mx, &my, &buttons)) {
+        if (!mouse_state(&mx, &my, &buttons, &focused)) {
             puts_rv("axpaint: no mouse device found\r\n");
             exit(1);
         }
 
-        if (buttons & 1) {                       /* left button: draw */
+        if ((buttons & 1) && focused) {           /* left button: draw */
             if (my < TOOLBAR_H) {
                 unsigned int sx = btn_save_x(w), lx = btn_load_x(w), slx = btn_slot_x(w);
                 int on_save = mx >= sx && mx < sx+BTN_W && my >= BTN_Y && my < BTN_Y+BTN_CHAR_W;
@@ -248,7 +253,7 @@ int main(void) {
                 unsigned int by = (my > BRUSH / 2) ? my - BRUSH / 2 : 0;
                 gfx_fill_rect(bx, by, BRUSH, BRUSH, cur_color);
             }
-        } else if (buttons & 2) {                /* right button: clear */
+        } else if ((buttons & 2) && focused) {    /* right button: clear */
             gfx_fill_rect(0, TOOLBAR_H, w, h - TOOLBAR_H, gfx_rgb(0, 0, 0));
         }
         prev_buttons = buttons;

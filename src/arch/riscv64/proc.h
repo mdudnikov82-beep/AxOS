@@ -1,6 +1,12 @@
 #pragma once
 
-#define MAX_PROCS    4
+/* Was 4 - raised so the new window manager (see win_x/y/w/h below) has
+ * room for 3-4 real GUI windows open at once instead of ~2 (AxDesk+AxSH
+ * always consume 2 of the old 4 slots). Confirmed safe: RISC-V processes
+ * aren't slot-indexed in physical memory (each gets its own sv39 page
+ * table over a shared bump-allocated 128MB pool), so more slots cost
+ * only a few hundred KB of proc_t/page-table overhead. */
+#define MAX_PROCS    8
 
 #define PROC_UNUSED   0
 #define PROC_RUNNABLE 1
@@ -38,6 +44,9 @@ typedef struct {
     int           stdin_pipe_id;  /* >=0: read(0,...) comes from pipe_bufs[id] instead of UART; also "which pipe am I blocked on" when state==PROC_WAITING_PIPE */
     unsigned long syscall_mask;   /* seccomp: bit N = syscall N allowed; 0 = no filter (see syscall.c) */
     unsigned int  mls_level;      /* MLS sensitivity level 0..15; "no read up" gate, see syscall.c */
+    int           win_x, win_y, win_w, win_h;  /* last-registered screen rect, see SYS_WIN_SET_RECT */
+    int           win_registered;              /* 0 until this process's first win_set_rect() call */
+    unsigned long win_z;                        /* z-order rank; higher = more recently focused/topmost */
 } proc_t;
 
 extern proc_t procs[MAX_PROCS];
