@@ -12,9 +12,11 @@
 #define WIN_TITLE_H 28   /* 2x the old 14, matches the font's own 2x scale */
 #define WIN_RADIUS  16   /* matches x86 gfx_shell.c's CARD_R - see gfx_ui.h UI_MAX_R */
 #define WIN_CLOSE_SIZE 16   /* close-button square, inset in the title bar's top-right */
+#define WIN_RESIZE_SIZE 16  /* resize-grip square, inset in the bottom-right corner */
 
 typedef struct {
     unsigned int x, y, w, h;
+    unsigned int min_w, min_h;   /* resize floor, set once at window_init() */
     unsigned int content_y;
     unsigned int content_h;
     unsigned int border;
@@ -59,6 +61,16 @@ static int window_hit_close(const window_t *win, unsigned int mx, unsigned int m
     return mx >= bx && mx < bx + WIN_CLOSE_SIZE && my >= by && my < by + WIN_CLOSE_SIZE;
 }
 
+/* 1 if (mx,my) is within the resize grip (bottom-right corner). Some
+ * apps' content-click hit-tests (AxFiles' last row, AxCalc's grid)
+ * geometrically reach into this same corner - callers must check this
+ * BEFORE dispatching to their own content-click handler. */
+static int window_hit_resize(const window_t *win, unsigned int mx, unsigned int my) {
+    unsigned int rx = win->x + win->w - WIN_RESIZE_SIZE;
+    unsigned int ry = win->y + win->h - WIN_RESIZE_SIZE;
+    return mx >= rx && mx < win->x + win->w && my >= ry && my < win->y + win->h;
+}
+
 /* Draws the close button (small red square with a white X) at the
  * window's CURRENT x/y - call after window_init() and after every
  * window_draw_ghost()/window_redraw_chrome(). */
@@ -69,6 +81,18 @@ static void window_draw_close(const window_t *win) {
     for (unsigned int i = 2; i < WIN_CLOSE_SIZE - 2; i++) {
         gfx_putpixel(bx + i, by + i, gfx_rgb(255, 255, 255));
         gfx_putpixel(bx + i, by + WIN_CLOSE_SIZE - 1 - i, gfx_rgb(255, 255, 255));
+    }
+}
+
+/* Draws the resize grip (3 small diagonal dots) at the window's
+ * CURRENT bottom-right corner - call alongside window_draw_close()
+ * everywhere that draws it. */
+static void window_draw_resize_grip(const window_t *win) {
+    unsigned int cx = win->x + win->w - 4;
+    unsigned int cy = win->y + win->h - 4;
+    for (unsigned int i = 0; i < 3; i++) {
+        gfx_fill_rect(cx - i*4, cy, 2, 2, gfx_rgb(180, 180, 180));
+        gfx_fill_rect(cx, cy - i*4, 2, 2, gfx_rgb(180, 180, 180));
     }
 }
 
@@ -83,6 +107,7 @@ static void window_draw_ghost(const window_t *win) {
     gfx_fill_rect(win->x, win->y, win->w, win->h, win->border);
     gfx_fill_rect(win->x + 2, win->y + 2, win->w - 4, win->h - 4, win->bg);
     window_draw_close(win);
+    window_draw_resize_grip(win);
 }
 
 /* Full-quality redraw (rounded corners, shadow, gradient title bar) -
@@ -92,6 +117,7 @@ static void window_redraw_chrome(const window_t *win, const char *title) {
     ui_round_window((int)win->x, (int)win->y, (int)win->w, (int)win->h, WIN_RADIUS, WIN_TITLE_H,
                     win->border, win->bg, title);
     window_draw_close(win);
+    window_draw_resize_grip(win);
 }
 
 /* Moves the window to (new_x,new_y): erases the OLD footprint back to
@@ -109,10 +135,35 @@ static void window_move(window_t *win, unsigned int new_x, unsigned int new_y, u
     win_set_rect((int)win->x, (int)win->y, (int)win->w, (int)win->h);
 }
 
+/* Resizes the window to (new_w,new_h): clamps to this window's own
+ * min_w/min_h floor and to the screen bounds (can't grow off-screen),
+ * erases the OLD footprint (needed when shrinking - growing never
+ * exposes stale pixels since the new area was never drawn over in the
+ * first place), updates geometry, redraws the cheap ghost chrome, and
+ * re-registers with the window manager (win_set_rect()) so click-
+ * ownership stays in sync - same reasoning as window_move() above.
+ * Does NOT reflow content - callers re-render after the drag ends,
+ * same policy as window_move(). */
+static void window_resize(window_t *win, unsigned int new_w, unsigned int new_h,
+                          unsigned int screen_w, unsigned int screen_h) {
+    if (new_w < win->min_w) new_w = win->min_w;
+    if (new_h < win->min_h) new_h = win->min_h;
+    if (win->x + new_w > screen_w) new_w = screen_w - win->x;
+    if (win->y + new_h > screen_h) new_h = screen_h - win->y;
+    if (new_w == win->w && new_h == win->h) return;
+    window_erase_desktop_bg((int)win->x, (int)win->y, (int)win->w, (int)win->h, screen_h);
+    win->w = new_w; win->h = new_h;
+    win->content_h = (new_h > WIN_TITLE_H + 8) ? new_h - WIN_TITLE_H - 8 : 0;
+    window_draw_ghost(win);
+    win_set_rect((int)win->x, (int)win->y, (int)win->w, (int)win->h);
+}
+
 static void window_init(window_t *win, unsigned int x, unsigned int y,
                         unsigned int w, unsigned int h,
+                        unsigned int min_w, unsigned int min_h,
                         unsigned int border, unsigned int bg, const char *title) {
     win->x = x; win->y = y; win->w = w; win->h = h;
+    win->min_w = min_w; win->min_h = min_h;
     win->border = border; win->bg = bg;
     win->content_y = y + WIN_TITLE_H + 4;
     win->content_h = (h > WIN_TITLE_H + 8) ? h - WIN_TITLE_H - 8 : 0;
@@ -125,6 +176,7 @@ static void window_init(window_t *win, unsigned int x, unsigned int y,
     ui_round_window((int)x, (int)y, (int)w, (int)h, WIN_RADIUS, WIN_TITLE_H,
                     border, bg, title);
     window_draw_close(win);
+    window_draw_resize_grip(win);
     win_set_rect((int)x, (int)y, (int)w, (int)h);
 }
 

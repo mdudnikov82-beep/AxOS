@@ -82,7 +82,7 @@ int main(void) {
     gfx_info(&screen_w, &screen_h);   /* runtime query, matches axdesk.c/axpaint.c's convention */
 
     window_t win;
-    window_init(&win, 16, 40, 300, 424, gfx_rgb(0, 150, 255), gfx_rgb(10, 10, 30),
+    window_init(&win, 16, 40, 300, 424, 260, 200, gfx_rgb(0, 150, 255), gfx_rgb(10, 10, 30),
                "AxTerminal");
     win.content_h -= 16;   /* reserve the reclaimed bottom strip for the input line */
 
@@ -90,7 +90,7 @@ int main(void) {
     draw_input_line(&win, 0);
     gfx_flush();
 
-    int dragging = 0, prev_left = 0;
+    int dragging = 0, resizing = 0, prev_left = 0;
     unsigned int drag_off_x = 0, drag_off_y = 0;
 
     unsigned long tick = 0;
@@ -100,7 +100,7 @@ int main(void) {
         unsigned int mx = 0, my = 0, buttons = 0, focused = 1;
         if (mouse_state(&mx, &my, &buttons, &focused)) {
             int left = buttons & 1;
-            if (!dragging && left && !prev_left && focused && window_hit_close(&win, mx, my)) {
+            if (!dragging && !resizing && left && !prev_left && focused && window_hit_close(&win, mx, my)) {
                 /* Nothing else ever erases a closed window's footprint
                  * (no compositor) - without this, the process exits
                  * cleanly (confirmed via `ps`) but its pixels just sit
@@ -108,7 +108,9 @@ int main(void) {
                 window_erase_desktop_bg((int)win.x, (int)win.y, (int)win.w, (int)win.h, screen_h);
                 gfx_flush();
                 exit(0);
-            } else if (!dragging && left && !prev_left && focused && window_hit_titlebar(&win, mx, my)) {
+            } else if (!dragging && !resizing && left && !prev_left && focused && window_hit_resize(&win, mx, my)) {
+                resizing = 1;
+            } else if (!dragging && !resizing && left && !prev_left && focused && window_hit_titlebar(&win, mx, my)) {
                 dragging = 1;
                 drag_off_x = mx - win.x;
                 drag_off_y = my - win.y;
@@ -119,10 +121,21 @@ int main(void) {
                 if (ny + win.h > screen_h) ny = screen_h - win.h;
                 window_move(&win, nx, ny, screen_h);
                 changed = 1;
+            } else if (resizing && left) {
+                unsigned int nw = (mx > win.x + WIN_RESIZE_SIZE) ? mx - win.x : win.min_w;
+                unsigned int nh = (my > win.y + WIN_RESIZE_SIZE) ? my - win.y : win.min_h;
+                window_resize(&win, nw, nh, screen_w, screen_h);
+                win.content_h -= 16;   /* re-reserve the input-line strip window_resize() just recomputed away */
+                changed = 1;
             } else if (dragging && !left) {
                 dragging = 0;
                 window_redraw_chrome(&win, "AxTerminal");
                 win.cur_row = 0;   /* content lost on move - no retained scrollback buffer */
+                changed = 1;
+            } else if (resizing && !left) {
+                resizing = 0;
+                window_redraw_chrome(&win, "AxTerminal");
+                win.cur_row = 0;   /* content lost on resize too, same as move */
                 changed = 1;
             }
             prev_left = left;

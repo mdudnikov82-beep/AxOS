@@ -550,11 +550,15 @@ static const struct icon icons[] = {
  * here: draw the desktop, then iterate windows back-to-front, each one
  * at full quality every frame, cursor last. No RISC-V-style cheap
  * "ghost" render during drag needed, no manual "erase old footprint"
- * logic needed - full redraw already handles both for free. Not
- * resizable (matches RISC-V's own window.h scope too), just movable. */
+ * logic needed - full redraw already handles both for free. Movable
+ * AND resizable (see win_hit_resize()/handle_window_resize() below) -
+ * resizing is just as cheap as moving here for the same reason: no
+ * ghost/erase-footprint step needed, just update w/h and let the next
+ * full redraw handle it. */
 typedef struct {
     int x, y;   /* top-left, draggable */
-    int w, h;   /* fixed size */
+    int w, h;   /* current size, resizable within [min_w,min_h] */
+    int min_w, min_h;
     int open;
 } win_t;
 
@@ -577,19 +581,20 @@ typedef struct {
  * Terminal opens, found live via screendump (About's icon sat directly
  * under Terminal's default footprint, its click never got through). */
 static win_t windows[N_WINDOWS] = {
-    { 70,  170, 660, 340, 0 },   /* WIN_TERM  */
-    { 230, 180, 560, 380, 0 },   /* WIN_ABOUT */
-    { 120, 165, 620, 380, 0 },   /* WIN_FILES */
-    { 380, 60,  260, 520, 0 },   /* WIN_CALC  */
-    { 90,  175, 660, 380, 0 },   /* WIN_NOTEPAD */
-    { 230, 195, 340, 294, 0 },   /* WIN_SNAKE */
-    { 430, 230, 350, 300, 0 },   /* WIN_CLOCK */
-    { 260, 60,  480, 420, 0 },   /* WIN_TODO  */
+    { 70,  170, 660, 340, 650, 330, 0 },   /* WIN_TERM  */
+    { 230, 180, 560, 380, 480, 330, 0 },   /* WIN_ABOUT */
+    { 120, 165, 620, 380, 460, 200, 0 },   /* WIN_FILES - min_w=460 not 300, see axfiles.c's window_init comment (RISC-V) for why: the SIZE column overlaps long 8.3 filenames below that width */
+    { 380, 60,  260, 520, 260, 520, 0 },   /* WIN_CALC  - min pinned to default: shrinking makes the 4-char "sqrt"/"MR"/"MC" button labels overlap (found live on the RISC-V port at a smaller min, same CHAR_W-based layout formula here) */
+    { 90,  175, 660, 380, 300, 200, 0 },   /* WIN_NOTEPAD */
+    { 230, 195, 340, 294, 336, 290, 0 },   /* WIN_SNAKE */
+    { 430, 230, 350, 300, 335, 230, 0 },   /* WIN_CLOCK */
+    { 260, 60,  480, 420, 480, 410, 0 },   /* WIN_TODO  */
 };
 static int win_order[N_WINDOWS] = { WIN_TERM, WIN_ABOUT, WIN_FILES, WIN_CALC, WIN_NOTEPAD, WIN_SNAKE, WIN_CLOCK, WIN_TODO };  /* [0]=back .. [N-1]=front/focused */
 
 static int dragging_win = -1;
 static int drag_off_x = 0, drag_off_y = 0;
+static int resizing_win = -1;
 
 #define WIN_TITLE_H  28
 #define WIN_CLOSE_SZ 16
@@ -606,6 +611,21 @@ static int win_hit_close(int idx, int mx, int my) {
     int bx = w->x + w->w - WIN_CLOSE_SZ - 6;
     int by = w->y + (WIN_TITLE_H - WIN_CLOSE_SZ) / 2;
     return mx >= bx && mx < bx + WIN_CLOSE_SZ && my >= by && my < by + WIN_CLOSE_SZ;
+}
+/* 32 not 16 - the PS/2 mouse driver only ever reports Y on a 24px grid
+ * (mouse_get_y()*24, see the click dispatch below) and X on a 10px grid;
+ * a 16px-tall hit target can land in a gap between two reachable grid
+ * lines depending on the window's y+h mod 24, making the grip silently
+ * unclickable for some windows (found live: AxFiles/AxTodo at their
+ * shipped sizes). 32 >= the 24px pitch guarantees some grid line always
+ * falls inside, by the same reasoning as the AxClock/AxTodo click-pitch
+ * fixes documented elsewhere in this file's history. */
+#define WIN_RESIZE_SZ 32   /* resize-grip hit-square, bottom-right corner */
+static int win_hit_resize(int idx, int mx, int my) {
+    win_t *w = &windows[idx];
+    int rx = w->x + w->w - WIN_RESIZE_SZ;
+    int ry = w->y + w->h - WIN_RESIZE_SZ;
+    return mx >= rx && mx < w->x + w->w && my >= ry && my < w->y + w->h;
 }
 /* Front-to-back so an on-top window wins the hit test over one it overlaps. */
 static int win_topmost_at(int mx, int my) {
@@ -2251,6 +2271,16 @@ static void render_window_chrome(int idx, const char *title) {
         px(bx+i, by+i, C_WHITE);
         px(bx+i, by+WIN_CLOSE_SZ-1-i, C_WHITE);
     }
+
+    /* Resize grip: diagonal dots in the bottom-right corner, spaced out
+     * to visually span the enlarged WIN_RESIZE_SZ hit-square (see its
+     * comment) instead of just a small corner of it. */
+    int gx = w->x + w->w - 4;
+    int gy = w->y + w->h - 4;
+    for (int i = 0; i < 4; i++) {
+        fill(gx - i*8, gy, 3, 3, C_GRAY);
+        fill(gx, gy - i*8, 3, 3, C_GRAY);
+    }
 }
 
 /* ── Paint screen ────────────────────────────────────────────────── */
@@ -3019,6 +3049,11 @@ static void handle_click(int mx, int my) {
                         clock_fired = 0; clock_armed = 0; speaker_off();
                     }
                     win_close(hit);
+                } else if (win_hit_resize(hit, mx, my)) {
+                    /* Checked before any content-click dispatch below -
+                     * AxFiles' last row and AxCalc's grid both
+                     * geometrically reach into this same corner. */
+                    resizing_win = hit;
                 } else if (win_hit_titlebar(hit, mx, my)) {
                     dragging_win = hit;
                     drag_off_x = mx - windows[hit].x;
@@ -3149,6 +3184,24 @@ static void handle_window_drag(int mx, int my) {
     if (ny < AREA_Y) ny = AREA_Y;
     if (ny + w->h > BBAR_Y) ny = BBAR_Y - w->h;
     w->x = nx; w->y = ny;
+}
+
+/* ── Window resize (held-button, mirrors handle_window_drag's shape) ──
+ * No ghost/erase-footprint step needed (see the win_t comment up top) -
+ * just clamp and update w/h, the next full redraw handles the rest. */
+static void handle_window_resize(int mx, int my) {
+    if (scr != SCR_DESKTOP || resizing_win < 0) return;
+    int btn = mouse_get_buttons() & 0x01;
+    if (!btn) { resizing_win = -1; return; }
+
+    win_t *w = &windows[resizing_win];
+    int nw = (mx > w->x + WIN_RESIZE_SZ) ? mx - w->x : w->min_w;
+    int nh = (my > w->y + WIN_RESIZE_SZ) ? my - w->y : w->min_h;
+    if (nw < w->min_w) nw = w->min_w;
+    if (nh < w->min_h) nh = w->min_h;
+    if (w->x + nw > SW) nw = SW - w->x;
+    if (w->y + nh > BBAR_Y) nh = BBAR_Y - w->y;
+    w->w = nw; w->h = nh;
 }
 
 /* ── Keyboard input (terminal only) ──────────────────────────────── */
@@ -3287,6 +3340,7 @@ void gfx_main(void) {
         handle_click(mx, my);
         handle_paint_drag(mx, my);
         handle_window_drag(mx, my);
+        handle_window_resize(mx, my);
 
         /* Draw scene to back buffer */
         switch (scr) {

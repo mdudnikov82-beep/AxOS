@@ -174,13 +174,13 @@ int main(void) {
     gfx_info(&screen_w, &screen_h);
 
     window_t win;
-    window_init(&win, 80, 150, 640, 420, gfx_rgb(0, 200, 200), gfx_rgb(10, 15, 25),
+    window_init(&win, 80, 150, 640, 420, 300, 200, gfx_rgb(0, 200, 200), gfx_rgb(10, 15, 25),
                "AxNotepad");
 
     render_notepad(&win, 0);
     gfx_flush();
 
-    int dragging = 0, prev_left = 0;
+    int dragging = 0, resizing = 0, prev_left = 0;
     unsigned int drag_off_x = 0, drag_off_y = 0;
     unsigned long tick = 0;
 
@@ -190,15 +190,17 @@ int main(void) {
         unsigned int mx = 0, my = 0, buttons = 0, focused = 1;
         if (mouse_state(&mx, &my, &buttons, &focused)) {
             int left = buttons & 1;
-            if (!dragging && left && !prev_left && focused && window_hit_close(&win, mx, my)) {
+            if (!dragging && !resizing && left && !prev_left && focused && window_hit_close(&win, mx, my)) {
                 window_erase_desktop_bg((int)win.x, (int)win.y, (int)win.w, (int)win.h, screen_h);
                 gfx_flush();
                 exit(0);
-            } else if (!dragging && left && !prev_left && focused && window_hit_titlebar(&win, mx, my)) {
+            } else if (!dragging && !resizing && left && !prev_left && focused && window_hit_resize(&win, mx, my)) {
+                resizing = 1;
+            } else if (!dragging && !resizing && left && !prev_left && focused && window_hit_titlebar(&win, mx, my)) {
                 dragging = 1;
                 drag_off_x = mx - win.x;
                 drag_off_y = my - win.y;
-            } else if (!dragging && left && !prev_left && focused && mx >= win.x && mx < win.x + win.w &&
+            } else if (!dragging && !resizing && left && !prev_left && focused && mx >= win.x && mx < win.x + win.w &&
                       my >= win.content_y && my < win.content_y + win.content_h) {
                 if (handle_content_click(&win, mx, my)) changed = 1;
             } else if (dragging && left) {
@@ -207,8 +209,16 @@ int main(void) {
                 if (nx + win.w > screen_w) nx = screen_w - win.w;
                 if (ny + win.h > screen_h) ny = screen_h - win.h;
                 window_move(&win, nx, ny, screen_h);
+            } else if (resizing && left) {
+                unsigned int nw = (mx > win.x + WIN_RESIZE_SIZE) ? mx - win.x : win.min_w;
+                unsigned int nh = (my > win.y + WIN_RESIZE_SIZE) ? my - win.y : win.min_h;
+                window_resize(&win, nw, nh, screen_w, screen_h);
             } else if (dragging && !left) {
                 dragging = 0;
+                window_redraw_chrome(&win, "AxNotepad");
+                changed = 1;
+            } else if (resizing && !left) {
+                resizing = 0;
                 window_redraw_chrome(&win, "AxNotepad");
                 changed = 1;
             }
