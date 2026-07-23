@@ -632,6 +632,17 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\hello_rust_rv64.elf) do echo   hello_rust_rv64.elf: %%~zF bytes
 
+echo [U97] rustpanel.rs (real Rust GUI panel: raw gfx_*/mouse_state
+echo       syscalls only, no window.h/gfx_ui.h - see the file's own comment)...
+"%RUSTC%" --target %RUST_TARGET% --crate-type bin -C panic=abort -C opt-level=2 --emit=obj -o %OUT%\urustpanel.o %USRC%\rustpanel.rs
+if %errorlevel% neq 0 goto :error
+
+echo [U98] Linking rustpanel...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\rustpanel_rv64.elf %OUT%\ucrt0.o %OUT%\urustpanel.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\rustpanel_rv64.elf) do echo   rustpanel_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -663,6 +674,7 @@ copy /b %OUT%\axclock_rv64.elf    rv64build\fs\rv64\AXCLOCK.ELF
 copy /b %OUT%\axtodo_rv64.elf     rv64build\fs\rv64\AXTODO.ELF
 copy /b %OUT%\axtaskmgr_rv64.elf  rv64build\fs\rv64\AXTASKM.ELF
 copy /b %OUT%\hello_rust_rv64.elf rv64build\fs\rv64\RUSTHI.ELF
+copy /b %OUT%\rustpanel_rv64.elf  rv64build\fs\rv64\RUSTPNL.ELF
 copy /b %OUT%\kptrtest_rv64.elf   rv64build\fs\rv64\KPTRTEST.ELF
 copy /b %OUT%\spin_rv64.elf       rv64build\fs\rv64\SPIN.ELF
 copy /b %OUT%\nettest_rv64.elf     rv64build\fs\rv64\NETTEST.ELF
