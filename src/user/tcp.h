@@ -343,8 +343,19 @@ static int tcp_recv(tcp_conn_t *c, void *buf, unsigned int max_len, unsigned int
     if (c->peer_closed) return -1;   // FIN уже видели раньше - новых данных не будет
     if (!c->connected) return -1;
 
+    /* Раньше было `while (waited < timeout_ms)` - при timeout_ms=0 условие
+     * 0<0 ложно с самого начала, и тело цикла (единственное место, где
+     * вообще вызывается ax_net_recv()) не выполнялось НИ РАЗУ: настоящий
+     * неблокирующий "проверить один раз и сразу вернуться" молча
+     * превращался в вечное "нет данных". Латентный баг на этой стороне -
+     * ни один существующий x86 вызывающий (tcptest.c/tcpserve.c) не
+     * передаёт timeout_ms=0, но это тот же класс проблемы, найденный и
+     * исправленный на RISC-V при разработке AxChat (см. project_axchat
+     * в памяти) - портируется сюда той же механической правкой, что и
+     * прежние RTO/DNS-фиксы. Тело цикла теперь выполняется ХОТЯ БЫ ОДИН
+     * РАЗ независимо от timeout_ms. */
     unsigned int waited = 0;
-    while (waited < timeout_ms) {
+    for (;;) {
         unsigned int n = ax_net_recv(tcp_rx, sizeof(tcp_rx));
         tcp_seg_t seg;
         if (n > 0 && tcp_parse_segment(n, &seg) &&
@@ -367,6 +378,7 @@ static int tcp_recv(tcp_conn_t *c, void *buf, unsigned int max_len, unsigned int
             if (c->peer_closed) return -1;   // connected остаётся true - tcp_close() ещё должен отправить наш FIN
             // чистый ACK без данных - продолжаем ждать
         }
+        if (waited >= timeout_ms) break;
         ax_sleep_ms(10);
         waited += 10;
     }

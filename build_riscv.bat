@@ -643,6 +643,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\rustpanel_rv64.elf) do echo   rustpanel_rv64.elf: %%~zF bytes
 
+echo [U99] axchat.c...
+"%CC%" %UFLAGS% -c %USRC%\axchat.c -o %OUT%\uaxchat.o
+if %errorlevel% neq 0 goto :error
+
+echo [U100] Linking axchat...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\axchat_rv64.elf %OUT%\ucrt0.o %OUT%\uaxchat.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\axchat_rv64.elf) do echo   axchat_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -675,6 +685,7 @@ copy /b %OUT%\axtodo_rv64.elf     rv64build\fs\rv64\AXTODO.ELF
 copy /b %OUT%\axtaskmgr_rv64.elf  rv64build\fs\rv64\AXTASKM.ELF
 copy /b %OUT%\hello_rust_rv64.elf rv64build\fs\rv64\RUSTHI.ELF
 copy /b %OUT%\rustpanel_rv64.elf  rv64build\fs\rv64\RUSTPNL.ELF
+copy /b %OUT%\axchat_rv64.elf     rv64build\fs\rv64\AXCHAT.ELF
 copy /b %OUT%\kptrtest_rv64.elf   rv64build\fs\rv64\KPTRTEST.ELF
 copy /b %OUT%\spin_rv64.elf       rv64build\fs\rv64\SPIN.ELF
 copy /b %OUT%\nettest_rv64.elf     rv64build\fs\rv64\NETTEST.ELF

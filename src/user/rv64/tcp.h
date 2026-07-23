@@ -353,8 +353,20 @@ static int tcp_recv(tcp_conn_t *c, void *buf, unsigned int max_len, unsigned int
     if (c->peer_closed) return -1;   // FIN уже видели раньше - новых данных не будет
     if (!c->connected) return -1;
 
+    /* Раньше было `while (waited < timeout_ms)` - при timeout_ms=0 условие
+     * 0<0 ложно с самого начала, и тело цикла (единственное место, где
+     * вообще вызывается net_recv()) не выполнялось НИ РАЗУ: настоящий
+     * неблокирующий "проверить один раз и сразу вернуться" (то, что
+     * реально нужно вызывающему из GUI-цикла, где нельзя блокироваться)
+     * молча превращался в вечное "нет данных", даже когда данные реально
+     * пришли. AxChat - первый вызывающий, который вообще пробовал
+     * timeout_ms=0 для настоящего опроса; все прежние (tcptest.c/
+     * tcpserve.c) всегда передавали большой, осмысленно блокирующий
+     * таймаут, поэтому баг никогда не проявлялся раньше. Теперь тело
+     * цикла выполняется ХОТЯ БЫ ОДИН РАЗ независимо от timeout_ms - при
+     * 0 это ровно "проверить и вернуться", без единого sleep_ms(). */
     unsigned int waited = 0;
-    while (waited < timeout_ms) {
+    for (;;) {
         unsigned int n = net_recv(tcp_rx, sizeof(tcp_rx));
         tcp_seg_t seg;
         if (n > 0 && tcp_parse_segment(n, &seg) &&
@@ -377,6 +389,7 @@ static int tcp_recv(tcp_conn_t *c, void *buf, unsigned int max_len, unsigned int
             if (c->peer_closed) return -1;   // connected остаётся true - tcp_close() ещё должен отправить наш FIN
             // чистый ACK без данных - продолжаем ждать
         }
+        if (waited >= timeout_ms) break;
         sleep_ms(10);
         waited += 10;
     }
