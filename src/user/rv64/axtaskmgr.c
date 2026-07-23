@@ -35,6 +35,12 @@ static const char *tm_state_name(int state) {
     return names[state];
 }
 
+static int tm_name_eq(const char *a, const char *b) {
+    int i = 0;
+    for (; a[i] && b[i]; i++) if (a[i] != b[i]) return 0;
+    return a[i] == b[i];
+}
+
 static void tm_refresh(void) {
     tm_count = 0;
     for (unsigned int i = 0; i < TM_MAX_PROCS; i++) {
@@ -131,6 +137,21 @@ static int handle_content_click(const window_t *win, unsigned int mx, unsigned i
     if (row < 0 || row >= tm_count) { tm_pending_kill_pid = -1; return 0; }
     ps_entry_t *e = &tm_rows[row];
 
+    /* tm_rows is a snapshot from the last render, up to one refresh
+     * interval (200ms) stale. In that window the pid at this row could
+     * have naturally exited and been reused by a completely unrelated
+     * new process (pids ARE slot indices, freed slots get reclaimed
+     * immediately - see proc_create()). Re-check by NAME, not just "is
+     * the slot still in use", before acting on a click - otherwise a
+     * mistimed click could kill/renice a process the user never
+     * actually clicked on. An already-gone/mismatched target is treated
+     * the same as "nothing to do", not an error. */
+    ps_entry_t fresh;
+    if (!ps_info((unsigned int)e->pid, &fresh) || !tm_name_eq(fresh.name, e->name)) {
+        tm_pending_kill_pid = -1;
+        return 1;
+    }
+
     if (mx >= prio_minus_x && mx < prio_minus_x + TM_PRIO_MINUS_W) {
         tm_pending_kill_pid = -1;
         int p = e->priority - 1; if (p < 1) p = 1;
@@ -155,6 +176,20 @@ static int handle_content_click(const window_t *win, unsigned int mx, unsigned i
             return 1;
         }
         tm_pending_kill_pid = -1;
+        if (e->pid == tm_my_pid) {
+            /* Self-kill via kill()+wait() is unsafe: neither syscall
+             * calls schedule(), so procs[tm_my_pid] would sit marked
+             * PROC_UNUSED while THIS code keeps right on executing.
+             * Any timer-tick reschedule before our next syscall would
+             * see the slot not RUNNING, switch to some other process,
+             * and never save our register state anywhere - silently
+             * losing this process's execution mid-flight (confirmed by
+             * reading schedule()'s "only save state if state==RUNNING"
+             * guard in proc.c). exit() is the only safe self-termination
+             * path - it marks ZOMBIE AND calls schedule() before
+             * returning, exactly like every other process's normal exit. */
+            exit(0);
+        }
         kill(e->pid);
         /* Reap synchronously - SYS_KILL already marks the target ZOMBIE,
          * so wait() on it returns immediately without blocking (see

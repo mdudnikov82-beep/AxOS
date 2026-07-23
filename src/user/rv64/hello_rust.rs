@@ -45,7 +45,7 @@ fn gettime() -> i64 {
 #[no_mangle]
 pub extern "C" fn main() -> i32 {
     write(1, b"Hello from Rust!\r\n");
-    write(1, b"AxOS/RV64: rustc + riscv64gc-unknown-none-elf works.\r\n");
+    write(1, b"AxOS/RV64: rustc + riscv64imac-unknown-none-elf works.\r\n");
 
     write(1, b"Timer value: ");
     let mut buf = [0u8; 24];
