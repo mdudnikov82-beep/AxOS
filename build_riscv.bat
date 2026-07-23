@@ -7,6 +7,13 @@ set "LD=%RISCV_PREFIX%ld.exe"
 set "OBJCOPY=%RISCV_PREFIX%objcopy.exe"
 set "QEMU=C:\Program Files\qemu\qemu-system-riscv64.exe"
 
+rem riscv64IMAC not riscv64GC: our C code is soft-float (UFLAGS' -mabi=lp64,
+rem no F/D extensions) - the "gc" target defaults to hard-float (lp64d) and
+rem the linker refuses to mix float ABIs in one binary ("can't link
+rem double-float modules with soft-float modules").
+set "RUSTC=%USERPROFILE%\.cargo\bin\rustc.exe"
+set "RUST_TARGET=riscv64imac-unknown-none-elf"
+
 set "SRC=src\arch\riscv64"
 set "USRC=src\user\rv64"
 set "OUT=rv64build\out"
@@ -609,6 +616,22 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\axtaskmgr_rv64.elf) do echo   axtaskmgr_rv64.elf: %%~zF bytes
 
+echo [U95] hello_rust.rs (first Rust program - see the file's own comment
+echo       for why no new crt0/loader was needed: same ucrt0.o + user_rv64.ld
+echo       as every C program, Rust just needs to export a `main` symbol)...
+if not exist "%RUSTC%" (
+    echo ERROR: rustc not found: %RUSTC% - install via https://rustup.rs, then: rustup target add %RUST_TARGET%
+    goto :error
+)
+"%RUSTC%" --target %RUST_TARGET% --crate-type bin -C panic=abort -C opt-level=2 --emit=obj -o %OUT%\uhello_rust.o %USRC%\hello_rust.rs
+if %errorlevel% neq 0 goto :error
+
+echo [U96] Linking hello_rust...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\hello_rust_rv64.elf %OUT%\ucrt0.o %OUT%\uhello_rust.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\hello_rust_rv64.elf) do echo   hello_rust_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -639,6 +662,7 @@ copy /b %OUT%\axsnake_rv64.elf    rv64build\fs\rv64\AXSNAKE.ELF
 copy /b %OUT%\axclock_rv64.elf    rv64build\fs\rv64\AXCLOCK.ELF
 copy /b %OUT%\axtodo_rv64.elf     rv64build\fs\rv64\AXTODO.ELF
 copy /b %OUT%\axtaskmgr_rv64.elf  rv64build\fs\rv64\AXTASKM.ELF
+copy /b %OUT%\hello_rust_rv64.elf rv64build\fs\rv64\RUSTHI.ELF
 copy /b %OUT%\kptrtest_rv64.elf   rv64build\fs\rv64\KPTRTEST.ELF
 copy /b %OUT%\spin_rv64.elf       rv64build\fs\rv64\SPIN.ELF
 copy /b %OUT%\nettest_rv64.elf     rv64build\fs\rv64\NETTEST.ELF

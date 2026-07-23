@@ -100,6 +100,16 @@ jobs:
             exit 1
           }
 
+      # GitHub's windows-latest image ships rustup/rustc/cargo preinstalled,
+      # but only for the host target - the bare-metal cross target used by
+      # src/user/rv64/hello_rust.rs (see build_riscv.bat's own comment on
+      # why it's riscv64IMAC not riscv64GC: our C code is soft-float, and
+      # the linker refuses to mix float ABIs in one binary) still needs
+      # adding explicitly.
+      - name: Add Rust riscv64imac-unknown-none-elf target
+        shell: cmd
+        run: rustup target add riscv64imac-unknown-none-elf
+
       - name: Build AxOS RISC-V (build_riscv.bat)
         shell: cmd
         run: build_riscv.bat
