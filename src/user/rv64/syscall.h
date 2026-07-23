@@ -39,6 +39,7 @@
 #define SYS_SET_LEVEL     33
 #define SYS_KBD_GETC      34
 #define SYS_WIN_SET_RECT  35
+#define SYS_PS_INFO       36
 
 static inline long __syscall0(long nr) {
     register long _nr  __asm__("a7") = nr;
@@ -222,6 +223,7 @@ static inline long seccomp(unsigned long mask) {
 #define SC_EXEC_PIPE    SC_BIT(SYS_EXEC_PIPE)
 #define SC_FORK         SC_BIT(SYS_FORK)
 #define SC_SET_LEVEL    SC_BIT(SYS_SET_LEVEL)
+#define SC_PS_INFO      SC_BIT(SYS_PS_INFO)
 
 /* Baseline "can still talk to the user and exit cleanly" group -
  * mirrors x86's AX_SC_STDIO. */
@@ -340,6 +342,24 @@ static inline int mouse_state(unsigned int *x, unsigned int *y, unsigned int *bu
  * window.h - most GUI apps never need to call this directly. */
 static inline int win_set_rect(int x, int y, int w, int h) {
     return (int)__syscall4(SYS_WIN_SET_RECT, x, y, w, h);
+}
+
+/* ps_info(index, &out) -> 1 if procs[index] is in use (out filled), 0 if
+ * unused/out of range. Same {pid,name,state,priority,ticks} data as ps()'s
+ * UART text dump, but returned as a struct so a framebuffer GUI app (no
+ * visible console) can actually read it - one process slot per call, loop
+ * index 0..MAX_PROCS-1 (see proc.h on the kernel side; there's no
+ * user-visible MAX_PROCS constant, AxTaskMgr hardcodes the current value). */
+typedef struct {
+    int           pid;
+    char          name[13];
+    int           state;
+    int           priority;
+    unsigned long ticks;
+} ps_entry_t;
+
+static inline int ps_info(unsigned int index, ps_entry_t *out) {
+    return (int)__syscall2(SYS_PS_INFO, (long)index, (long)out);
 }
 
 /* kbd_getc() -> next ASCII char from the keyboard, or -1 if none

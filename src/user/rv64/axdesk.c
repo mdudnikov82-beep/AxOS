@@ -13,12 +13,12 @@
  * overlapping AxSH's own console text). This only draws icons + dispatches
  * clicks; it doesn't try to track/composite the windows it launches. */
 
-/* Shrunk from 78/10 when AxTodo became the 10th icon - the old pitch
- * (10*78 + 9*10 = 870px) no longer fit an 800px-wide screen. BMP icon
+/* Shrunk from 70/9 when AxTaskMgr became the 11th icon - the old pitch
+ * (11*70 + 10*9 = 860px) no longer fit an 800px-wide screen. BMP icon
  * art (<=64x64, see bmp.h) still centers fine at this width. */
-#define ICON_W   70
+#define ICON_W   64
 #define ICON_H   96
-#define ICON_GAP 9
+#define ICON_GAP 8
 #define ICON_TOP 70
 
 typedef struct {
@@ -44,7 +44,7 @@ int main(void) {
         exit(1);
     }
 
-    icon_t icons[10];
+    icon_t icons[11];
     icons[0].label = "Term";  icons[0].file = "AXTERM.ELF";  icons[0].icon_bmp = "TERM.BMP";  icons[0].color = gfx_rgb(0, 150, 255);
     icons[1].label = "About"; icons[1].file = "AXABOUT.ELF"; icons[1].icon_bmp = "ABOUT.BMP"; icons[1].color = gfx_rgb(255, 140, 0);
     icons[2].label = "Paint"; icons[2].file = "AXPAINT.ELF"; icons[2].icon_bmp = "PAINT.BMP"; icons[2].color = gfx_rgb(0, 200, 120);
@@ -58,7 +58,8 @@ int main(void) {
     icons[7].label = "Snake"; icons[7].file = "AXSNAKE.ELF"; icons[7].icon_bmp = 0;          icons[7].color = gfx_rgb(60, 220, 60);
     icons[8].label = "Clock"; icons[8].file = "AXCLOCK.ELF"; icons[8].icon_bmp = 0;          icons[8].color = gfx_rgb(255, 165, 0);
     icons[9].label = "Todo";  icons[9].file = "AXTODO.ELF";  icons[9].icon_bmp = 0;          icons[9].color = gfx_rgb(220, 180, 0);
-    unsigned int n_icons = 10;
+    icons[10].label = "Tasks"; icons[10].file = "AXTASKM.ELF"; icons[10].icon_bmp = 0;        icons[10].color = gfx_rgb(150, 90, 220);
+    unsigned int n_icons = 11;
 
     unsigned int total_w = n_icons * ICON_W + (n_icons - 1) * ICON_GAP;
     unsigned int start_x = (w > total_w) ? (w - total_w) / 2 : 0;
@@ -86,9 +87,16 @@ int main(void) {
             bmp_draw(&icon_img, icon_x, (unsigned int)ICON_TOP + 6);
         }
 
+        /* Clamp to 0 rather than let (ICON_W - lw) underflow (unsigned) -
+         * some 5-char labels ("About","Files","Snake","Clock","Tasks")
+         * are now wider than ICON_W=64 since it shrank for the 11-icon
+         * row (see this file's own comment above ICON_W); a negative
+         * result wrapped to a huge x and drew the label off-screen,
+         * invisible - found live via screendump. Left-aligned + a small
+         * bleed into the gap reads fine, unlike "not there at all". */
         unsigned int lw = text_px_w(icons[i].label);
-        gfx_draw_text((unsigned int)x + (ICON_W - lw) / 2, ICON_TOP + ICON_H - 20,
-                     icons[i].label, gfx_rgb(0, 0, 0));
+        unsigned int lx = (lw < ICON_W) ? (unsigned int)x + (ICON_W - lw) / 2 : (unsigned int)x;
+        gfx_draw_text(lx, ICON_TOP + ICON_H - 20, icons[i].label, gfx_rgb(0, 0, 0));
     }
     gfx_flush();
 

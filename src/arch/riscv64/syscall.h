@@ -36,6 +36,17 @@
 #define SYS_SET_LEVEL     33  /* set_level(level) -> 0 (raises the calling process's own MLS sensitivity level, clamped [0,15]) */
 #define SYS_KBD_GETC      34  /* kbd_getc() -> next ASCII char from the keyboard, or -1 if none pending/no device */
 #define SYS_WIN_SET_RECT  35  /* win_set_rect(x,y,w,h) -> 0 (upserts the calling process's window rect + z-order, see SYS_MOUSE_STATE) */
+#define SYS_PS_INFO       36  /* ps_info(index, ps_entry_t *out) -> 1 (out filled) / 0 (index out of range, end of list) */
+
+/* Mirrored byte-for-byte in src/user/rv64/syscall.h - same toolchain/ABI
+ * compiles both sides, so field order/padding always match. */
+typedef struct {
+    int           pid;
+    char          name[13];
+    int           state;
+    int           priority;
+    unsigned long ticks;
+} ps_entry_t;
 
 /* Kernel-side entry point.
  * frame[] = saved registers from trap_entry (sd xN, N*8(sp)):

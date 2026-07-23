@@ -899,6 +899,27 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         ret = 0;
         break;
 
+    case SYS_PS_INFO: {
+        /* Same {pid,state,priority,name,ticks} data as SYS_PS's UART text
+         * dump above, but returned as a struct so a GUI app (framebuffer,
+         * no UART-visible console) can actually read it - one index per
+         * call, same convention as SYS_READDIR. */
+        int idx = (int)arg0;
+        if (idx < 0 || idx >= MAX_PROCS || procs[idx].state == PROC_UNUSED) { ret = 0; break; }
+        if (!user_range_ok(arg1, sizeof(ps_entry_t))) { ret = 0; break; }
+        ps_entry_t *out = (ps_entry_t *)arg1;
+        int visible = mls_dominates(procs[idx].mls_level);
+        out->pid = idx;
+        int k = 0;
+        for (; visible && procs[idx].name[k] && k < 12; k++) out->name[k] = procs[idx].name[k];
+        out->name[k]  = '\0';
+        out->state    = procs[idx].state;
+        out->priority = procs[idx].priority;
+        out->ticks    = visible ? procs[idx].ticks : 0;
+        ret = 1;
+        break;
+    }
+
     case SYS_NET_MAC: {
         if (!virtio_net_ready()) { ret = -1; break; }
         unsigned char m[6];

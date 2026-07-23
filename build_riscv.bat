@@ -599,6 +599,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\axtodo_rv64.elf) do echo   axtodo_rv64.elf: %%~zF bytes
 
+echo [U93] axtaskmgr.c...
+"%CC%" %UFLAGS% -c %USRC%\axtaskmgr.c -o %OUT%\uaxtaskmgr.o
+if %errorlevel% neq 0 goto :error
+
+echo [U94] Linking axtaskmgr...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\axtaskmgr_rv64.elf %OUT%\ucrt0.o %OUT%\uaxtaskmgr.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\axtaskmgr_rv64.elf) do echo   axtaskmgr_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -628,6 +638,7 @@ copy /b %OUT%\axnotepad_rv64.elf  rv64build\fs\rv64\AXNOTE.ELF
 copy /b %OUT%\axsnake_rv64.elf    rv64build\fs\rv64\AXSNAKE.ELF
 copy /b %OUT%\axclock_rv64.elf    rv64build\fs\rv64\AXCLOCK.ELF
 copy /b %OUT%\axtodo_rv64.elf     rv64build\fs\rv64\AXTODO.ELF
+copy /b %OUT%\axtaskmgr_rv64.elf  rv64build\fs\rv64\AXTASKM.ELF
 copy /b %OUT%\kptrtest_rv64.elf   rv64build\fs\rv64\KPTRTEST.ELF
 copy /b %OUT%\spin_rv64.elf       rv64build\fs\rv64\SPIN.ELF
 copy /b %OUT%\nettest_rv64.elf     rv64build\fs\rv64\NETTEST.ELF
