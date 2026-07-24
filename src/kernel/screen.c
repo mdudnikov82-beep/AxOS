@@ -189,6 +189,28 @@ static void ansi_dispatch(int tty, char final) {
             ttys[tty].cursor_x = col - 1;
             break;
         }
+        case 'C': {
+            // Курсор вправо на N, БЕЗ записи символа - в отличие от '\b'
+            // (backspace_tty(), который двигает курсор И стирает клетку
+            // пробелом), это чистое перемещение. Нужно шеллу (AxSH,
+            // ax_readline()) для редактирования строки курсором: печатать
+            // "хвост" после вставки, потом вернуть курсор НАЗАД без
+            // стирания только что напечатанного - обычный backspace для
+            // этого не годится, он уничтожил бы то, что сам же вывел.
+            int n = ttys[tty].ansi_param_count > 0 ? ttys[tty].ansi_params[0] : 1;
+            if (n < 1) n = 1;
+            ttys[tty].cursor_x += n;
+            if (ttys[tty].cursor_x > 79) ttys[tty].cursor_x = 79;
+            break;
+        }
+        case 'D': {
+            // Курсор влево на N, тоже без стирания - см. 'C' выше.
+            int n = ttys[tty].ansi_param_count > 0 ? ttys[tty].ansi_params[0] : 1;
+            if (n < 1) n = 1;
+            ttys[tty].cursor_x -= n;
+            if (ttys[tty].cursor_x < 0) ttys[tty].cursor_x = 0;
+            break;
+        }
         default:
             break; // неизвестная команда - игнорируем, не ломая остальной вывод
     }

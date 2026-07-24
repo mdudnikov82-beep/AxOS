@@ -13,10 +13,73 @@ static int sh_strncmp(const char* a, const char* b, int n) {
     return 0;
 }
 
+/* Tab-автодополнение имени файла - подключается в ax_readline() (см.
+ * stdio.c) через ax_set_complete_hook(), только в конце строки. Тот же
+ * дизайн, что и на RISC-V (axsh.c): повтор Tab листает совпадения, но
+ * только если ни курсор, ни начало слова не изменились с прошлого раза -
+ * если пользователь дописал ещё символы между двумя нажатиями, это не
+ * повтор, а новый (более узкий) префикс, нужно пересканировать диск. */
+static char sh_comp_buf[16][13];
+static int  sh_comp_count = 0, sh_comp_idx = 0, sh_comp_word_start = -1, sh_comp_last_pos = -1;
+
+static int sh_complete(char *buf, int *plen, int *ppos, int max) {
+    if (*ppos != *plen) return 0;
+    int len = *plen;
+    int start = len;
+    while (start > 0 && buf[start - 1] != ' ') start--;
+
+    int is_repeat = (sh_comp_word_start == start && sh_comp_last_pos == *ppos);
+    if (!is_repeat) {
+        sh_comp_word_start = start;
+        sh_comp_count = 0;
+        sh_comp_idx = 0;
+        char prefix[13]; int pl = 0;
+        for (int i = start; i < len && pl < 12; i++) {
+            char ch = buf[i];
+            prefix[pl++] = (ch >= 'a' && ch <= 'z') ? (char)(ch - 32) : ch;
+        }
+        prefix[pl] = '\0';
+
+        struct readdir_args da;
+        for (unsigned int i = 0; sh_comp_count < 16; i++) {
+            da.index = i; da.result = 0;
+            ax_readdir(&da);
+            if (!da.result) break;
+            if (sh_strncmp(da.name, prefix, pl) == 0) {
+                int k = 0; while (da.name[k] && k < 12) { sh_comp_buf[sh_comp_count][k] = da.name[k]; k++; }
+                sh_comp_buf[sh_comp_count][k] = '\0';
+                sh_comp_count++;
+            }
+        }
+    }
+    if (sh_comp_count == 0) return 0;
+
+    const char *match = sh_comp_buf[sh_comp_idx];
+    sh_comp_idx = (sh_comp_idx + 1) % sh_comp_count;
+
+    int old_len = len;
+    /* '\033[nD' not '\b' x N - x86's kernel console makes '\b' destructive
+     * (backspace_tty() blanks the cell it moves onto), which would erase
+     * the word we're about to reprint anyway - see stdio.c's ax_readline()
+     * for the same fix and the live bug it was found from. */
+    if (len > start) ax_printf("\033[%dD", len - start);
+    len = start;
+    int i = 0;
+    for (; match[i] && start + i < max - 1; i++) { buf[start + i] = match[i]; ax_putchar(buf[start + i]); }
+    len = start + i;
+    int erase = (old_len > len) ? (old_len - len) : 0;
+    for (int k = 0; k < erase; k++) ax_putchar(' ');
+    if (erase > 0) ax_printf("\033[%dD", erase);
+    *plen = len; *ppos = len;
+    sh_comp_last_pos = len;
+    return 1;
+}
+
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
 
     ax_shell_claim(1);  // захватываем клавиатуру у kernel shell
+    ax_set_complete_hook(sh_complete);
 
     ax_print("\n\033[36mAxSH v0.1 - AxOS user shell\033[0m\n");
     ax_print("Run: <program> [args]  |  exit  |  help\n\n");
@@ -85,6 +148,9 @@ int main(int argc, char** argv) {
             ax_print("  cmd &                     run in background\n");
             ax_print("\n");
             ax_print("Run 'ls' to see available files/programs on disk.\n");
+            ax_print("\n");
+            ax_print("Line editing: Up/Down=history, Left/Right/Home/End=cursor,\n");
+            ax_print("Delete=forward-delete, Tab=complete filename\n");
             continue;
         }
 

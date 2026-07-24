@@ -1996,19 +1996,30 @@ void keyboard_handler_main() {
         }
 
         // Расширенные клавиши: E0-префикс, затем скан-код.
-        // Стрелка вверх = E0 0x48, вниз = E0 0x50.
-        // Передаём как спецсимволы 0x11/0x12 в last_key активной консоли
-        // для ax_readkey().
+        // Стрелка вверх = E0 0x48, вниз = E0 0x50, влево = E0 0x4B,
+        // вправо = E0 0x4D, Home = E0 0x47, End = E0 0x4F, Delete = E0 0x53.
+        // Передаём как спецсимволы 0x11-0x17 в last_key активной консоли
+        // для ax_readkey() - тот же приём, что уже был для вверх/вниз.
         if (scancode == 0xE0) { e0_prefix = 1; return; }
         if (e0_prefix) {
             e0_prefix = 0;
-            if (scancode == 0x48) tty_last_key[tty_active()] = '\x11';  // стрелка вверх (E0 path)
-            if (scancode == 0x50) tty_last_key[tty_active()] = '\x12';  // стрелка вниз  (E0 path)
+            if (scancode == 0x48) tty_last_key[tty_active()] = '\x11';  // вверх
+            if (scancode == 0x50) tty_last_key[tty_active()] = '\x12';  // вниз
+            if (scancode == 0x4B) tty_last_key[tty_active()] = '\x13';  // влево
+            if (scancode == 0x4D) tty_last_key[tty_active()] = '\x14';  // вправо
+            if (scancode == 0x47) tty_last_key[tty_active()] = '\x15';  // Home
+            if (scancode == 0x4F) tty_last_key[tty_active()] = '\x16';  // End
+            if (scancode == 0x53) tty_last_key[tty_active()] = '\x17';  // Delete
             return;
         }
-        // Фоллбэк: если QEMU/SDL шлёт 0x48/0x50 без E0-префикса
+        // Фоллбэк: если QEMU/SDL шлёт скан-коды без E0-префикса
         if (scancode == 0x48) { tty_last_key[tty_active()] = '\x11'; return; }
         if (scancode == 0x50) { tty_last_key[tty_active()] = '\x12'; return; }
+        if (scancode == 0x4B) { tty_last_key[tty_active()] = '\x13'; return; }
+        if (scancode == 0x4D) { tty_last_key[tty_active()] = '\x14'; return; }
+        if (scancode == 0x47) { tty_last_key[tty_active()] = '\x15'; return; }
+        if (scancode == 0x4F) { tty_last_key[tty_active()] = '\x16'; return; }
+        if (scancode == 0x53) { tty_last_key[tty_active()] = '\x17'; return; }
 
         // Нам нужны только нажатия клавиш
         if (scancode < 128) {

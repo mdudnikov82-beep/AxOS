@@ -34,26 +34,198 @@ static const char *skip_spaces(const char *p) {
     return p;
 }
 
-/* Читает строку с эхом и обработкой Backspace.
+/* История команд - кольцевой буфер, тот же дизайн, что и у x86
+ * (src/libaxiom/src/stdio.c's hist[HIST_CAP][HIST_LEN]), просто прямо
+ * в axsh.c - тут нет общей библиотеки. */
+#define HIST_CAP 8
+#define HIST_LEN 80
+static char hist[HIST_CAP][HIST_LEN];
+static int  hist_count = 0;
+
+/* Дописывает buf[pos..len) на экран, затирает `erase` "хвостовых"
+ * старых символов пробелами (нужно только когда строка стала короче -
+ * backspace/delete/более короткая запись истории), затем возвращает
+ * курсор обратно к pos через backspace'ы. Один переиспользуемый
+ * помощник вместо трёх разных мест, которые раньше стирали строку
+ * по-разному (и x86-версия с историей всё ещё имеет тут реальный баг -
+ * не затирает "хвост" при подстановке БОЛЕЕ КОРОТКОЙ записи истории). */
+static void redraw_tail(const char *buf, int pos, int len, int erase) {
+    for (int i = pos; i < len; i++) write(1, &buf[i], 1);
+    for (int i = 0; i < erase; i++) write(1, " ", 1);
+    int back = (len - pos) + erase;
+    for (int i = 0; i < back; i++) write(1, "\b", 1);
+}
+
+/* Читает строку с полным редактированием: History (Up/Down через ESC[A/B),
+   курсор (Left/Right/Home/End/Delete через ESC[C/D/H или F/1~/4~/3~),
+   вставка/удаление в середине строки, Tab-автодополнение имён файлов.
    Возвращает длину без '\0'. */
 static int readline(char *buf, int max) {
-    int i = 0;
-    while (i < max - 1) {
+    int len = 0, pos = 0;
+    int hist_pos = hist_count;   /* hist_count = "текущий ввод", за пределами истории */
+    char saved[HIST_LEN];
+    saved[0] = '\0';
+
+    /* Автодополнение: контекст сбрасывается любой НЕ-Tab правкой, так что
+     * повторный Tab после ввода новых символов пересканирует диск заново;
+     * повторный Tab БЕЗ других правок между ними листает совпадения. */
+    char comp_buf[16][14];
+    int comp_count = 0, comp_idx = 0, comp_word_start = -1, comp_last_pos = -1;
+
+    for (;;) {
         char c = getchar_rv();
+
         if (c == '\r' || c == '\n') {
             write(1, "\r\n", 2);
             break;
         }
-        if (c == '\b' || c == 127) {   /* Backspace */
-            if (i > 0) { i--; write(1, "\b \b", 3); }
+
+        if (c == 0x1B) {   /* ESC - возможно начало CSI-последовательности от реального терминала */
+            char c1 = getchar_rv();
+            if (c1 != '[') continue;   /* непонятная escape-последовательность - молча игнорируем */
+            char final = getchar_rv();
+            if (final >= '1' && final <= '9') {
+                getchar_rv();   /* ожидаем завершающий '~', сам код уже есть в final */
+            }
+
+            int hist_dir = 0;
+            if (final == 'A') hist_dir = -1;        /* Up */
+            else if (final == 'B') hist_dir = 1;    /* Down */
+            else if (final == 'C') {                /* Right */
+                if (pos < len) { write(1, &buf[pos], 1); pos++; }
+                comp_word_start = -1;
+                continue;
+            } else if (final == 'D') {              /* Left */
+                if (pos > 0) { pos--; write(1, "\b", 1); }
+                comp_word_start = -1;
+                continue;
+            } else if (final == 'H' || final == '1') {   /* Home */
+                while (pos > 0) { pos--; write(1, "\b", 1); }
+                comp_word_start = -1;
+                continue;
+            } else if (final == 'F' || final == '4') {   /* End */
+                while (pos < len) { write(1, &buf[pos], 1); pos++; }
+                comp_word_start = -1;
+                continue;
+            } else if (final == '3') {   /* Delete (forward) */
+                if (pos < len) {
+                    for (int i = pos; i < len - 1; i++) buf[i] = buf[i + 1];
+                    len--;
+                    redraw_tail(buf, pos, len, 1);
+                }
+                comp_word_start = -1;
+                continue;
+            } else {
+                continue;   /* неизвестный код CSI - игнорируем */
+            }
+
+            /* hist_dir != 0 отсюда - общая логика перелистывания истории */
+            int new_pos = hist_pos + hist_dir;
+            if (new_pos >= 0 && new_pos <= hist_count) {
+                if (hist_pos == hist_count) {
+                    int si; for (si = 0; si < len && si < HIST_LEN - 1; si++) saved[si] = buf[si];
+                    saved[si] = '\0';
+                }
+                while (pos > 0) { pos--; write(1, "\b", 1); }
+                int old_len = len;
+                hist_pos = new_pos;
+                const char *entry = (hist_pos == hist_count) ? saved : hist[hist_pos];
+                int i = 0;
+                for (; entry[i] && i < max - 1; i++) { buf[i] = entry[i]; write(1, &buf[i], 1); }
+                len = i; pos = i;
+                int erase = (old_len > len) ? (old_len - len) : 0;
+                for (int k = 0; k < erase; k++) write(1, " ", 1);
+                for (int k = 0; k < erase; k++) write(1, "\b", 1);
+            }
+            comp_word_start = -1;
             continue;
         }
-        if (c < 0x20) continue;        /* ignore other control chars */
-        buf[i++] = c;
-        write(1, &c, 1);               /* echo */
+
+        if (c == '\b' || c == 127) {   /* Backspace */
+            if (pos > 0) {
+                pos--;
+                for (int i = pos; i < len - 1; i++) buf[i] = buf[i + 1];
+                len--;
+                write(1, "\b", 1);
+                redraw_tail(buf, pos, len, 1);
+            }
+            comp_word_start = -1;
+            continue;
+        }
+
+        if (c == '\t') {   /* Tab - автодополнение имени файла (только в конце строки) */
+            if (pos != len) continue;
+            int start = len;
+            while (start > 0 && buf[start - 1] != ' ') start--;
+
+            /* Повтор (циклический переход к следующему совпадению) только
+             * если ни курсор, ни начало слова не изменились с прошлого
+             * Tab - если пользователь дописал ещё символы между двумя
+             * нажатиями (тем самым сузив префикс), это НЕ повтор и нужно
+             * пересканировать диск заново, а не листать старые совпадения. */
+            int is_repeat = (comp_word_start == start && comp_last_pos == pos);
+            if (!is_repeat) {
+                comp_word_start = start;
+                comp_count = 0;
+                comp_idx = 0;
+                char prefix[14]; int pl = 0;
+                for (int i = start; i < len && pl < 13; i++) {
+                    char ch = buf[i];
+                    prefix[pl++] = (ch >= 'a' && ch <= 'z') ? (char)(ch - 32) : ch;   /* FAT12 имена - верхний регистр */
+                }
+                prefix[pl] = '\0';
+
+                char name[16]; unsigned int size;
+                for (unsigned int i = 0; comp_count < 16; i++) {
+                    name[0] = '\0';
+                    if (!readdir(i, name, &size)) break;
+                    if (sncmp(name, prefix, pl) == 0) {
+                        int k = 0; while (name[k] && k < 13) { comp_buf[comp_count][k] = name[k]; k++; }
+                        comp_buf[comp_count][k] = '\0';
+                        comp_count++;
+                    }
+                }
+            }
+            if (comp_count == 0) continue;
+
+            const char *match = comp_buf[comp_idx];
+            comp_idx = (comp_idx + 1) % comp_count;
+
+            int old_len = len;
+            while (len > start) { len--; write(1, "\b", 1); }
+            int i = 0;
+            for (; match[i] && start + i < max - 1; i++) { buf[start + i] = match[i]; write(1, &buf[start + i], 1); }
+            len = start + i; pos = len;
+            int erase = (old_len > len) ? (old_len - len) : 0;
+            for (int k = 0; k < erase; k++) write(1, " ", 1);
+            for (int k = 0; k < erase; k++) write(1, "\b", 1);
+            comp_last_pos = pos;
+            continue;
+        }
+
+        if ((unsigned char)c < 0x20) continue;   /* прочие управляющие символы игнорируем */
+
+        comp_word_start = -1;
+        if (len < max - 1) {
+            for (int i = len; i > pos; i--) buf[i] = buf[i - 1];
+            buf[pos] = c; len++; pos++;
+            write(1, &c, 1);
+            redraw_tail(buf, pos, len, 0);
+        }
     }
-    buf[i] = '\0';
-    return i;
+    buf[len] = '\0';
+
+    if (len > 0) {
+        if (hist_count == HIST_CAP) {
+            for (int k = 0; k < HIST_CAP - 1; k++)
+                for (int j = 0; j < HIST_LEN; j++) hist[k][j] = hist[k + 1][j];
+            hist_count--;
+        }
+        int j; for (j = 0; j < len && j < HIST_LEN - 1; j++) hist[hist_count][j] = buf[j];
+        hist[hist_count][j] = '\0';
+        hist_count++;
+    }
+    return len;
 }
 
 /* ---- Встроенные команды ---- */
@@ -76,6 +248,8 @@ static void cmd_help(void) {
     print("  help            this message\r\n");
     print("  exit            shutdown\r\n");
     print("  reboot          restart the machine\r\n\r\n");
+    print("Line editing: Up/Down=history, Left/Right/Home/End=cursor,\r\n");
+    print("Delete=forward-delete, Tab=complete filename\r\n\r\n");
 }
 
 static void cmd_ls(void) {
@@ -88,7 +262,9 @@ static void cmd_ls(void) {
         if (!readdir(i, name, &size)) break;
         /* Print name padded to 14 chars */
         int nlen = (int)slen(name);
+        print("\033[32m");
         write(1, name, nlen);
+        print("\033[0m");
         for (int s = nlen; s < 14; s++) write(1, " ", 1);
         print_udec(size);
         print(" B\r\n");

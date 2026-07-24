@@ -28,7 +28,9 @@ int main(int argc, char** argv) {
             print_padded(a.name, 13);
             ax_print("  <DIR>\033[0m\n");
         } else {
+            ax_print("\033[32m");
             print_padded(a.name, 13);
+            ax_print("\033[0m");
             ax_printf("  %7u B\n", a.size);
             total += a.size;
         }

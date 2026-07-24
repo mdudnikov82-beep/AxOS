@@ -80,51 +80,126 @@ void ax_printf(const char* fmt, ...) {
 static char hist[HIST_CAP][HIST_LEN];
 static int  hist_len = 0;
 
-// 0x11 = стрелка вверх, 0x12 = стрелка вниз (задаются ядром из E0 48/50).
+// Автодополнение по Tab - необязательный хук вместо жёсткой зависимости
+// ax_readline() (общая библиотечная функция - её вызывает и ai.c) от
+// FAT12/readdir. sh.c подключает свой через ax_set_complete_hook();
+// ai.c его не трогает - Tab там просто ничего не делает, как и раньше.
+// Хук получает буфер/длину/позицию курсора и сам отвечает за собственную
+// перерисовку экрана (тем же приёмом, что и остальной readline).
+static int (*ax_complete_hook)(char *buf, int *len, int *pos, int max) = 0;
+void ax_set_complete_hook(int (*fn)(char *buf, int *len, int *pos, int max)) {
+    ax_complete_hook = fn;
+}
+
+// x86's own kernel console (screen.c) makes '\b' DESTRUCTIVE - backspace_tty()
+// moves the cursor back AND writes a blank there in one step (unlike RISC-V's
+// raw UART, where '\b' is just a byte whose meaning depends on whatever real
+// terminal is attached, normally non-destructive). Found live: redraw_tail's
+// old "print tail, then N backspaces to return the cursor" trick used '\b'
+// for the return-trip too, which silently ERASED the very characters it had
+// just printed (confirmed via a debug dump showing the internal buffer was
+// correctly "hellzo" while the SCREEN showed "hellz" - a pure display bug,
+// dispatch was never actually broken). Fixed by adding non-destructive
+// cursor-left/right ('\033[nC'/'\033[nD') to screen.c's existing ANSI
+// dispatcher and using those for all pure navigation; '\b' now appears only
+// where erasing really is the intent (the Delete/Backspace keys' own space-fill).
+static void cursor_left(int n)  { if (n > 0) ax_printf("\033[%dD", n); }
+static void cursor_right(int n) { if (n > 0) ax_printf("\033[%dC", n); }
+
+// Дописывает buf[pos..len) на экран, затирает `erase` "хвостовых" старых
+// символов пробелами (нужно только когда строка стала короче - backspace/
+// Delete/более короткая запись истории), затем возвращает курсор к pos
+// НЕ-разрушающим перемещением (см. cursor_left выше - обычный backspace
+// тут стёр бы то, что сам только что напечатал). Тот же приём, которым
+// уже пользовался старый код истории здесь, обобщённый на любую позицию
+// курсора - заодно исправляет реальный баг старой версии: она не затирала
+// хвост при переключении на БОЛЕЕ КОРОТКУЮ запись истории.
+static void redraw_tail(const char *buf, int pos, int len, int erase) {
+    for (int i = pos; i < len; i++) ax_putchar(buf[i]);
+    for (int i = 0; i < erase; i++) ax_putchar(' ');
+    cursor_left((len - pos) + erase);
+}
+
+// 0x11/0x12 = вверх/вниз (история), 0x13/0x14 = влево/вправо (курсор),
+// 0x15/0x16 = Home/End, 0x17 = Delete-вперёд - все уже декодируются ядром
+// из scancode'ов в kernel.c's keyboard_handler_main() (тем же приёмом,
+// что уже сделан для истории) - здесь не нужен ANSI/CSI-парсер на ВХОДЕ,
+// просто ещё несколько однобайтовых псевдокодов (ANSI на ВЫХОДЕ, для
+// самого перемещения курсора, добавлен в screen.c - см. cursor_left выше).
 int ax_readline(char* buf, int max) {
-    int i = 0;
+    int len = 0, pos = 0;
     int hist_pos = hist_len;   // hist_len = «текущий ввод» (за пределами истории)
     char saved[HIST_LEN];
     saved[0] = '\0';
 
-    while (i < max - 1) {
+    while (1) {
         char c;
         do { c = ax_readkey(); } while (!c);
 
-        if (c == '\n') {
-            ax_putchar('\n');
-            break;
-        }
+        if (c == '\n') { ax_putchar('\n'); break; }
+
         if (c == '\b') {
-            if (i > 0) { i--; ax_putchar('\b'); }
-        } else if (c == '\x11' || c == '\x12') {
+            if (pos > 0) {
+                pos--;
+                for (int i = pos; i < len - 1; i++) buf[i] = buf[i + 1];
+                len--;
+                cursor_left(1);
+                redraw_tail(buf, pos, len, 1);
+            }
+            continue;
+        }
+        if (c == '\x13') { if (pos > 0) { pos--; cursor_left(1); } continue; }         // Left
+        if (c == '\x14') { if (pos < len) { pos++; cursor_right(1); } continue; }      // Right
+        if (c == '\x15') { if (pos > 0) { cursor_left(pos); pos = 0; } continue; }     // Home
+        if (c == '\x16') { if (pos < len) { cursor_right(len - pos); pos = len; } continue; } // End
+        if (c == '\x17') {   // Delete (вперёд)
+            if (pos < len) {
+                for (int i = pos; i < len - 1; i++) buf[i] = buf[i + 1];
+                len--;
+                redraw_tail(buf, pos, len, 1);
+            }
+            continue;
+        }
+
+        if (c == '\x11' || c == '\x12') {
             int new_pos = hist_pos + (c == '\x11' ? -1 : 1);
             if (new_pos >= 0 && new_pos <= hist_len) {
-                // Сохраняем текущий ввод перед первым уходом в историю
                 if (hist_pos == hist_len) {
                     int si;
-                    for (si = 0; si < i && si < HIST_LEN - 1; si++) saved[si] = buf[si];
+                    for (si = 0; si < len && si < HIST_LEN - 1; si++) saved[si] = buf[si];
                     saved[si] = '\0';
                 }
+                cursor_left(pos);
+                int old_len = len;
                 hist_pos = new_pos;
-                // Стираем текущую строку с экрана
-                while (i > 0) { ax_putchar('\b'); i--; }
-                // Выводим выбранную запись (или сохранённый ввод)
                 const char* entry = (hist_pos == hist_len) ? saved : hist[hist_pos];
-                for (i = 0; entry[i] && i < max - 1; i++) {
-                    buf[i] = entry[i];
-                    ax_putchar(buf[i]);
-                }
+                int i; for (i = 0; entry[i] && i < max - 1; i++) { buf[i] = entry[i]; ax_putchar(buf[i]); }
+                len = i; pos = i;
+                int erase = (old_len > len) ? (old_len - len) : 0;
+                for (int k = 0; k < erase; k++) ax_putchar(' ');
+                cursor_left(erase);
             }
-        } else if ((unsigned char)c >= 32) {
-            buf[i++] = c;
-            ax_putchar(c);
+            continue;
+        }
+
+        if (c == '\t') {
+            if (ax_complete_hook) ax_complete_hook(buf, &len, &pos, max);
+            continue;
+        }
+
+        if ((unsigned char)c >= 32) {
+            if (len < max - 1) {
+                for (int i = len; i > pos; i--) buf[i] = buf[i - 1];
+                buf[pos] = c; len++; pos++;
+                ax_putchar(c);
+                redraw_tail(buf, pos, len, 0);
+            }
         }
     }
-    buf[i] = '\0';
+    buf[len] = '\0';
 
     // Добавляем в историю (непустые команды; если буфер полон — сдвигаем)
-    if (i > 0) {
+    if (len > 0) {
         if (hist_len == HIST_CAP) {
             int k, j;
             for (k = 0; k < HIST_CAP - 1; k++)
@@ -132,9 +207,9 @@ int ax_readline(char* buf, int max) {
             hist_len--;
         }
         int j;
-        for (j = 0; j < i && j < HIST_LEN - 1; j++) hist[hist_len][j] = buf[j];
+        for (j = 0; j < len && j < HIST_LEN - 1; j++) hist[hist_len][j] = buf[j];
         hist[hist_len][j] = '\0';
         hist_len++;
     }
-    return i;
+    return len;
 }

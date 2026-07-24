@@ -153,6 +153,9 @@ void*        ax_resolve(ax_handle_t h, unsigned int size);
 void ax_putchar(char c);
 void ax_print_uint(unsigned int n);
 int  ax_readline(char* buf, int max);  // блокирующее чтение строки с клавиатуры
+// Необязательный хук Tab-автодополнения для ax_readline() - см. stdio.c.
+// NULL по умолчанию (Tab ничего не делает); sh.c включает свой.
+void ax_set_complete_hook(int (*fn)(char *buf, int *len, int *pos, int max));
 void ax_printf(const char* fmt, ...);  // %s %d %u %x %c %%
 
 // =================================================================
