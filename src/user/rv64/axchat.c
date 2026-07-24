@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
         int changed = 0;
 
         unsigned int mx = 0, my = 0, buttons = 0, focused = 1;
-        if (mouse_state(&mx, &my, &buttons, &focused)) {
+        if (mouse_state(&mx, &my, &buttons, &focused, 0)) {
             int left = buttons & 1;
             if (!dragging && !resizing && left && !prev_left && focused && window_hit_close(&win, mx, my)) {
                 if (conn_alive) tcp_close(&conn);

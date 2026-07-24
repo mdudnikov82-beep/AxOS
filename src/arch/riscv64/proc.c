@@ -16,6 +16,7 @@ void proc_init(void) {
         procs[i].win_registered = 0;
         procs[i].win_x = procs[i].win_y = procs[i].win_w = procs[i].win_h = 0;
         procs[i].win_z          = 0;
+        procs[i].last_wheel_seen = 0;
     }
 }
 
@@ -35,6 +36,7 @@ int proc_create(const char *name, unsigned long entry,
         procs[i].win_registered = 0;
         procs[i].win_x = procs[i].win_y = procs[i].win_w = procs[i].win_h = 0;
         procs[i].win_z          = 0;
+        procs[i].last_wheel_seen = 0;
         procs[i].pagetable   = pt;
         procs[i].priority    = PRIORITY_DEFAULT;
         procs[i].slice_left  = PRIORITY_DEFAULT;

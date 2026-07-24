@@ -47,6 +47,11 @@ typedef struct {
     int           win_x, win_y, win_w, win_h;  /* last-registered screen rect, see SYS_WIN_SET_RECT */
     int           win_registered;              /* 0 until this process's first win_set_rect() call */
     unsigned long win_z;                        /* z-order rank; higher = more recently focused/topmost */
+    long          last_wheel_seen;              /* virtio_input_wheel_total() snapshot as of this process's
+                                                  * last SYS_MOUSE_STATE poll - see syscall.c for the
+                                                  * per-process delta this enables (each process derives its
+                                                  * own scroll delta instead of racing others for a shared
+                                                  * drain-on-read counter). */
 } proc_t;
 
 extern proc_t procs[MAX_PROCS];

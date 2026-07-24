@@ -364,7 +364,8 @@ int main(void) {
         int changed = 0;
 
         unsigned int mx = 0, my = 0, buttons = 0, focused = 1;
-        if (mouse_state(&mx, &my, &buttons, &focused)) {
+        int wheel = 0;
+        if (mouse_state(&mx, &my, &buttons, &focused, &wheel)) {
             int left = buttons & 1;
             if (!dragging && !resizing && left && !prev_left && focused && window_hit_close(&win, mx, my)) {
                 window_erase_desktop_bg((int)win.x, (int)win.y, (int)win.w, (int)win.h, screen_h);
@@ -401,6 +402,14 @@ int main(void) {
                 changed = 1;
             }
             prev_left = left;
+
+            if (!dragging && !resizing && focused && wheel != 0 &&
+                mx >= win.x && mx < win.x + win.w &&
+                my >= win.content_y && my < win.content_y + win.content_h) {
+                if (wheel > 0) scroll_offset = (scroll_offset > wheel) ? scroll_offset - wheel : 0;
+                else scroll_offset += -wheel;
+                changed = 1;
+            }
         }
 
         int c;

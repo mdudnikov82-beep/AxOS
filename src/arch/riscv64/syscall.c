@@ -622,7 +622,23 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         int focused = procs[current_pid].win_registered
                     ? (g_click_owner_pid == current_pid)
                     : (g_click_owner_pid < 0);
-        ret = (long)(st | ((unsigned long)(focused & 1) << 8));
+
+        /* Wheel: per-process delta-since-last-poll of a monotonic
+         * total (see virtio_input_wheel_total()'s own comment) - NOT
+         * a shared drain, so AxDesk's constant background polling
+         * can't eat another process's scroll before it sees it.
+         * Packed into bits [15:9] (7-bit two's complement, -64..+63) -
+         * the only gap free between the buttons+focused byte and the
+         * y field at bit 16; bits [63:48] must stay clear, relied on
+         * by the -1 "no device" sentinel check above. */
+        long wtotal = virtio_input_wheel_total();
+        long wdelta = wtotal - procs[current_pid].last_wheel_seen;
+        procs[current_pid].last_wheel_seen = wtotal;
+        if (wdelta > 63) wdelta = 63;
+        if (wdelta < -64) wdelta = -64;
+
+        ret = (long)(st | ((unsigned long)(focused & 1) << 8) |
+                     (((unsigned long)wdelta & 0x7F) << 9));
         break;
     }
 

@@ -315,24 +315,36 @@ static inline void gfx_draw_text(unsigned int x, unsigned int y,
     __syscall4(SYS_GFX_DRAWTEXT, x, y, (long)str, bgra);
 }
 
-/* mouse_state(&x, &y, &buttons, &focused) — 1 if a mouse device is
- * present, 0 if not (in which case x/y/buttons/focused are left
- * untouched). buttons: bit0=left, bit1=right, bit2=middle. focused
+/* mouse_state(&x, &y, &buttons, &focused, &wheel) — 1 if a mouse device
+ * is present, 0 if not (in which case x/y/buttons/focused/wheel are
+ * left untouched). buttons: bit0=left, bit1=right, bit2=middle. focused
  * (NULL-able, like the others): 1 if THIS process currently owns the
  * active click - always 1 for a process that never called
  * win_set_rect() (e.g. AxDesk), and among registered windows, only
  * whichever one the last button-down landed on, until the next press
  * (see the kernel's SYS_MOUSE_STATE handler). Apps that draw a window
  * (window.h users) should AND this into their own click-handling
- * conditions so an overlapping window underneath doesn't also react. */
+ * conditions so an overlapping window underneath doesn't also react.
+ * wheel (NULL-able): scroll delta since THIS process's last poll,
+ * positive = scroll up, negative = scroll down, saturating at -64..+63
+ * per poll (plenty for a fast scroll between two frames) - each
+ * process gets its OWN delta from a shared monotonic counter, so one
+ * process polling often (e.g. AxDesk, always running) can't consume
+ * the wheel motion before a different, less-frequently-polling process
+ * sees it. Pass NULL/0 if the caller has no scrollable content. */
 static inline int mouse_state(unsigned int *x, unsigned int *y, unsigned int *buttons,
-                              unsigned int *focused) {
+                              unsigned int *focused, int *wheel) {
     unsigned long v = (unsigned long)__syscall0(SYS_MOUSE_STATE);
     if (v == (unsigned long)-1) return 0;  /* no device */
     if (x)       *x       = (unsigned int)((v >> 32) & 0xFFFF);
     if (y)       *y       = (unsigned int)((v >> 16) & 0xFFFF);
     if (buttons) *buttons = (unsigned int)(v & 0xFF);
     if (focused) *focused = (unsigned int)((v >> 8) & 1);
+    if (wheel) {
+        int w = (int)((v >> 9) & 0x7F);
+        if (w & 0x40) w -= 128;   /* sign-extend the 7-bit field */
+        *wheel = w;
+    }
     return 1;
 }
 

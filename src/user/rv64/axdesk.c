@@ -112,7 +112,7 @@ int main(void) {
          * not "always true" - closes a real gap found live in the
          * window-manager work, where clicking a window sitting over
          * the icon row also re-launched whatever icon was underneath). */
-        if (!mouse_state(&mx, &my, &buttons, &focused)) {
+        if (!mouse_state(&mx, &my, &buttons, &focused, 0)) {
             puts_rv("axdesk: no mouse device found\r\n");
             exit(1);
         }

@@ -100,6 +100,13 @@ static unsigned int cur_x = GPU_FB_WIDTH / 2;
 static unsigned int cur_y = GPU_FB_HEIGHT / 2;
 static unsigned int cur_buttons = 0;
 
+/* Monotonic scroll-wheel notch counter - NEVER reset here (each caller
+ * of SYS_MOUSE_STATE derives its own delta-since-last-poll from this
+ * total, see syscall.c/proc_t.last_wheel_seen; a shared reset-on-read
+ * counter would let AxDesk's own constant background polling silently
+ * drain the delta before whatever app is actually focused ever saw it). */
+static long total_wheel = 0;
+
 /* Raw ABS_X/ABS_Y ranges reported by the device (queried from config space). */
 static unsigned int abs_x_min = 0, abs_x_max = 0xFFFF;
 static unsigned int abs_y_min = 0, abs_y_max = 0xFFFF;
@@ -107,7 +114,9 @@ static unsigned int abs_y_min = 0, abs_y_max = 0xFFFF;
 /* ---- linux/input-event-codes.h subset we need ---- */
 #define EV_SYN 0x00
 #define EV_KEY 0x01
+#define EV_REL 0x02
 #define EV_ABS 0x03
+#define REL_WHEEL 0x08
 #define ABS_X  0x00
 #define ABS_Y  0x01
 #define BTN_LEFT   0x110
@@ -287,6 +296,11 @@ static void handle_event(const input_event_t *ev) {
         if (bit) {
             if (ev->value) cur_buttons |= bit; else cur_buttons &= ~bit;
         }
+        /* Anything else (e.g. QEMU's BTN_GEAR_UP/DOWN companion release
+         * that rides along with a wheel event) has bit==0 and is
+         * already a no-op here. */
+    } else if (ev->type == EV_REL) {
+        if (ev->code == REL_WHEEL) total_wheel += (int)ev->value;
     }
     /* EV_SYN and anything else: no state to update. */
 }
@@ -311,4 +325,10 @@ unsigned long virtio_input_state(void) {
     return ((unsigned long)(cur_x & 0xFFFF) << 32) |
            ((unsigned long)(cur_y & 0xFFFF) << 16) |
            (unsigned long)(cur_buttons & 0xFF);
+}
+
+/* Monotonic wheel-notch total, never reset here - see SYS_MOUSE_STATE
+ * in syscall.c for the per-process delta-since-last-poll this feeds. */
+long virtio_input_wheel_total(void) {
+    return total_wheel;
 }

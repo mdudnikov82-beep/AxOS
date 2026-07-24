@@ -205,7 +205,7 @@ int main(void) {
     unsigned int mx = 0, my = 0, buttons = 0, prev_buttons = 0, focused = 1;
 
     for (;;) {
-        if (!mouse_state(&mx, &my, &buttons, &focused)) {
+        if (!mouse_state(&mx, &my, &buttons, &focused, 0)) {
             puts_rv("axpaint: no mouse device found\r\n");
             exit(1);
         }

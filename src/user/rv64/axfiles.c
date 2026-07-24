@@ -212,12 +212,41 @@ static void files_preview_layout(const window_t *win,
     *rename_x = (win->x + win->w - FILES_PAD - 8*ROW_H) - 9*ROW_H;
 }
 
+/* Counts how many wrapped lines files_preview_buf renders to at the
+ * given wrap width - same walk render_files_preview() does below, just
+ * without the drawing, so files_preview_scroll can be clamped BEFORE
+ * the draw loop (mirrors render_files_list()'s own max_scroll clamp at
+ * line ~183, giving the preview pane its first-ever scroll bound - it
+ * previously only ever got reset to 0, never adjusted). */
+static int files_preview_count_lines(int max_cols) {
+    if (max_cols < 1) max_cols = 1;
+    if (max_cols > 127) max_cols = 127;   /* matches the draw loop's own linebuf[128] clamp below */
+    int line = 0, col = 0;
+    unsigned int i = 0;
+    while (i <= files_preview_len) {
+        int is_end = (i == files_preview_len);
+        unsigned char c = is_end ? 0 : files_preview_buf[i];
+        int is_newline = (!is_end) && (c == '\n');
+        int is_wrap    = (!is_end) && (!is_newline) && (col >= max_cols);
+        if (is_wrap)              { line++; col = 0; continue; }
+        if (is_newline || is_end) { line++; col = 0; i++; if (is_end) break; continue; }
+        col++; i++;
+    }
+    return line;
+}
+
 static void render_files_preview(const window_t *win) {
     gfx_fill_rect(win->x + 2, win->content_y, win->w - 4, win->content_h, win->bg);
 
     unsigned int back_x, back_y, text_y0, rename_x;
     int visible_rows, max_cols;
     files_preview_layout(win, &back_x, &back_y, &text_y0, &visible_rows, &max_cols, &rename_x);
+
+    int total_lines = files_preview_count_lines(max_cols);
+    int max_scroll = total_lines - visible_rows;
+    if (max_scroll < 0) max_scroll = 0;
+    if (files_preview_scroll > max_scroll) files_preview_scroll = max_scroll;
+    if (files_preview_scroll < 0) files_preview_scroll = 0;
 
     gfx_draw_text(back_x, back_y, "[< Back]", gfx_rgb(255, 255, 0));
     gfx_draw_text(back_x + 9*ROW_H, back_y, files_preview_name, gfx_rgb(255, 255, 255));
@@ -472,7 +501,8 @@ int main(void) {
 
     for (;;) {
         unsigned int mx = 0, my = 0, buttons = 0, focused = 1;
-        if (mouse_state(&mx, &my, &buttons, &focused)) {
+        int wheel = 0;
+        if (mouse_state(&mx, &my, &buttons, &focused, &wheel)) {
             int left = buttons & 1;
             if (!dragging && !resizing && left && !prev_left && focused && window_hit_close(&win, mx, my)) {
                 /* Nothing else ever erases a closed window's footprint
@@ -515,6 +545,16 @@ int main(void) {
                 render_files(&win);
             }
             prev_left = left;
+
+            if (!dragging && !resizing && focused && wheel != 0 && in_content(&win, mx, my) &&
+                !files_input_mode && !files_confirm_delete) {
+                if (files_preview_mode) files_preview_scroll -= wheel;
+                else {
+                    files_scroll -= wheel;
+                    if (files_scroll < 0) files_scroll = 0;
+                }
+                render_files(&win);
+            }
         }
 
         int c;
