@@ -653,6 +653,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\axchat_rv64.elf) do echo   axchat_rv64.elf: %%~zF bytes
 
+echo [U101] axbrowser.c...
+"%CC%" %UFLAGS% -c %USRC%\axbrowser.c -o %OUT%\uaxbrowser.o
+if %errorlevel% neq 0 goto :error
+
+echo [U102] Linking axbrowser...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\axbrowser_rv64.elf %OUT%\ucrt0.o %OUT%\uaxbrowser.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\axbrowser_rv64.elf) do echo   axbrowser_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -686,6 +696,7 @@ copy /b %OUT%\axtaskmgr_rv64.elf  rv64build\fs\rv64\AXTASKM.ELF
 copy /b %OUT%\hello_rust_rv64.elf rv64build\fs\rv64\RUSTHI.ELF
 copy /b %OUT%\rustpanel_rv64.elf  rv64build\fs\rv64\RUSTPNL.ELF
 copy /b %OUT%\axchat_rv64.elf     rv64build\fs\rv64\AXCHAT.ELF
+copy /b %OUT%\axbrowser_rv64.elf  rv64build\fs\rv64\AXBROWSR.ELF
 copy /b %OUT%\kptrtest_rv64.elf   rv64build\fs\rv64\KPTRTEST.ELF
 copy /b %OUT%\spin_rv64.elf       rv64build\fs\rv64\SPIN.ELF
 copy /b %OUT%\nettest_rv64.elf     rv64build\fs\rv64\NETTEST.ELF
