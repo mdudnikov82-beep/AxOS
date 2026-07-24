@@ -13,15 +13,21 @@
  * tcp_send/tcp_recv flow already proven in httpget.c), strips HTML
  * tags down to plain readable text, and shows it in a scrollable
  * window. Deliberately NOT pretending to be more: no HTTPS (no TLS
- * stack exists anywhere in this codebase), no CSS/layout, no images,
- * no JavaScript, no clickable links (type a new URL to navigate), no
- * history/back button. */
+ * stack exists anywhere in this codebase - clicking an https:// link
+ * shows a clear error instead of navigating), no CSS/layout, no
+ * images, no JavaScript, no history/back button. Links ARE clickable:
+ * document-relative/host-absolute/protocol-relative hrefs resolve
+ * against the current page, but there's no "../" collapsing (naive
+ * concatenation - honest partial support, matches the entity-decoding
+ * below), and `#fragment`/`mailto:`/`javascript:` hrefs render as
+ * plain non-clickable text rather than mis-navigating. */
 
 #define ROW_H 16
 #define PAD 10
 #define BTN_W (3 * ROW_H)
 
-#define ADDR_MAX 96
+#define ADDR_MAX 160   /* matches link_ent.url's size - a clicked real-world
+                         * URL shouldn't silently truncate in the address bar */
 static char addr_buf[ADDR_MAX];
 static unsigned int addr_len = 0;
 
@@ -32,6 +38,35 @@ static unsigned char raw_buf[RAW_BUF_SIZE];
 static char content_buf[CONTENT_BUF_SIZE];
 static unsigned int content_len = 0;
 static int scroll_offset = 0;
+
+/* Clickable-link table: html_strip() records byte ranges [start,len)
+ * into content_buf (post-stripping, already-plain-text coordinates) -
+ * see html_strip()'s own comment for why a real DOM/per-character color
+ * array isn't needed here. */
+#define MAX_LINKS 64
+struct link_ent { unsigned int start; unsigned int len; char url[160]; };
+static struct link_ent links[MAX_LINKS];
+static int link_count = 0;
+
+static int pending_link_active = 0;
+static unsigned int pending_link_start = 0;
+static char pending_url[160];
+
+/* Current page's host/port/path, promoted from do_fetch()'s locals so
+ * html_strip() (called later in the same do_fetch()) can resolve
+ * relative hrefs against them. */
+static char g_host[64];
+static int  g_port = 80;
+static char g_path[160];
+
+/* Screen-space row -> content_buf start-index map, populated by the
+ * last render_browser() call so handle_content_click() can map a click
+ * to a link without re-walking the whole buffer. Real ceiling is ~32
+ * visible rows given the 800x600 screen's resize clamp; 40 leaves
+ * headroom. */
+#define MAX_VISIBLE_ROWS 40
+static int row_start_idx[MAX_VISIBLE_ROWS];
+static int row_count = 0;
 
 static char status_msg[64] = "Type a URL and press Enter (http:// only)";
 
@@ -128,12 +163,141 @@ static int ci_starts_with(const unsigned char *s, unsigned int rem, const char *
     return 1;
 }
 
+static int is_ws(unsigned char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+static void bcopy_bounded(char *dst, int dst_max, const char *src) {
+    int i = 0;
+    while (src[i] && i < dst_max - 1) { dst[i] = src[i]; i++; }
+    dst[i] = '\0';
+}
+
+static void bcat_bounded(char *dst, int dst_max, const char *src) {
+    int i = 0;
+    while (dst[i] && i < dst_max - 1) i++;
+    int j = 0;
+    while (src[j] && i < dst_max - 1) { dst[i++] = src[j++]; }
+    dst[i] = '\0';
+}
+
+static void bcat_uint(char *dst, int dst_max, unsigned int v) {
+    char tmp[12]; int n = 0;
+    if (v == 0) tmp[n++] = '0';
+    while (v > 0 && n < (int)sizeof(tmp)) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
+    char rev[12];
+    for (int i = 0; i < n; i++) rev[i] = tmp[n - 1 - i];
+    rev[n] = '\0';
+    bcat_bounded(dst, dst_max, rev);
+}
+
+/* Scans a raw tag's bytes [tag, tag+tag_len) (e.g. `<a href="x">`) for
+ * an href="..."/'...'/unquoted attribute value, decoding entities
+ * inline via the existing decode_entity() (so href="a.html?x=1&amp;y=2"
+ * decodes the &amp; correctly - same function already used for body
+ * text, pure reuse). Returns 1 if a non-empty value was captured. */
+static int extract_href(const unsigned char *tag, unsigned int tag_len, char *out, int out_max) {
+    unsigned int i = 0;
+    while (i < tag_len) {
+        if (ci_starts_with(tag + i, tag_len - i, "href") &&
+            (i == 0 || is_ws(tag[i - 1]))) {
+            unsigned int j = i + 4;
+            while (j < tag_len && is_ws(tag[j])) j++;
+            if (j < tag_len && tag[j] == '=') {
+                j++;
+                while (j < tag_len && is_ws(tag[j])) j++;
+                char quote = 0;
+                if (j < tag_len && (tag[j] == '"' || tag[j] == '\'')) { quote = (char)tag[j]; j++; }
+                int n = 0;
+                while (j < tag_len) {
+                    unsigned char c = tag[j];
+                    if (quote) { if (c == (unsigned char)quote) break; }
+                    else       { if (is_ws(c) || c == '>' || c == '/') break; }
+                    if (c == '&') { j += (unsigned int)decode_entity((const char *)tag + j, out, &n, out_max); continue; }
+                    if (n < out_max - 1) out[n++] = (char)c;
+                    j++;
+                }
+                out[n] = '\0';
+                return n > 0;
+            }
+        }
+        i++;
+    }
+    return 0;
+}
+
+/* Resolves a raw href value against the current page (g_host/g_port/
+ * g_path) into an absolute http(s):// URL in `out`. Empty `out` means
+ * "not a real navigable link" - covers #fragment-only hrefs (no in-page
+ * scroll-to-anchor support) and non-http(s) schemes (mailto:,
+ * javascript:, tel:, ...) which would otherwise be mangled by
+ * parse_url() if clicked. https:// links ARE resolved through
+ * (verbatim), not rejected here - do_fetch()'s own HTTPS check gives a
+ * clear error at click time instead, so the address bar still shows
+ * the real target rather than something mangled. No "../" collapsing -
+ * honest, documented scope limit; naive concatenation still often
+ * works since many real servers normalize "."/".." segments themselves. */
+static void resolve_href(const char *href, char *out, int out_max) {
+    char stripped[160];
+    int n = 0;
+    for (int i = 0; href[i] && href[i] != '#' && n < (int)sizeof(stripped) - 1; i++)
+        stripped[n++] = href[i];
+    stripped[n] = '\0';
+    out[0] = '\0';
+    if (n == 0) return;
+
+    for (int i = 0; stripped[i] && stripped[i] != '/'; i++) {
+        if (stripped[i] == ':') {
+            if (!(ci_starts_with((const unsigned char *)stripped, (unsigned int)n, "http:") ||
+                  ci_starts_with((const unsigned char *)stripped, (unsigned int)n, "https:")))
+                return;
+            break;
+        }
+    }
+
+    if (ci_starts_with((const unsigned char *)stripped, (unsigned int)n, "http://") ||
+        ci_starts_with((const unsigned char *)stripped, (unsigned int)n, "https://")) {
+        bcopy_bounded(out, out_max, stripped);
+        return;
+    }
+    if (stripped[0] == '/' && stripped[1] == '/') {
+        bcopy_bounded(out, out_max, "http:");
+        bcat_bounded(out, out_max, stripped);
+        return;
+    }
+    if (stripped[0] == '/') {
+        bcopy_bounded(out, out_max, "http://");
+        bcat_bounded(out, out_max, g_host);
+        if (g_port != 80) { bcat_bounded(out, out_max, ":"); bcat_uint(out, out_max, (unsigned int)g_port); }
+        bcat_bounded(out, out_max, stripped);
+        return;
+    }
+
+    char dir[160];
+    int dn = 0, last_slash = 0;
+    for (int i = 0; g_path[i] && dn < (int)sizeof(dir) - 1; i++) {
+        dir[dn++] = g_path[i];
+        if (g_path[i] == '/') last_slash = dn;
+    }
+    dir[last_slash] = '\0';
+    bcopy_bounded(out, out_max, "http://");
+    bcat_bounded(out, out_max, g_host);
+    if (g_port != 80) { bcat_bounded(out, out_max, ":"); bcat_uint(out, out_max, (unsigned int)g_port); }
+    bcat_bounded(out, out_max, dir);
+    bcat_bounded(out, out_max, stripped);
+}
+
 /* Strips HTML tags down to plain text: TEXT / IN_TAG / SKIP_SCRIPT /
  * SKIP_STYLE. <script>/<style> CONTENTS are skipped entirely (not real
  * page text), every other tag is dropped but its surrounding text kept.
- * A handful of common entities are decoded (see decode_entity). */
+ * A handful of common entities are decoded (see decode_entity).
+ * <a href=...>/</a> pairs are ALSO tracked into the links[] table (see
+ * that table's own comment) - since every tag close already forces a
+ * newline (below), an anchor's visible text is already isolated onto
+ * its own contiguous content_buf run before this feature ever needed
+ * to add anything to that mechanic. */
 static void html_strip(const unsigned char *body, unsigned int body_len) {
     content_len = 0;
+    link_count = 0;
+    pending_link_active = 0;
     unsigned int i = 0;
     while (i < body_len && content_len < CONTENT_BUF_SIZE - 1) {
         unsigned char c = body[i];
@@ -150,6 +314,39 @@ static void html_strip(const unsigned char *body, unsigned int body_len) {
                 i = (j < body_len) ? j + 8 : body_len;
                 continue;
             }
+
+            unsigned int tag_start = i;
+            /* "<a" open tag: the char right after must be whitespace or
+             * '>' - otherwise it's <abbr>, <article>, etc, not a real
+             * anchor. */
+            int is_open_a = ci_starts_with(body + i, body_len - i, "<a") &&
+                            (body_len - i <= 2 || is_ws(body[i + 2]) || body[i + 2] == '>');
+            int is_close_a = ci_starts_with(body + i, body_len - i, "</a>");
+
+            if (is_close_a && pending_link_active) {
+                /* Close off the pending link BEFORE this tag's own
+                 * forced newline below, so trailing whitespace isn't
+                 * counted as part of the clickable range. */
+                pending_link_active = 0;
+                if (link_count < MAX_LINKS && content_len > pending_link_start) {
+                    links[link_count].start = pending_link_start;
+                    links[link_count].len   = content_len - pending_link_start;
+                    bcopy_bounded(links[link_count].url, (int)sizeof(links[link_count].url), pending_url);
+                    link_count++;
+                }
+            }
+
+            int have_href = 0;
+            char href_buf[160];
+            if (is_open_a) {
+                unsigned int tag_end = tag_start;
+                while (tag_end < body_len && body[tag_end] != '>') tag_end++;
+                int self_closing = (tag_end > tag_start && tag_end < body_len && body[tag_end - 1] == '/');
+                if (!self_closing) {
+                    have_href = extract_href(body + tag_start, tag_end - tag_start, href_buf, (int)sizeof(href_buf));
+                }
+            }
+
             while (i < body_len && body[i] != '>') i++;
             if (i < body_len) i++;
             /* A closed tag boundary is a reasonable place to force a
@@ -160,6 +357,16 @@ static void html_strip(const unsigned char *body, unsigned int body_len) {
             if (content_len < CONTENT_BUF_SIZE - 1 &&
                 (content_len == 0 || content_buf[content_len - 1] != '\n'))
                 content_buf[content_len++] = '\n';
+
+            if (is_open_a && have_href) {
+                char resolved[176];
+                resolve_href(href_buf, resolved, (int)sizeof(resolved));
+                if (resolved[0]) {
+                    bcopy_bounded(pending_url, (int)sizeof(pending_url), resolved);
+                    pending_link_start = content_len;
+                    pending_link_active = 1;
+                }
+            }
             continue;
         }
         if (c == '&') {
@@ -181,6 +388,19 @@ static void set_status(const char *s) {
 
 static void do_fetch(window_t *win) {
     if (addr_len == 0) return;
+
+    /* No TLS stack anywhere in this codebase - catch this BEFORE
+     * parse_url() mangles the "https://" prefix into garbage hostname
+     * text (parse_url() only strips a literal 7-char "http://", so an
+     * 8-char "https://" URL would otherwise fall through as if the
+     * whole scheme were part of the host). Clickable links make this
+     * far more likely to actually happen than it was when the address
+     * bar could only be hand-typed. */
+    if (ci_starts_with((const unsigned char *)addr_buf, addr_len, "https://")) {
+        set_status("HTTPS not supported (no TLS)");
+        return;
+    }
+
     set_status("Loading...");
     /* Render immediately so the user sees feedback before the
      * (blocking, like AxFiles' own cat/delete) fetch below - a real
@@ -191,6 +411,9 @@ static void do_fetch(window_t *win) {
 
     char host[64]; int port; char path[160];
     parse_url(host, sizeof(host), &port, path, sizeof(path));
+    bcopy_bounded(g_host, (int)sizeof(g_host), host);
+    g_port = port;
+    bcopy_bounded(g_path, (int)sizeof(g_path), path);
 
     unsigned char mac[6];
     if (!net_mac(mac)) { set_status("No network device found"); return; }
@@ -273,6 +496,15 @@ static void browser_layout(const window_t *win, unsigned int *addr_y,
     if (*max_cols > 127) *max_cols = 127;
 }
 
+/* 1 if content_buf index `idx` falls inside some tracked link's range -
+ * used both to pick this row's draw color and (from
+ * handle_content_click()) to resolve an actual click. */
+static int find_link_at(unsigned int idx) {
+    for (int k = 0; k < link_count; k++)
+        if (idx >= links[k].start && idx < links[k].start + links[k].len) return k;
+    return -1;
+}
+
 static void render_browser(const window_t *win) {
     gfx_fill_rect(win->x + 2, win->content_y, win->w - 4, win->content_h, win->bg);
 
@@ -285,6 +517,8 @@ static void render_browser(const window_t *win) {
     gfx_draw_text(up_x, addr_y, "[^]", gfx_rgb(0, 220, 220));
     gfx_draw_text(down_x, addr_y, "[v]", gfx_rgb(0, 220, 220));
     gfx_fill_rect(win->x + PAD, text_y0 - 4, win->w - 2 * PAD, 1, gfx_rgb(120, 120, 120));
+
+    row_count = 0;
 
     if (content_len == 0) {
         gfx_draw_text(win->x + PAD, text_y0, status_msg, gfx_rgb(255, 255, 0));
@@ -303,7 +537,11 @@ static void render_browser(const window_t *win) {
         if (is_wrap) {
             linebuf[col] = '\0';
             if (line >= scroll_offset && drawn < visible_rows) {
-                gfx_draw_text(win->x + PAD, text_y0 + (unsigned int)drawn * ROW_H, linebuf, gfx_rgb(200, 200, 200));
+                unsigned int row_start = i - (unsigned int)col;
+                unsigned int color = (find_link_at(row_start) >= 0)
+                                    ? gfx_rgb(120, 170, 255) : gfx_rgb(200, 200, 200);
+                gfx_draw_text(win->x + PAD, text_y0 + (unsigned int)drawn * ROW_H, linebuf, color);
+                if (drawn < MAX_VISIBLE_ROWS) { row_start_idx[drawn] = (int)row_start; row_count = drawn + 1; }
                 drawn++;
             }
             line++; col = 0;
@@ -312,7 +550,11 @@ static void render_browser(const window_t *win) {
         if (is_newline || is_end) {
             linebuf[col] = '\0';
             if (col > 0 && line >= scroll_offset && drawn < visible_rows) {
-                gfx_draw_text(win->x + PAD, text_y0 + (unsigned int)drawn * ROW_H, linebuf, gfx_rgb(200, 200, 200));
+                unsigned int row_start = i - (unsigned int)col;
+                unsigned int color = (find_link_at(row_start) >= 0)
+                                    ? gfx_rgb(120, 170, 255) : gfx_rgb(200, 200, 200);
+                gfx_draw_text(win->x + PAD, text_y0 + (unsigned int)drawn * ROW_H, linebuf, color);
+                if (drawn < MAX_VISIBLE_ROWS) { row_start_idx[drawn] = (int)row_start; row_count = drawn + 1; }
                 drawn++;
             }
             line++; col = 0; i++;
@@ -322,6 +564,17 @@ static void render_browser(const window_t *win) {
         if (col < 127) linebuf[col++] = c;
         i++;
     }
+}
+
+/* Copies url into the address bar (like the user typed it) and fetches
+ * it - so clicking a link visibly updates the address bar too, same as
+ * a real browser. */
+static void navigate_to(window_t *win, const char *url) {
+    unsigned int i = 0;
+    while (url[i] && i < ADDR_MAX - 1) { addr_buf[i] = url[i]; i++; }
+    addr_buf[i] = '\0';
+    addr_len = i;
+    do_fetch(win);
 }
 
 /* Returns 1 if the click changed something worth re-rendering. */
@@ -338,6 +591,17 @@ static int handle_content_click(window_t *win, unsigned int mx, unsigned int my)
         if (mx >= down_x && mx < down_x + BTN_W) {
             scroll_offset++;
             return 1;
+        }
+    } else if (my >= text_y0 && mx >= win->x + PAD) {
+        int row = (int)(my - text_y0) / ROW_H;
+        if (row < row_count) {
+            int col_click = (int)(mx - (win->x + PAD)) / ROW_H;
+            int idx = row_start_idx[row] + col_click;
+            int k = find_link_at((unsigned int)idx);
+            if (k >= 0) {
+                navigate_to(win, links[k].url);
+                return 1;
+            }
         }
     }
     return 0;
