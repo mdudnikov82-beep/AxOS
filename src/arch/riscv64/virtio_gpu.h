@@ -81,3 +81,26 @@ void virtio_gpu_draw_text(unsigned int x, unsigned int y, const char *s, unsigne
 // on top of the scanout independently — no framebuffer pixels are
 // touched. No-op if cursor setup failed or GPU isn't ready.
 void virtio_gpu_cursor_move(unsigned int x, unsigned int y);
+
+// ---- Buffer-parameterized variants, for the window compositor (syscall.c) ----
+// Same semantics as the plain versions above, but targeting an arbitrary
+// GPU_FB_WIDTH*GPU_FB_HEIGHT*4-byte buffer (a registered window's own
+// off-screen slot buffer) instead of the real framebuffer - same
+// y*GPU_FB_WIDTH+x indexing, so no coordinate translation is needed
+// anywhere. These do NOT touch the dirty-rect tracker or check
+// virtio_gpu_ready() (the caller - syscall.c's redirect logic - already
+// knows it's dealing with a live registered window, not the display).
+void virtio_gpu_putpixel_into(void *buf, unsigned int x, unsigned int y, unsigned int bgra);
+void virtio_gpu_fill_rect_into(void *buf, unsigned int x, unsigned int y,
+                               unsigned int w, unsigned int h, unsigned int bgra);
+unsigned int virtio_gpu_getpixel_from(const void *buf, unsigned int x, unsigned int y);
+void virtio_gpu_draw_text_into(void *buf, unsigned int x, unsigned int y, const char *s, unsigned int bgra);
+
+// Compositor primitive: raw row-copy of [x,x+w) x [y,y+h) from a window's
+// slot buffer into the REAL framebuffer, same style as console.c's
+// scroll_up() (bypasses putpixel's per-pixel bounds-check/dirty-bbox
+// overhead - important since this runs on every SYS_GFX_FLUSH from every
+// registered window). Marks the blitted region dirty once. Rect is
+// clamped to the framebuffer bounds; no-op if GPU isn't ready.
+void virtio_gpu_blit_into_fb(const void *src, unsigned int x, unsigned int y,
+                             unsigned int w, unsigned int h);

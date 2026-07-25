@@ -37,6 +37,7 @@
 #define SYS_KBD_GETC      34  /* kbd_getc() -> next ASCII char from the keyboard, or -1 if none pending/no device */
 #define SYS_WIN_SET_RECT  35  /* win_set_rect(x,y,w,h) -> 0 (upserts the calling process's window rect + z-order, see SYS_MOUSE_STATE) */
 #define SYS_PS_INFO       36  /* ps_info(index, ps_entry_t *out) -> 1 (out filled) / 0 (index out of range, end of list) */
+#define SYS_WIN_SET_BASE  37  /* win_set_base() -> 0 (marks the calling process as the compositor's base/backdrop layer - AxDesk only) */
 
 /* Mirrored byte-for-byte in src/user/rv64/syscall.h - same toolchain/ABI
  * compiles both sides, so field order/padding always match. */
@@ -55,3 +56,15 @@ typedef struct {
  *   frame[17]=a7  (syscall number)
  * On return, frame[10] holds the return value; sepc is advanced by 4. */
 void syscall_dispatch(unsigned long *frame, unsigned long sepc);
+
+/* Compositor init - allocates the fixed per-slot window buffers (see
+ * syscall.c's own "Real compositor" comment). Call once from
+ * kernel_main.c, right after virtio_gpu_init() succeeds. */
+void gfx_wm_init(void);
+
+/* Marks the compositor dirty from OUTSIDE syscall.c - g_win_dirty is a
+ * file-scope static there, so kernel_main.c's page-fault kill handler
+ * (one of the 5 zombie-transition sites that must clear a crashed
+ * window's footprint) needs this small setter rather than reaching
+ * into syscall.c's internals directly. */
+void gfx_wm_mark_dirty(void);

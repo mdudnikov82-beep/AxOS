@@ -14,6 +14,7 @@ void proc_init(void) {
         procs[i].stdout_pipe_id = -1;
         procs[i].stdin_pipe_id  = -1;
         procs[i].win_registered = 0;
+        procs[i].win_is_base    = 0;
         procs[i].win_x = procs[i].win_y = procs[i].win_w = procs[i].win_h = 0;
         procs[i].win_z          = 0;
         procs[i].last_wheel_seen = 0;
@@ -34,6 +35,7 @@ int proc_create(const char *name, unsigned long entry,
         procs[i].syscall_mask   = 0;
         procs[i].mls_level      = 0;
         procs[i].win_registered = 0;
+        procs[i].win_is_base    = 0;
         procs[i].win_x = procs[i].win_y = procs[i].win_w = procs[i].win_h = 0;
         procs[i].win_z          = 0;
         procs[i].last_wheel_seen = 0;

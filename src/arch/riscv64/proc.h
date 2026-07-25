@@ -46,6 +46,9 @@ typedef struct {
     unsigned int  mls_level;      /* MLS sensitivity level 0..15; "no read up" gate, see syscall.c */
     int           win_x, win_y, win_w, win_h;  /* last-registered screen rect, see SYS_WIN_SET_RECT */
     int           win_registered;              /* 0 until this process's first win_set_rect() call */
+    int           win_is_base;                 /* 1 for the compositor's backdrop layer - see SYS_WIN_SET_BASE;
+                                                 * always painted first, exempt from click/keyboard focus
+                                                 * arbitration (SYS_MOUSE_STATE/SYS_KBD_GETC) - AxDesk only. */
     unsigned long win_z;                        /* z-order rank; higher = more recently focused/topmost */
     long          last_wheel_seen;              /* virtio_input_wheel_total() snapshot as of this process's
                                                   * last SYS_MOUSE_STATE poll - see syscall.c for the

@@ -174,7 +174,6 @@ int main(int argc, char **argv) {
             int left = buttons & 1;
             if (!dragging && !resizing && left && !prev_left && focused && window_hit_close(&win, mx, my)) {
                 if (conn_alive) tcp_close(&conn);
-                window_erase_desktop_bg((int)win.x, (int)win.y, (int)win.w, (int)win.h, screen_h);
                 gfx_flush();
                 exit(0);
             } else if (!dragging && !resizing && left && !prev_left && focused && window_hit_resize(&win, mx, my)) {

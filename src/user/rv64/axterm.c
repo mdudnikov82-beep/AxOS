@@ -101,11 +101,6 @@ int main(void) {
         if (mouse_state(&mx, &my, &buttons, &focused, 0)) {
             int left = buttons & 1;
             if (!dragging && !resizing && left && !prev_left && focused && window_hit_close(&win, mx, my)) {
-                /* Nothing else ever erases a closed window's footprint
-                 * (no compositor) - without this, the process exits
-                 * cleanly (confirmed via `ps`) but its pixels just sit
-                 * on screen forever, looking exactly like "won't close". */
-                window_erase_desktop_bg((int)win.x, (int)win.y, (int)win.w, (int)win.h, screen_h);
                 gfx_flush();
                 exit(0);
             } else if (!dragging && !resizing && left && !prev_left && focused && window_hit_resize(&win, mx, my)) {

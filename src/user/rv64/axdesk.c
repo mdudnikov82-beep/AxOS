@@ -47,6 +47,17 @@ int main(void) {
         exit(1);
     }
 
+    /* Registers AxDesk as the compositor's backdrop layer - always
+     * painted first, exempt from click/keyboard focus arbitration (see
+     * src/arch/riscv64/syscall.c's SYS_MOUSE_STATE/SYS_KBD_GETC). Must
+     * come BEFORE any drawing below, same reasoning as window_init()'s
+     * own registration-first ordering: gfx_* draws only redirect into
+     * this process's own slot buffer once win_registered is set, so
+     * drawing the gradient+icons first would leave them in the real
+     * framebuffer instead, invisible on the first composite. */
+    win_set_rect(0, 0, (int)w, (int)h);
+    win_set_base();
+
     icon_t icons[12];
     icons[0].label = "Term";  icons[0].file = "AXTERM.ELF";  icons[0].icon_bmp = "TERM.BMP";  icons[0].color = gfx_rgb(0, 150, 255);
     icons[1].label = "About"; icons[1].file = "AXABOUT.ELF"; icons[1].icon_bmp = "ABOUT.BMP"; icons[1].color = gfx_rgb(255, 140, 0);

@@ -40,6 +40,7 @@
 #define SYS_KBD_GETC      34
 #define SYS_WIN_SET_RECT  35
 #define SYS_PS_INFO       36
+#define SYS_WIN_SET_BASE  37
 
 static inline long __syscall0(long nr) {
     register long _nr  __asm__("a7") = nr;
@@ -354,6 +355,14 @@ static inline int mouse_state(unsigned int *x, unsigned int *y, unsigned int *bu
  * window.h - most GUI apps never need to call this directly. */
 static inline int win_set_rect(int x, int y, int w, int h) {
     return (int)__syscall4(SYS_WIN_SET_RECT, x, y, w, h);
+}
+
+/* win_set_base() — marks the calling process as the compositor's base
+ * (backdrop) layer: always painted first, exempt from click/keyboard
+ * focus arbitration (see SYS_MOUSE_STATE/SYS_KBD_GETC). AxDesk only —
+ * call once, right after win_set_rect(0,0,screen_w,screen_h). */
+static inline int win_set_base(void) {
+    return (int)__syscall0(SYS_WIN_SET_BASE);
 }
 
 /* ps_info(index, &out) -> 1 if procs[index] is in use (out filled), 0 if

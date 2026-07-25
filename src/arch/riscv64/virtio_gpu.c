@@ -580,6 +580,11 @@ int virtio_gpu_init(void) {
     return 0;
 }
 
+/* Forward decl - real definition (and the dirty-rect state it touches)
+ * lives further down, but draw_char/draw_text below need to call it and
+ * C requires a visible declaration before use. */
+static void mark_dirty(unsigned int x, unsigned int y, unsigned int w, unsigned int h);
+
 /* 8x8 bitmap font, ASCII 0x20-0x7F (public-domain VGA font), ported
  * verbatim from src/kernel/gfx_shell.c's `F` table — same byte layout
  * (one byte per row, bit0 = leftmost column) works regardless of pixel
@@ -686,7 +691,14 @@ static const unsigned char font8x8[96][8] = {
 // GFX_FONT_SCALE now lives in virtio_gpu.h (was a private duplicate here -
 // console.c needs the same value for its cell grid, see virtio_gpu.h).
 
-void virtio_gpu_draw_char(unsigned int x, unsigned int y, char ch, unsigned int bgra) {
+// Raw helper, no ready-check/dirty-marking/bounds-publicness - shared by
+// the real-fb and _into paths below.
+static void putpixel_raw(unsigned int *buf, unsigned int x, unsigned int y, unsigned int bgra) {
+    if (x >= GPU_FB_WIDTH || y >= GPU_FB_HEIGHT) return;
+    buf[y * GPU_FB_WIDTH + x] = bgra;
+}
+
+static void draw_char_raw(unsigned int *buf, unsigned int x, unsigned int y, char ch, unsigned int bgra) {
     unsigned char u = (unsigned char)ch;
     if (u < 0x20 || u > 0x7F) return;
     const unsigned char *g = font8x8[u - 0x20];
@@ -697,13 +709,26 @@ void virtio_gpu_draw_char(unsigned int x, unsigned int y, char ch, unsigned int 
             unsigned int px = x + c * GFX_FONT_SCALE, py = y + r * GFX_FONT_SCALE;
             for (unsigned int dy = 0; dy < GFX_FONT_SCALE; dy++)
                 for (unsigned int dx = 0; dx < GFX_FONT_SCALE; dx++)
-                    virtio_gpu_putpixel(px + dx, py + dy, bgra);
+                    putpixel_raw(buf, px + dx, py + dy, bgra);
         }
     }
 }
 
+void virtio_gpu_draw_char(unsigned int x, unsigned int y, char ch, unsigned int bgra) {
+    if (!ready) return;
+    draw_char_raw((unsigned int *)fb, x, y, ch, bgra);
+    mark_dirty(x, y, 8 * GFX_FONT_SCALE, 8 * GFX_FONT_SCALE);
+}
+
 void virtio_gpu_draw_text(unsigned int x, unsigned int y, const char *s, unsigned int bgra) {
-    while (*s) { virtio_gpu_draw_char(x, y, *s++, bgra); x += 8 * GFX_FONT_SCALE; }
+    if (!ready) return;
+    unsigned int x0 = x;
+    while (*s) { draw_char_raw((unsigned int *)fb, x, y, *s++, bgra); x += 8 * GFX_FONT_SCALE; }
+    mark_dirty(x0, y, x - x0, 8 * GFX_FONT_SCALE);
+}
+
+void virtio_gpu_draw_text_into(void *buf, unsigned int x, unsigned int y, const char *s, unsigned int bgra) {
+    while (*s) { draw_char_raw((unsigned int *)buf, x, y, *s++, bgra); x += 8 * GFX_FONT_SCALE; }
 }
 
 void *virtio_gpu_fb(void) { return fb; }
@@ -746,9 +771,13 @@ void virtio_gpu_mark_dirty(unsigned int x, unsigned int y, unsigned int w, unsig
 }
 
 void virtio_gpu_putpixel(unsigned int x, unsigned int y, unsigned int bgra) {
-    if (!ready || x >= GPU_FB_WIDTH || y >= GPU_FB_HEIGHT) return;
-    ((unsigned int *)fb)[y * GPU_FB_WIDTH + x] = bgra;
+    if (!ready) return;
+    putpixel_raw((unsigned int *)fb, x, y, bgra);
     mark_dirty(x, y, 1, 1);
+}
+
+void virtio_gpu_putpixel_into(void *buf, unsigned int x, unsigned int y, unsigned int bgra) {
+    putpixel_raw((unsigned int *)buf, x, y, bgra);
 }
 
 void virtio_gpu_fill_rect(unsigned int x, unsigned int y,
@@ -766,9 +795,52 @@ void virtio_gpu_fill_rect(unsigned int x, unsigned int y,
     mark_dirty(x, y, x1 - x, y1 - y);
 }
 
+void virtio_gpu_fill_rect_into(void *buf, unsigned int x, unsigned int y,
+                               unsigned int w, unsigned int h, unsigned int bgra) {
+    unsigned int x1 = x + w, y1 = y + h;
+    if (x1 > GPU_FB_WIDTH)  x1 = GPU_FB_WIDTH;
+    if (y1 > GPU_FB_HEIGHT) y1 = GPU_FB_HEIGHT;
+    if (x >= x1 || y >= y1) return;
+
+    unsigned int *px = (unsigned int *)buf;
+    for (unsigned int yy = y; yy < y1; yy++)
+        for (unsigned int xx = x; xx < x1; xx++)
+            px[yy * GPU_FB_WIDTH + xx] = bgra;
+}
+
 unsigned int virtio_gpu_getpixel(unsigned int x, unsigned int y) {
     if (!ready || x >= GPU_FB_WIDTH || y >= GPU_FB_HEIGHT) return 0;
     return ((unsigned int *)fb)[y * GPU_FB_WIDTH + x];
+}
+
+unsigned int virtio_gpu_getpixel_from(const void *buf, unsigned int x, unsigned int y) {
+    if (x >= GPU_FB_WIDTH || y >= GPU_FB_HEIGHT) return 0;
+    return ((const unsigned int *)buf)[y * GPU_FB_WIDTH + x];
+}
+
+void virtio_gpu_blit_into_fb(const void *src, unsigned int x, unsigned int y,
+                             unsigned int w, unsigned int h) {
+    if (!ready) return;
+    unsigned int x1 = x + w, y1 = y + h;
+    if (x1 > GPU_FB_WIDTH)  x1 = GPU_FB_WIDTH;
+    if (y1 > GPU_FB_HEIGHT) y1 = GPU_FB_HEIGHT;
+    if (x >= x1 || y >= y1) return;
+
+    /* src and fb share IDENTICAL y*GPU_FB_WIDTH+x indexing (every slot
+     * buffer is allocated full-screen sized), so this is a plain row
+     * copy at matching offsets - no coordinate translation. Raw pointer
+     * loop + one mark_dirty() call, same style as console.c's
+     * scroll_up() - bypasses putpixel's per-pixel overhead, important
+     * since this runs on every SYS_GFX_FLUSH from every registered
+     * window. */
+    const unsigned int *s = (const unsigned int *)src;
+    unsigned int *d = (unsigned int *)fb;
+    for (unsigned int yy = y; yy < y1; yy++) {
+        unsigned int row_off = yy * GPU_FB_WIDTH;
+        for (unsigned int xx = x; xx < x1; xx++)
+            d[row_off + xx] = s[row_off + xx];
+    }
+    mark_dirty(x, y, x1 - x, y1 - y);
 }
 
 int virtio_gpu_flush(void) {

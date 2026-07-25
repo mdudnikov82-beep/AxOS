@@ -2,12 +2,14 @@
 #include "syscall.h"
 #include "gfx_ui.h"
 
-/* Minimal bordered-window helper on top of the gfx_* syscalls. No window
- * manager, no z-ordering — every process draws directly into the one
- * shared framebuffer via kernel-mediated syscalls (each gfx_* call runs
- * to completion without preemption, so concurrent windows from different
- * processes never tear/interleave mid-draw). Two windows coexist simply
- * by owning non-overlapping screen rectangles. */
+/* Minimal bordered-window helper on top of the gfx_* syscalls. Real
+ * window manager underneath: once a process registers a rect (see
+ * win_set_rect(), called at the end of window_init() below), the kernel
+ * redirects its gfx_* draws into its own off-screen slot buffer and
+ * recomposites the real screen by z-order on every gfx_flush() - see
+ * src/arch/riscv64/syscall.c's "Real compositor" comment. Windows can
+ * genuinely overlap now; there is no more "only works if rects stay
+ * non-overlapping" limitation. */
 
 #define WIN_TITLE_H 28   /* 2x the old 14, matches the font's own 2x scale */
 #define WIN_RADIUS  16   /* matches x86 gfx_shell.c's CARD_R - see gfx_ui.h UI_MAX_R */
@@ -24,26 +26,7 @@ typedef struct {
     unsigned int cur_row;
 } window_t;
 
-/* ---- drag/close primitives (first real step toward a window manager -
- * see the top-of-file note: still no z-ordering, so these only make
- * sense while a window stays clear of any other window's rectangle). */
-
-/* Erases (x,y,w,h) back to AxDesk's own background gradient (see
- * axdesk.c's ui_vgrad(0,0,screen_w,screen_h, gfx_rgb(30,30,60),
- * gfx_rgb(8,8,20)) call) - the only way to restore what a dragged
- * window vacates, since there's no compositor to ask "what's really
- * there". Correct against the real desktop; visually wrong if dragged
- * over ANOTHER window's rectangle - an accepted, already-documented
- * limitation, not a new one this adds. */
-static void window_erase_desktop_bg(int x, int y, int w, int h, unsigned int screen_h) {
-    for (int dy = 0; dy < h; dy++) {
-        int ay = y + dy;
-        if (ay < 0 || (unsigned int)ay >= screen_h) continue;
-        unsigned char a = (unsigned char)(((unsigned int)ay * 255) / (screen_h - 1));
-        gfx_fill_rect((unsigned int)x, (unsigned int)ay, (unsigned int)w, 1,
-                     ui_blend(gfx_rgb(30, 30, 60), gfx_rgb(8, 8, 20), a));
-    }
-}
+/* ---- drag/close primitives ---- */
 
 /* 1 if (mx,my) is within the title bar's DRAG region (excludes the
  * close button's own corner so a click there doesn't also start a drag). */
@@ -120,15 +103,20 @@ static void window_redraw_chrome(const window_t *win, const char *title) {
     window_draw_resize_grip(win);
 }
 
-/* Moves the window to (new_x,new_y): erases the OLD footprint back to
- * the desktop background, updates geometry, and draws the cheap ghost
- * chrome at the new position. Does NOT touch content_h or cur_row -
- * callers own their own content-loss/redraw policy (see axterm.c/
- * axabout.c: neither retains a content buffer, so a move implies the
- * caller decides how/whether to reprint afterward). */
+/* Moves the window to (new_x,new_y): updates geometry, draws the cheap
+ * ghost chrome at the new position, then publishes the new rect to the
+ * compositor - draw-then-register order matters (the compositor could
+ * otherwise pick up the new rect before the slot buffer's new-position
+ * region has anything painted in it). The window's OLD position simply
+ * stops being composited once win_set_rect() runs; whatever's really
+ * underneath (desktop or another window) shows through automatically -
+ * no more manual "erase to desktop background" needed. Does NOT touch
+ * content_h or cur_row - callers own their own content-loss/redraw
+ * policy (see axterm.c/axabout.c: neither retains a content buffer, so
+ * a move implies the caller decides how/whether to reprint afterward). */
 static void window_move(window_t *win, unsigned int new_x, unsigned int new_y, unsigned int screen_h) {
+    (void)screen_h;
     if (new_x == win->x && new_y == win->y) return;
-    window_erase_desktop_bg((int)win->x, (int)win->y, (int)win->w, (int)win->h, screen_h);
     win->x = new_x; win->y = new_y;
     win->content_y = new_y + WIN_TITLE_H + 4;
     window_draw_ghost(win);
@@ -137,13 +125,13 @@ static void window_move(window_t *win, unsigned int new_x, unsigned int new_y, u
 
 /* Resizes the window to (new_w,new_h): clamps to this window's own
  * min_w/min_h floor and to the screen bounds (can't grow off-screen),
- * erases the OLD footprint (needed when shrinking - growing never
- * exposes stale pixels since the new area was never drawn over in the
- * first place), updates geometry, redraws the cheap ghost chrome, and
- * re-registers with the window manager (win_set_rect()) so click-
- * ownership stays in sync - same reasoning as window_move() above.
- * Does NOT reflow content - callers re-render after the drag ends,
- * same policy as window_move(). */
+ * updates geometry, redraws the cheap ghost chrome, and re-registers
+ * with the compositor (win_set_rect()) - same draw-then-register
+ * ordering and same "no more manual erase" reasoning as window_move()
+ * above (shrinking used to need an explicit erase of the vacated
+ * strip; the compositor now just stops painting it). Does NOT reflow
+ * content - callers re-render after the drag ends, same policy as
+ * window_move(). */
 static void window_resize(window_t *win, unsigned int new_w, unsigned int new_h,
                           unsigned int screen_w, unsigned int screen_h) {
     if (new_w < win->min_w) new_w = win->min_w;
@@ -151,7 +139,6 @@ static void window_resize(window_t *win, unsigned int new_w, unsigned int new_h,
     if (win->x + new_w > screen_w) new_w = screen_w - win->x;
     if (win->y + new_h > screen_h) new_h = screen_h - win->y;
     if (new_w == win->w && new_h == win->h) return;
-    window_erase_desktop_bg((int)win->x, (int)win->y, (int)win->w, (int)win->h, screen_h);
     win->w = new_w; win->h = new_h;
     win->content_h = (new_h > WIN_TITLE_H + 8) ? new_h - WIN_TITLE_H - 8 : 0;
     window_draw_ghost(win);
@@ -162,6 +149,14 @@ static void window_init(window_t *win, unsigned int x, unsigned int y,
                         unsigned int w, unsigned int h,
                         unsigned int min_w, unsigned int min_h,
                         unsigned int border, unsigned int bg, const char *title) {
+    /* Register FIRST, before any drawing - the compositor redirects
+     * gfx_* draws into this process's own slot buffer only once
+     * win_registered is set, so registering after drawing the initial
+     * chrome would leave that chrome sitting in the real framebuffer
+     * instead of the slot buffer, making it invisible on the window's
+     * first composite (found in design review, not live). */
+    win_set_rect((int)x, (int)y, (int)w, (int)h);
+
     win->x = x; win->y = y; win->w = w; win->h = h;
     win->min_w = min_w; win->min_h = min_h;
     win->border = border; win->bg = bg;
@@ -177,7 +172,6 @@ static void window_init(window_t *win, unsigned int x, unsigned int y,
                     border, bg, title);
     window_draw_close(win);
     window_draw_resize_grip(win);
-    win_set_rect((int)x, (int)y, (int)w, (int)h);
 }
 
 /* Truncates s to fit within the window's own right edge before drawing

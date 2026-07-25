@@ -302,6 +302,94 @@ static int           g_mouse_prev_left = 0;
 static int           g_click_owner_pid = -1;
 static unsigned long g_next_z_counter  = 0;
 
+/* ---- Real compositor: one full-screen-sized off-screen buffer per proc
+ * slot, allocated ONCE at boot (gfx_wm_init(), called from kernel_main.c
+ * right after virtio_gpu_init()) and never freed/reallocated - this
+ * kernel's free_page() is a confirmed no-op stub (pure bump allocator,
+ * no real reclamation exists anywhere), so dynamic per-window alloc/free
+ * on every open/close would leak physical memory permanently over a long
+ * session. Fixed slots sidestep that: indexed by proc SLOT index (pid ==
+ * slot index for a process's whole lifetime, confirmed via proc_create()),
+ * so a slot's buffer is simply reused by whatever process next occupies
+ * it. Every slot buffer uses the SAME y*GPU_FB_WIDTH+x indexing as the
+ * real framebuffer (each is allocated full-screen sized, GPU_FB_WIDTH*
+ * GPU_FB_HEIGHT*4 bytes), so no coordinate translation is needed
+ * anywhere - a registered window's SYS_GFX_* calls just redirect to its
+ * own slot buffer at the SAME absolute (x,y) it already used when
+ * writing straight to the real fb.
+ *
+ * g_win_dirty: cheap correctness-preserving dirty flag - set whenever
+ * ANYTHING could have changed what should be on screen (a registered
+ * window's own content redraw, not just a rect/registration change -
+ * gating on rect-changes-only would miss ordinary redraws like AxCalc's
+ * digit display or AxTerm's new lines and show stale content), cleared
+ * once composite_screen() actually recomposites. */
+static unsigned int *g_win_fb[MAX_PROCS];
+static int           g_win_dirty = 1;
+
+void gfx_wm_init(void) {
+    if (!virtio_gpu_ready()) return;
+    unsigned int fb_bytes = GPU_FB_WIDTH * GPU_FB_HEIGHT * 4;
+    unsigned int fb_pages = (fb_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    for (int slot = 0; slot < MAX_PROCS; slot++) {
+        void *buf = alloc_page();
+        if (!buf) { uart_puts("[gfx_wm] OOM allocating window buffer\r\n"); return; }
+        for (unsigned int i = 1; i < fb_pages; i++) {
+            void *p = alloc_page();
+            if ((unsigned long)p != (unsigned long)buf + (unsigned long)i * PAGE_SIZE) {
+                uart_puts("[gfx_wm] window buffer pages not contiguous!\r\n");
+                return;
+            }
+        }
+        g_win_fb[slot] = (unsigned int *)buf;
+    }
+    uart_puts("[gfx_wm] compositor ready, ");
+    put_udec((unsigned long)MAX_PROCS);
+    uart_puts(" window buffers allocated\r\n");
+}
+
+void gfx_wm_mark_dirty(void) { g_win_dirty = 1; }
+
+/* Blits the base layer (if any) first, then every other registered
+ * window in ascending win_z, from each one's own slot buffer into the
+ * real framebuffer - see virtio_gpu_blit_into_fb()'s own comment for why
+ * this is a raw row-copy, not per-pixel putpixel() calls (performance,
+ * given every app calls gfx_flush() unconditionally ~50/sec). */
+static void composite_screen(void) {
+    if (!g_win_dirty) return;
+
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (!procs[i].win_registered || !procs[i].win_is_base) continue;
+        if (procs[i].state == PROC_UNUSED || procs[i].state == PROC_ZOMBIE) continue;
+        virtio_gpu_blit_into_fb(g_win_fb[i], (unsigned int)procs[i].win_x, (unsigned int)procs[i].win_y,
+                                (unsigned int)procs[i].win_w, (unsigned int)procs[i].win_h);
+        break;   /* at most one base layer is ever expected */
+    }
+
+    /* Ascending win_z, LOCAL to this call - each composite_screen() call
+     * is a full from-scratch recomposite, so the "already drawn up to
+     * this z" watermark must reset every call, not persist across calls
+     * (a persistent one would skip every already-drawn window on every
+     * call after the first, showing an incomplete composite). */
+    unsigned long composited_up_to = 0;
+    for (;;) {
+        int best = -1;
+        unsigned long best_z = 0;
+        for (int i = 0; i < MAX_PROCS; i++) {
+            if (!procs[i].win_registered || procs[i].win_is_base) continue;
+            if (procs[i].state == PROC_UNUSED || procs[i].state == PROC_ZOMBIE) continue;
+            if (procs[i].win_z <= composited_up_to) continue;
+            if (best < 0 || procs[i].win_z < best_z) { best = i; best_z = procs[i].win_z; }
+        }
+        if (best < 0) break;
+        virtio_gpu_blit_into_fb(g_win_fb[best], (unsigned int)procs[best].win_x, (unsigned int)procs[best].win_y,
+                                (unsigned int)procs[best].win_w, (unsigned int)procs[best].win_h);
+        composited_up_to = procs[best].win_z;
+    }
+
+    g_win_dirty = 0;
+}
+
 /* ---- Kernel-side dispatch ---- */
 
 void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
@@ -330,6 +418,8 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[kpid].state     = PROC_ZOMBIE;
         procs[kpid].exit_code = -1;
         procs[kpid].win_registered = 0;   /* see SYS_EXIT's comment on why this can't wait for slot reuse */
+        procs[kpid].win_is_base    = 0;
+        g_win_dirty = 1;
         if (g_click_owner_pid == kpid) g_click_owner_pid = -1;
         pipe_mark_writer_done(procs[kpid].stdout_pipe_id);
         for (int i = 0; i < MAX_PROCS; i++) {
@@ -411,6 +501,8 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
          * clicks in their old screen region - clear it here, not just
          * when the slot eventually becomes PROC_UNUSED. */
         procs[epid].win_registered = 0;
+        procs[epid].win_is_base    = 0;
+        g_win_dirty = 1;
         if (g_click_owner_pid == epid) g_click_owner_pid = -1;
         pipe_mark_writer_done(procs[epid].stdout_pipe_id);
         for (int i = 0; i < MAX_PROCS; i++) {
@@ -511,6 +603,8 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
             procs[epid].state     = PROC_ZOMBIE;
             procs[epid].exit_code = (int)arg0;
             procs[epid].win_registered = 0;   /* see SYS_EXIT's comment on why this can't wait for slot reuse */
+            procs[epid].win_is_base    = 0;
+            g_win_dirty = 1;
             if (g_click_owner_pid == epid) g_click_owner_pid = -1;
             procs[waiter].state        = PROC_RUNNABLE;
             procs[waiter].regs[REG_A0] = arg0;
@@ -535,7 +629,18 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
 
     case SYS_GFX_PUTPIXEL:
         if (!virtio_gpu_ready()) { ret = -1; break; }
-        virtio_gpu_putpixel((unsigned int)arg0, (unsigned int)arg1, (unsigned int)arg2);
+        /* Registered windows draw into their OWN off-screen slot buffer
+         * (same absolute x,y - see gfx_wm_init()'s comment on why no
+         * coordinate translation is needed), composited into the real
+         * screen on the next SYS_GFX_FLUSH. Unregistered processes
+         * (pre-window_init()/win_set_rect()) keep writing straight to
+         * the real fb, matching today's behavior. */
+        if (procs[current_pid].win_registered) {
+            virtio_gpu_putpixel_into(g_win_fb[current_pid], (unsigned int)arg0, (unsigned int)arg1, (unsigned int)arg2);
+            g_win_dirty = 1;
+        } else {
+            virtio_gpu_putpixel((unsigned int)arg0, (unsigned int)arg1, (unsigned int)arg2);
+        }
         ret = 0;
         break;
 
@@ -543,13 +648,20 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         if (!virtio_gpu_ready()) { ret = -1; break; }
         unsigned long arg3 = frame[REG_A3];
         unsigned long arg4 = frame[REG_A4];
-        virtio_gpu_fill_rect((unsigned int)arg0, (unsigned int)arg1,
-                             (unsigned int)arg2, (unsigned int)arg3, (unsigned int)arg4);
+        if (procs[current_pid].win_registered) {
+            virtio_gpu_fill_rect_into(g_win_fb[current_pid], (unsigned int)arg0, (unsigned int)arg1,
+                                      (unsigned int)arg2, (unsigned int)arg3, (unsigned int)arg4);
+            g_win_dirty = 1;
+        } else {
+            virtio_gpu_fill_rect((unsigned int)arg0, (unsigned int)arg1,
+                                 (unsigned int)arg2, (unsigned int)arg3, (unsigned int)arg4);
+        }
         ret = 0;
         break;
     }
 
     case SYS_GFX_FLUSH:
+        composite_screen();
         kernel_cursor_render();
         ret = virtio_gpu_flush();
         break;
@@ -558,16 +670,23 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         if (!virtio_gpu_ready()) { ret = -1; break; }
         if (!user_string_ok(arg2)) { ret = -1; break; }
         unsigned long arg3 = frame[REG_A3];
-        virtio_gpu_draw_text((unsigned int)arg0, (unsigned int)arg1,
-                             (const char *)arg2, (unsigned int)arg3);
+        if (procs[current_pid].win_registered) {
+            virtio_gpu_draw_text_into(g_win_fb[current_pid], (unsigned int)arg0, (unsigned int)arg1,
+                                      (const char *)arg2, (unsigned int)arg3);
+            g_win_dirty = 1;
+        } else {
+            virtio_gpu_draw_text((unsigned int)arg0, (unsigned int)arg1,
+                                 (const char *)arg2, (unsigned int)arg3);
+        }
         ret = 0;
         break;
     }
 
     case SYS_GFX_GETPIXEL:
-        ret = virtio_gpu_ready()
-            ? (long)virtio_gpu_getpixel((unsigned int)arg0, (unsigned int)arg1)
-            : 0;
+        if (!virtio_gpu_ready()) { ret = 0; break; }
+        ret = procs[current_pid].win_registered
+            ? (long)virtio_gpu_getpixel_from(g_win_fb[current_pid], (unsigned int)arg0, (unsigned int)arg1)
+            : (long)virtio_gpu_getpixel((unsigned int)arg0, (unsigned int)arg1);
         break;
 
     case SYS_MOUSE_STATE: {
@@ -597,7 +716,15 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
             int best = -1;
             unsigned long best_z = 0;
             for (int i = 0; i < MAX_PROCS; i++) {
-                if (!procs[i].win_registered) continue;
+                /* win_is_base (AxDesk's compositor backdrop) is exempt from
+                 * click arbitration exactly like an unregistered process -
+                 * without this, its full-screen rect would compete on win_z
+                 * for EVERY click anywhere on screen, and a stray desktop
+                 * click could bump its z above some unfocused-but-open
+                 * window, silently misrouting that window's next click to
+                 * AxDesk underneath it (found in design review, not live -
+                 * caught before this ever shipped). */
+                if (!procs[i].win_registered || procs[i].win_is_base) continue;
                 if (procs[i].state == PROC_UNUSED || procs[i].state == PROC_ZOMBIE) continue;
                 if ((int)mx < procs[i].win_x || (int)mx >= procs[i].win_x + procs[i].win_w) continue;
                 if ((int)my < procs[i].win_y || (int)my >= procs[i].win_y + procs[i].win_h) continue;
@@ -619,7 +746,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
          * when no registered window claimed this particular click at
          * all (g_click_owner_pid < 0) - i.e. the click actually landed
          * on bare desktop, not on some window's rect. */
-        int focused = procs[current_pid].win_registered
+        int focused = (procs[current_pid].win_registered && !procs[current_pid].win_is_base)
                     ? (g_click_owner_pid == current_pid)
                     : (g_click_owner_pid < 0);
 
@@ -652,9 +779,20 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
             procs[current_pid].win_registered = 1;
             procs[current_pid].win_z = ++g_next_z_counter;   /* new windows start on top */
         }
+        g_win_dirty = 1;
         ret = 0;
         break;
     }
+
+    case SYS_WIN_SET_BASE:
+        /* Marks the calling process as the compositor's backdrop layer -
+         * AxDesk only. Meaningful only once win_registered is also set
+         * (AxDesk calls win_set_rect() first) - see composite_screen()
+         * and the click/keyboard-arbitration exemptions above. */
+        procs[current_pid].win_is_base = 1;
+        g_win_dirty = 1;
+        ret = 0;
+        break;
 
     case SYS_READDIR:
         /* name_buf: fat12_readdir's documented contract is >=13 bytes.
@@ -819,6 +957,8 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[kpid].state     = PROC_ZOMBIE;
         procs[kpid].exit_code = -1;
         procs[kpid].win_registered = 0;   /* see SYS_EXIT's comment on why this can't wait for slot reuse */
+        procs[kpid].win_is_base    = 0;
+        g_win_dirty = 1;
         if (g_click_owner_pid == kpid) g_click_owner_pid = -1;
         pipe_mark_writer_done(procs[kpid].stdout_pipe_id);
         for (int i = 0; i < MAX_PROCS; i++) {
@@ -901,7 +1041,10 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         int topmost = -1;
         unsigned long topmost_z = 0;
         for (int i = 0; i < MAX_PROCS; i++) {
-            if (!procs[i].win_registered) continue;
+            /* win_is_base exempt too - same reasoning as SYS_MOUSE_STATE's
+             * click-ownership loop (AxDesk's full-screen rect must not
+             * compete for keyboard focus either). */
+            if (!procs[i].win_registered || procs[i].win_is_base) continue;
             if (procs[i].state == PROC_UNUSED || procs[i].state == PROC_ZOMBIE) continue;
             if (topmost < 0 || procs[i].win_z > topmost_z) { topmost = i; topmost_z = procs[i].win_z; }
         }

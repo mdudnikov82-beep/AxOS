@@ -121,6 +121,8 @@ void trap_handler(unsigned long cause, unsigned long epc,
              * itself is file-scope in syscall.c, but SYS_MOUSE_STATE's
              * hit-test already skips PROC_ZOMBIE slots regardless). */
             procs[epid].win_registered = 0;
+            procs[epid].win_is_base    = 0;
+            gfx_wm_mark_dirty();
             pipe_mark_writer_done(procs[epid].stdout_pipe_id);
             for (int i = 0; i < MAX_PROCS; i++) {
                 if (procs[i].state == PROC_WAITING && procs[i].wait_pid == epid) {
@@ -307,6 +309,7 @@ void kernel_main(unsigned long hart_id, unsigned long dtb) {
         if (virtio_gpu_flush() == 0) {
             uart_puts("[gpu] test pattern flushed to display\r\n");
         }
+        gfx_wm_init();   /* real window compositor - per-slot off-screen buffers, see syscall.c */
     }
 
     // VirtIO-input (tablet mode) — мышь/курсор для paint-программ и т.п.
