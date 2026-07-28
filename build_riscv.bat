@@ -80,6 +80,10 @@ echo [5f] virtio_sound.c...
 "%CC%" %KFLAGS% -c %SRC%\virtio_sound.c -o %OUT%\virtio_sound.o
 if %errorlevel% neq 0 goto :error
 
+echo [5g] bootsplash.c...
+"%CC%" %KFLAGS% -c %SRC%\bootsplash.c -o %OUT%\bootsplash.o
+if %errorlevel% neq 0 goto :error
+
 echo [6] fat12.c...
 "%CC%" %KFLAGS% -c %SRC%\fat12.c -o %OUT%\fat12.o
 if %errorlevel% neq 0 goto :error
@@ -121,6 +125,7 @@ echo [11] Linking kernel...
     %OUT%\virtio_keyboard.o ^
     %OUT%\virtio_net.o ^
     %OUT%\virtio_sound.o ^
+    %OUT%\bootsplash.o ^
     %OUT%\fat12.o ^
     %OUT%\vfs.o ^
     %OUT%\syscall.o ^

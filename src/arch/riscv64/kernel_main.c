@@ -8,6 +8,7 @@
 #include "virtio_keyboard.h"
 #include "virtio_net.h"
 #include "virtio_sound.h"
+#include "bootsplash.h"
 #include "console.h"
 #include "vfs.h"
 #include "syscall.h"
@@ -311,6 +312,12 @@ void kernel_main(unsigned long hart_id, unsigned long dtb) {
             uart_puts("[gpu] test pattern flushed to display\r\n");
         }
         gfx_wm_init();   /* real window compositor - per-slot off-screen buffers, see syscall.c */
+
+        /* Pixel-style boot splash: logo assembles + pulses, then "Powered
+         * by AxOS" fades in. Purely cosmetic, before any process exists -
+         * console_init() further below blanks the screen again right
+         * after, so nothing lingers under AxSH's own output. */
+        boot_splash_show();
     }
 
     // VirtIO-input (tablet mode) — мышь/курсор для paint-программ и т.п.
