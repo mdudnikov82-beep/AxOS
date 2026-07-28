@@ -12,9 +12,13 @@
  * this whole session has already handled other platform asymmetries
  * (e.g. AxCalc's allocator gap).
  *
- * No audio hardware exists on RISC-V either (confirmed via grep - no
- * virtio-sound, no PWM buzzer), so the alarm here is visual-only
- * (flashing state button), unlike x86's PC-speaker tone.
+ * The alarm now actually beeps (virtio-sound, see sound_beep() below) -
+ * previously visual-only (flashing state button) since no audio driver
+ * existed on RISC-V at all. sound_beep() harmlessly returns -1 with no
+ * audible effect if no virtio-sound device is attached (same graceful-
+ * absence pattern as net_mac()/mouse_state() elsewhere), so this still
+ * degrades to the old visual-only behavior on a QEMU launch without
+ * -audiodev/-device virtio-sound-device.
  *
  * Deliberate simplification: the alarm compares only hour:minute, no
  * day-wraparound - arming it for a time earlier than the current
@@ -63,6 +67,10 @@ static void clock_check_alarm(void) {
 static void render_clock(const window_t *win) {
     clock_check_alarm();
     clock_flash_tick++;
+    /* Reuses the existing flash-tick counter (already 200ms/tick, see
+     * the main loop's sleep_ms(200)) instead of a new timer - beeps
+     * roughly every 4s while the alarm is firing, until dismissed. */
+    if (clock_fired && (clock_flash_tick % 20) == 0) sound_beep(880, 150);
 
     gfx_fill_rect(win->x + 2, win->content_y, win->w - 4, win->content_h, win->bg);
 

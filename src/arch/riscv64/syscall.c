@@ -10,6 +10,7 @@
 #include "virtio_input.h"
 #include "virtio_keyboard.h"
 #include "virtio_net.h"
+#include "virtio_sound.h"
 #include "console.h"
 
 /* Register indices in the trap frame (sd xN, N*8(sp)) */
@@ -792,6 +793,11 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[current_pid].win_is_base = 1;
         g_win_dirty = 1;
         ret = 0;
+        break;
+
+    case SYS_SOUND_BEEP:
+        if (!virtio_sound_ready()) { ret = -1; break; }
+        ret = virtio_sound_beep((unsigned int)arg0, (unsigned int)arg1);
         break;
 
     case SYS_READDIR:

@@ -7,6 +7,7 @@
 #include "virtio_input.h"
 #include "virtio_keyboard.h"
 #include "virtio_net.h"
+#include "virtio_sound.h"
 #include "console.h"
 #include "vfs.h"
 #include "syscall.h"
@@ -331,6 +332,13 @@ void kernel_main(unsigned long hart_id, unsigned long dtb) {
     // если устройства нет, просто не находится и virtio_net_ready() всегда
     // возвращает 0 (SYS_NET_* тогда безобидно отдают -1/0 вызывающему).
     virtio_net_init();
+
+    // VirtIO-sound — plays a synthesized square-wave beep (see
+    // virtio_sound.h). Requires `-audiodev <backend>,id=snd0 -device
+    // virtio-sound-device,audiodev=snd0`; if absent, just doesn't find
+    // it and virtio_sound_ready() always returns 0 (SYS_SOUND_BEEP then
+    // harmlessly returns -1 to the caller).
+    virtio_sound_init();
 
     // Файловая система (через VFS — см. vfs.c; сегодня единственный
     // backend это FAT12, но kernel_main.c больше не знает об этом напрямую)

@@ -41,6 +41,7 @@
 #define SYS_WIN_SET_RECT  35
 #define SYS_PS_INFO       36
 #define SYS_WIN_SET_BASE  37
+#define SYS_SOUND_BEEP    38
 
 static inline long __syscall0(long nr) {
     register long _nr  __asm__("a7") = nr;
@@ -363,6 +364,15 @@ static inline int win_set_rect(int x, int y, int w, int h) {
  * call once, right after win_set_rect(0,0,screen_w,screen_h). */
 static inline int win_set_base(void) {
     return (int)__syscall0(SYS_WIN_SET_BASE);
+}
+
+/* sound_beep(freq_hz, duration_ms) -> 0 ok / -1 err (no audio device,
+ * or the device doesn't support S16 samples @ 44100/48000 Hz).
+ * Synthesizes a synchronous square-wave tone via virtio-sound - blocks
+ * for roughly duration_ms while it plays, same style as every other
+ * blocking I/O call in this codebase. */
+static inline int sound_beep(unsigned int freq_hz, unsigned int duration_ms) {
+    return (int)__syscall2(SYS_SOUND_BEEP, (long)freq_hz, (long)duration_ms);
 }
 
 /* ps_info(index, &out) -> 1 if procs[index] is in use (out filled), 0 if

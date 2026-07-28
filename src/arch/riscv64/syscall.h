@@ -38,6 +38,7 @@
 #define SYS_WIN_SET_RECT  35  /* win_set_rect(x,y,w,h) -> 0 (upserts the calling process's window rect + z-order, see SYS_MOUSE_STATE) */
 #define SYS_PS_INFO       36  /* ps_info(index, ps_entry_t *out) -> 1 (out filled) / 0 (index out of range, end of list) */
 #define SYS_WIN_SET_BASE  37  /* win_set_base() -> 0 (marks the calling process as the compositor's base/backdrop layer - AxDesk only) */
+#define SYS_SOUND_BEEP    38  /* sound_beep(freq_hz, duration_ms) -> 0 ok / -1 err (no device, or device doesn't support S16 @ 44100/48000 Hz) */
 
 /* Mirrored byte-for-byte in src/user/rv64/syscall.h - same toolchain/ABI
  * compiles both sides, so field order/padding always match. */
