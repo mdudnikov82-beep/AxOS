@@ -18,11 +18,17 @@
  * art (<=64x64, see bmp.h) still centers fine at this width.
  * ICON_GAP shrunk again (8->2) when AxTetris became the 12th icon -
  * same overflow, same fix (icon art is fixed-size, so the gap is the
- * only thing cheap to shrink): 12*64 + 11*2 = 790px, fits with margin. */
+ * only thing cheap to shrink): 12*64 + 11*2 = 790px, fits with margin.
+ * AxChat/AxBrowser becoming icons 13-14 finally outgrew a single row
+ * even at this minimal gap (14*64+13*2=922px) - the gap can't shrink
+ * further and icon art is fixed-size, so icons now wrap onto additional
+ * rows instead (see row_max/ROW_GAP below) rather than squeezing
+ * forever. */
 #define ICON_W   64
 #define ICON_H   96
 #define ICON_GAP 2
 #define ICON_TOP 70
+#define ROW_GAP  12   /* vertical gap between icon rows */
 
 typedef struct {
     const char   *label;
@@ -58,7 +64,7 @@ int main(void) {
     win_set_rect(0, 0, (int)w, (int)h);
     win_set_base();
 
-    icon_t icons[12];
+    icon_t icons[14];
     icons[0].label = "Term";  icons[0].file = "AXTERM.ELF";  icons[0].icon_bmp = "TERM.BMP";  icons[0].color = gfx_rgb(0, 150, 255);
     icons[1].label = "About"; icons[1].file = "AXABOUT.ELF"; icons[1].icon_bmp = "ABOUT.BMP"; icons[1].color = gfx_rgb(255, 140, 0);
     icons[2].label = "Paint"; icons[2].file = "AXPAINT.ELF"; icons[2].icon_bmp = "PAINT.BMP"; icons[2].color = gfx_rgb(0, 200, 120);
@@ -74,10 +80,33 @@ int main(void) {
     icons[9].label = "Todo";  icons[9].file = "AXTODO.ELF";  icons[9].icon_bmp = 0;          icons[9].color = gfx_rgb(220, 180, 0);
     icons[10].label = "Tasks"; icons[10].file = "AXTASKM.ELF"; icons[10].icon_bmp = 0;        icons[10].color = gfx_rgb(150, 90, 220);
     icons[11].label = "Tetris"; icons[11].file = "AXTETRIS.ELF"; icons[11].icon_bmp = 0;       icons[11].color = gfx_rgb(30, 100, 220);
-    unsigned int n_icons = 12;
+    /* AxBrowser was deliberately left off this row before (launched via
+     * "run AXBROWSR.ELF &" from AxSH) - its main(void) takes no argv at
+     * all (navigation happens via the in-app address bar), so a plain
+     * icon click works fine, unlike AxChat below. */
+    icons[12].label = "Web";  icons[12].file = "AXBROWSR.ELF";  icons[12].icon_bmp = 0;         icons[12].color = gfx_rgb(90, 150, 220);
+    /* AxChat does NOT get an icon: its main(argc,argv) requires a real
+     * "host <my_ip>"/"join <my_ip> <peer_ip>" argument - exec() from an
+     * icon click passes no argv at all, so a bare click would just print
+     * a usage message to AxChat's own stdout (not visible in the GUI)
+     * and exit immediately - confirmed live: clicking a would-be Chat
+     * icon here silently did nothing. There's no single sensible default
+     * IP to hardcode (it has to match whatever this machine's real
+     * network config is, and differs per chat session/peer) - stays
+     * shell-launch-only until/unless icons gain real argv support. */
+    unsigned int n_icons = 13;
 
-    unsigned int total_w = n_icons * ICON_W + (n_icons - 1) * ICON_GAP;
-    unsigned int start_x = (w > total_w) ? (w - total_w) / 2 : 0;
+    /* Icons wrap onto additional rows once they no longer fit one 800px-
+     * wide line (see ICON_W's own comment above for the history of why
+     * the gap/width can't just shrink further). row_max = how many fit
+     * per row; a full row is centered, later rows left-align under it
+     * rather than each independently re-centering (fewer icons on the
+     * last row looks intentional, not scattered). */
+    unsigned int row_max = (w + ICON_GAP) / (ICON_W + ICON_GAP);
+    if (row_max < 1) row_max = 1;
+    unsigned int full_row_w = row_max * ICON_W + (row_max - 1) * ICON_GAP;
+    unsigned int start_x = (w > full_row_w) ? (w - full_row_w) / 2 : 0;
+    unsigned int total_rows = (n_icons + row_max - 1) / row_max;
 
     /* Desktop background (gradient - was flat) + title bar. */
     ui_vgrad(0, 0, w, h, gfx_rgb(30, 30, 60), gfx_rgb(8, 8, 20));
@@ -89,17 +118,20 @@ int main(void) {
     static bmp_image_t icon_img;
 
     for (unsigned int i = 0; i < n_icons; i++) {
-        int x = (int)(start_x + i * (ICON_W + ICON_GAP));
-        ui_shadow(x, ICON_TOP, ICON_W, ICON_H, 5, 90);
+        unsigned int col = i % row_max;
+        unsigned int row = i / row_max;
+        int x = (int)(start_x + col * (ICON_W + ICON_GAP));
+        int y = (int)(ICON_TOP + row * (ICON_H + ROW_GAP));
+        ui_shadow(x, y, ICON_W, ICON_H, 5, 90);
         /* matches x86 gfx_shell.c's ICON_R - see gfx_ui.h's UI_MAX_R comment */
-        ui_round_rect(x, ICON_TOP, ICON_W, ICON_H, 14, gfx_rgb(255, 255, 255), icons[i].color);
+        ui_round_rect(x, y, ICON_W, ICON_H, 14, gfx_rgb(255, 255, 255), icons[i].color);
 
         /* Настоящая иконка (BMP) поверх карточки, если файл нашёлся и
          * декодировался - иначе просто остаётся цветная карточка с
          * подписью (fallback, не крашимся на отсутствующем/битом файле). */
         if (icons[i].icon_bmp && bmp_load(icons[i].icon_bmp, &icon_img)) {
             unsigned int icon_x = (unsigned int)x + (ICON_W - icon_img.width) / 2;
-            bmp_draw(&icon_img, icon_x, (unsigned int)ICON_TOP + 6);
+            bmp_draw(&icon_img, icon_x, (unsigned int)y + 6);
         }
 
         /* Clamp to 0 rather than let (ICON_W - lw) underflow (unsigned) -
@@ -111,7 +143,7 @@ int main(void) {
          * bleed into the gap reads fine, unlike "not there at all". */
         unsigned int lw = text_px_w(icons[i].label);
         unsigned int lx = (lw < ICON_W) ? (unsigned int)x + (ICON_W - lw) / 2 : (unsigned int)x;
-        gfx_draw_text(lx, ICON_TOP + ICON_H - 20, icons[i].label, gfx_rgb(0, 0, 0));
+        gfx_draw_text(lx, (unsigned int)y + ICON_H - 20, icons[i].label, gfx_rgb(0, 0, 0));
     }
     gfx_flush();
 
@@ -135,12 +167,18 @@ int main(void) {
         int left = buttons & 1;
         if (left && !prev_left && focused) {   /* click edge, not held-down repeat */
             for (unsigned int i = 0; i < n_icons; i++) {
-                unsigned int x = start_x + i * (ICON_W + ICON_GAP);
-                if (mx >= x && mx < x + ICON_W && my >= ICON_TOP && my < ICON_TOP + ICON_H) {
+                unsigned int col = i % row_max;
+                unsigned int row = i / row_max;
+                unsigned int x = start_x + col * (ICON_W + ICON_GAP);
+                unsigned int y = ICON_TOP + row * (ICON_H + ROW_GAP);
+                if (mx >= x && mx < x + ICON_W && my >= y && my < y + ICON_H) {
                     if (icons[i].file) {
                         int pid = exec(icons[i].file);
                         if (pid < 0) {
-                            gfx_draw_text(start_x, ICON_TOP + ICON_H + 10,
+                            /* Always below the LAST icon row (not just row 0)
+                             * so it can never collide with a second row of
+                             * icons, regardless of how many rows exist. */
+                            gfx_draw_text(start_x, ICON_TOP + total_rows * (ICON_H + ROW_GAP),
                                          "launch failed                    ",
                                          gfx_rgb(255, 80, 80));
                         }
