@@ -377,7 +377,7 @@ static void composite_screen(void) {
         int best = -1;
         unsigned long best_z = 0;
         for (int i = 0; i < MAX_PROCS; i++) {
-            if (!procs[i].win_registered || procs[i].win_is_base) continue;
+            if (!procs[i].win_registered || procs[i].win_is_base || procs[i].win_is_topmost) continue;
             if (procs[i].state == PROC_UNUSED || procs[i].state == PROC_ZOMBIE) continue;
             if (procs[i].win_z <= composited_up_to) continue;
             if (best < 0 || procs[i].win_z < best_z) { best = i; best_z = procs[i].win_z; }
@@ -386,6 +386,21 @@ static void composite_screen(void) {
         virtio_gpu_blit_into_fb(g_win_fb[best], (unsigned int)procs[best].win_x, (unsigned int)procs[best].win_y,
                                 (unsigned int)procs[best].win_w, (unsigned int)procs[best].win_h);
         composited_up_to = procs[best].win_z;
+    }
+
+    /* Topmost tier (the taskbar): unconditional final pass, drawn over
+     * EVERYTHING regardless of win_z - this is what makes "always
+     * visually on top" actually hold: a plain ascending-z slot would NOT
+     * guarantee it, since any other window later win_focus()'d/clicked
+     * to a higher z would then paint over it. Excluding win_is_topmost
+     * from the ascending loop above is the other half of this - without
+     * it, this window would get painted mid-pack instead of last. */
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (!procs[i].win_registered || !procs[i].win_is_topmost || procs[i].win_is_base) continue;
+        if (procs[i].state == PROC_UNUSED || procs[i].state == PROC_ZOMBIE) continue;
+        virtio_gpu_blit_into_fb(g_win_fb[i], (unsigned int)procs[i].win_x, (unsigned int)procs[i].win_y,
+                                (unsigned int)procs[i].win_w, (unsigned int)procs[i].win_h);
+        break;   /* at most one topmost layer is ever expected */
     }
 
     g_win_dirty = 0;
@@ -420,6 +435,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[kpid].exit_code = -1;
         procs[kpid].win_registered = 0;   /* see SYS_EXIT's comment on why this can't wait for slot reuse */
         procs[kpid].win_is_base    = 0;
+        procs[kpid].win_is_topmost = 0;
         g_win_dirty = 1;
         if (g_click_owner_pid == kpid) g_click_owner_pid = -1;
         pipe_mark_writer_done(procs[kpid].stdout_pipe_id);
@@ -503,6 +519,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
          * when the slot eventually becomes PROC_UNUSED. */
         procs[epid].win_registered = 0;
         procs[epid].win_is_base    = 0;
+        procs[epid].win_is_topmost = 0;
         g_win_dirty = 1;
         if (g_click_owner_pid == epid) g_click_owner_pid = -1;
         pipe_mark_writer_done(procs[epid].stdout_pipe_id);
@@ -605,6 +622,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
             procs[epid].exit_code = (int)arg0;
             procs[epid].win_registered = 0;   /* see SYS_EXIT's comment on why this can't wait for slot reuse */
             procs[epid].win_is_base    = 0;
+        procs[epid].win_is_topmost = 0;
             g_win_dirty = 1;
             if (g_click_owner_pid == epid) g_click_owner_pid = -1;
             procs[waiter].state        = PROC_RUNNABLE;
@@ -716,23 +734,54 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
             unsigned int my = (unsigned int)((st >> 16) & 0xFFFF);
             int best = -1;
             unsigned long best_z = 0;
+
+            /* Pass 1: the topmost tier (taskbar) wins UNCONDITIONALLY if
+             * the click lands in its rect, regardless of any other
+             * window's win_z - it's painted in composite_screen()'s own
+             * unconditional final pass, so nothing else's pixels can ever
+             * be on top of it; click ownership must match that or a
+             * click on the visually-topmost taskbar could still be
+             * mis-routed to some other window with a higher z that
+             * happens to overlap the same screen region underneath it.
+             * win_is_base excluded too (defensive - the two flags should
+             * never both be set on one process, but if they ever were,
+             * the backdrop's full-screen rect must not get this
+             * unconditional-win treatment). */
             for (int i = 0; i < MAX_PROCS; i++) {
-                /* win_is_base (AxDesk's compositor backdrop) is exempt from
-                 * click arbitration exactly like an unregistered process -
-                 * without this, its full-screen rect would compete on win_z
-                 * for EVERY click anywhere on screen, and a stray desktop
-                 * click could bump its z above some unfocused-but-open
-                 * window, silently misrouting that window's next click to
-                 * AxDesk underneath it (found in design review, not live -
-                 * caught before this ever shipped). */
-                if (!procs[i].win_registered || procs[i].win_is_base) continue;
+                if (!procs[i].win_registered || !procs[i].win_is_topmost || procs[i].win_is_base) continue;
                 if (procs[i].state == PROC_UNUSED || procs[i].state == PROC_ZOMBIE) continue;
                 if ((int)mx < procs[i].win_x || (int)mx >= procs[i].win_x + procs[i].win_w) continue;
                 if ((int)my < procs[i].win_y || (int)my >= procs[i].win_y + procs[i].win_h) continue;
-                if (best < 0 || procs[i].win_z > best_z) { best = i; best_z = procs[i].win_z; }
+                best = i;
+                break;   /* at most one topmost window expected, same as win_is_base */
+            }
+
+            /* Pass 2: ordinary (non-base, non-topmost) windows, ascending
+             * win_z - unchanged, only runs if the click didn't land on
+             * the topmost tier. win_is_base (AxDesk's compositor
+             * backdrop) is exempt from click arbitration exactly like an
+             * unregistered process - without this, its full-screen rect
+             * would compete on win_z for EVERY click anywhere on screen,
+             * and a stray desktop click could bump its z above some
+             * unfocused-but-open window, silently misrouting that
+             * window's next click to AxDesk underneath it (found in
+             * design review, not live - caught before this ever
+             * shipped). */
+            if (best < 0) {
+                for (int i = 0; i < MAX_PROCS; i++) {
+                    if (!procs[i].win_registered || procs[i].win_is_base || procs[i].win_is_topmost) continue;
+                    if (procs[i].state == PROC_UNUSED || procs[i].state == PROC_ZOMBIE) continue;
+                    if ((int)mx < procs[i].win_x || (int)mx >= procs[i].win_x + procs[i].win_w) continue;
+                    if ((int)my < procs[i].win_y || (int)my >= procs[i].win_y + procs[i].win_h) continue;
+                    if (best < 0 || procs[i].win_z > best_z) { best = i; best_z = procs[i].win_z; }
+                }
             }
             g_click_owner_pid = best;
-            if (best >= 0) procs[best].win_z = ++g_next_z_counter;   /* focus-follows-click */
+            /* focus-follows-click - skipped for the topmost tier since its
+             * "always on top" already doesn't depend on win_z at all (see
+             * composite_screen()'s final pass and pass 1 above); spending
+             * the monotonic counter on it would be functionally inert. */
+            if (best >= 0 && !procs[best].win_is_topmost) procs[best].win_z = ++g_next_z_counter;
         }
         g_mouse_prev_left = left;   /* unconditional - must see every release too */
 
@@ -794,6 +843,42 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         g_win_dirty = 1;
         ret = 0;
         break;
+
+    case SYS_WIN_SET_TOPMOST:
+        /* Marks the calling process as the compositor's always-on-top
+         * layer - AxTaskbar only. Meaningful only once win_registered is
+         * also set (win_set_rect() first, same ordering as win_set_base())
+         * - see composite_screen()'s final pass and the click/keyboard-
+         * arbitration exemptions above. */
+        procs[current_pid].win_is_topmost = 1;
+        g_win_dirty = 1;
+        ret = 0;
+        break;
+
+    case SYS_WIN_FOCUS: {
+        /* win_focus(pid) - lets the taskbar bring ANOTHER process's
+         * window to front on an open-window button click. Deliberately
+         * lets a non-press-edge event change g_click_owner_pid/win_z,
+         * unlike every other write to those two (which only ever happens
+         * on a genuine left-button press edge, see the comment at the
+         * top of SYS_MOUSE_STATE's handler) - intentional for this one
+         * caller, not an oversight. No ownership check on WHO may call
+         * this (any process could call win_focus(getpid()) on itself to
+         * self-promote) - consistent with this codebase's existing trust
+         * model, where kill()/wait()/set_priority() already take a bare
+         * pid with no caller-identity check either. */
+        int pid = (int)arg0;
+        if (pid < 0 || pid >= MAX_PROCS || !procs[pid].win_registered || procs[pid].win_is_base ||
+            procs[pid].state == PROC_UNUSED || procs[pid].state == PROC_ZOMBIE) {
+            ret = -1;
+            break;
+        }
+        procs[pid].win_z = ++g_next_z_counter;
+        g_click_owner_pid = pid;
+        g_win_dirty = 1;
+        ret = 0;
+        break;
+    }
 
     case SYS_SOUND_BEEP:
         if (!virtio_sound_ready()) { ret = -1; break; }
@@ -964,6 +1049,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[kpid].exit_code = -1;
         procs[kpid].win_registered = 0;   /* see SYS_EXIT's comment on why this can't wait for slot reuse */
         procs[kpid].win_is_base    = 0;
+        procs[kpid].win_is_topmost = 0;
         g_win_dirty = 1;
         if (g_click_owner_pid == kpid) g_click_owner_pid = -1;
         pipe_mark_writer_done(procs[kpid].stdout_pipe_id);
@@ -1049,8 +1135,12 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         for (int i = 0; i < MAX_PROCS; i++) {
             /* win_is_base exempt too - same reasoning as SYS_MOUSE_STATE's
              * click-ownership loop (AxDesk's full-screen rect must not
-             * compete for keyboard focus either). */
-            if (!procs[i].win_registered || procs[i].win_is_base) continue;
+             * compete for keyboard focus either). win_is_topmost (the
+             * taskbar) exempt for a different reason: it never needs
+             * typed input at all, so it must never win "topmost-z gets
+             * the keystroke" and steal focus from the actual focused
+             * app just because it happens to sit at a high z. */
+            if (!procs[i].win_registered || procs[i].win_is_base || procs[i].win_is_topmost) continue;
             if (procs[i].state == PROC_UNUSED || procs[i].state == PROC_ZOMBIE) continue;
             if (topmost < 0 || procs[i].win_z > topmost_z) { topmost = i; topmost_z = procs[i].win_z; }
         }
@@ -1081,6 +1171,14 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         out->state    = procs[idx].state;
         out->priority = procs[idx].priority;
         out->ticks    = visible ? procs[idx].ticks : 0;
+        /* Unconditional, like pid/state/priority above (not gated on
+         * `visible`) - existence/registration of a window is already no
+         * more sensitive than existence/state/priority themselves, only
+         * name/ticks are ever MLS-redacted today. Lets AxTaskbar filter
+         * down to "processes with an open, non-backdrop window" for its
+         * open-window button list. */
+        out->win_registered = procs[idx].win_registered;
+        out->win_is_base    = procs[idx].win_is_base;
         ret = 1;
         break;
     }

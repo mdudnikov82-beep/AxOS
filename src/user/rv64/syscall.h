@@ -42,6 +42,8 @@
 #define SYS_PS_INFO       36
 #define SYS_WIN_SET_BASE  37
 #define SYS_SOUND_BEEP    38
+#define SYS_WIN_SET_TOPMOST 39
+#define SYS_WIN_FOCUS       40
 
 static inline long __syscall0(long nr) {
     register long _nr  __asm__("a7") = nr;
@@ -366,6 +368,22 @@ static inline int win_set_base(void) {
     return (int)__syscall0(SYS_WIN_SET_BASE);
 }
 
+/* win_set_topmost() — marks the calling process as the compositor's
+ * always-on-top layer: always painted last (composite_screen()'s final
+ * pass), always wins clicks in its own rect regardless of any other
+ * window's z-order, exempt from keyboard focus arbitration. AxTaskbar
+ * only — call once, right after win_set_rect(). */
+static inline int win_set_topmost(void) {
+    return (int)__syscall0(SYS_WIN_SET_TOPMOST);
+}
+
+/* win_focus(pid) -> 0 ok / -1 err (pid out of range, not a registered
+ * non-backdrop window, or not alive). Brings another process's window
+ * to front - used by AxTaskbar's open-window buttons. */
+static inline int win_focus(int pid) {
+    return (int)__syscall1(SYS_WIN_FOCUS, (long)pid);
+}
+
 /* sound_beep(freq_hz, duration_ms) -> 0 ok / -1 err (no audio device,
  * or the device doesn't support S16 samples @ 44100/48000 Hz).
  * Synthesizes a synchronous square-wave tone via virtio-sound - blocks
@@ -387,6 +405,10 @@ typedef struct {
     int           state;
     int           priority;
     unsigned long ticks;
+    int           win_registered;  /* appended fields - see SYS_WIN_SET_RECT/SYS_PS_INFO. Unconditional
+                                     * (not MLS-redacted like name/ticks) - AxTaskbar uses this + win_is_base
+                                     * to filter down to "processes with an open, non-backdrop window". */
+    int           win_is_base;
 } ps_entry_t;
 
 static inline int ps_info(unsigned int index, ps_entry_t *out) {

@@ -683,6 +683,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\axtetris_rv64.elf) do echo   axtetris_rv64.elf: %%~zF bytes
 
+echo [U105] axtaskb.c...
+"%CC%" %UFLAGS% -c %USRC%\axtaskb.c -o %OUT%\uaxtaskb.o
+if %errorlevel% neq 0 goto :error
+
+echo [U106] Linking axtaskb...
+"%LD%" -m elf64lriscv -T %USRC%\user_rv64.ld -o %OUT%\axtaskb_rv64.elf %OUT%\ucrt0.o %OUT%\uaxtaskb.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\axtaskb_rv64.elf) do echo   axtaskb_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -718,6 +728,7 @@ copy /b %OUT%\rustpanel_rv64.elf  rv64build\fs\rv64\RUSTPNL.ELF
 copy /b %OUT%\axchat_rv64.elf     rv64build\fs\rv64\AXCHAT.ELF
 copy /b %OUT%\axbrowser_rv64.elf  rv64build\fs\rv64\AXBROWSR.ELF
 copy /b %OUT%\axtetris_rv64.elf   rv64build\fs\rv64\AXTETRIS.ELF
+copy /b %OUT%\axtaskb_rv64.elf    rv64build\fs\rv64\AXTASKB.ELF
 copy /b %OUT%\kptrtest_rv64.elf   rv64build\fs\rv64\KPTRTEST.ELF
 copy /b %OUT%\spin_rv64.elf       rv64build\fs\rv64\SPIN.ELF
 copy /b %OUT%\nettest_rv64.elf     rv64build\fs\rv64\NETTEST.ELF

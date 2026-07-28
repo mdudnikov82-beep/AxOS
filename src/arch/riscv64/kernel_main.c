@@ -124,6 +124,7 @@ void trap_handler(unsigned long cause, unsigned long epc,
              * hit-test already skips PROC_ZOMBIE slots regardless). */
             procs[epid].win_registered = 0;
             procs[epid].win_is_base    = 0;
+            procs[epid].win_is_topmost = 0;
             gfx_wm_mark_dirty();
             pipe_mark_writer_done(procs[epid].stdout_pipe_id);
             for (int i = 0; i < MAX_PROCS; i++) {

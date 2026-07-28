@@ -49,6 +49,18 @@ typedef struct {
     int           win_is_base;                 /* 1 for the compositor's backdrop layer - see SYS_WIN_SET_BASE;
                                                  * always painted first, exempt from click/keyboard focus
                                                  * arbitration (SYS_MOUSE_STATE/SYS_KBD_GETC) - AxDesk only. */
+    int           win_is_topmost;               /* 1 for the taskbar layer - see SYS_WIN_SET_TOPMOST;
+                                                  * always painted LAST (composite_screen()'s final pass),
+                                                  * always wins clicks in its own rect (SYS_MOUSE_STATE's
+                                                  * pass 1), exempt from keyboard focus (SYS_KBD_GETC) -
+                                                  * AxTaskbar only. Reset on every zombie-cleanup/slot-reuse
+                                                  * site that also resets win_is_base (7 sites total: see
+                                                  * proc_init()/proc_create() here, kernel_main.c's page-fault
+                                                  * kill handler, and 4 sites in syscall.c) - a reused slot
+                                                  * that skipped this reset would silently inherit
+                                                  * "unconditional topmost" the instant its new occupant
+                                                  * calls win_set_rect(), regardless of what THAT process
+                                                  * actually asked for. */
     unsigned long win_z;                        /* z-order rank; higher = more recently focused/topmost */
     long          last_wheel_seen;              /* virtio_input_wheel_total() snapshot as of this process's
                                                   * last SYS_MOUSE_STATE poll - see syscall.c for the

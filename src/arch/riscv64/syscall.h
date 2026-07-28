@@ -39,6 +39,8 @@
 #define SYS_PS_INFO       36  /* ps_info(index, ps_entry_t *out) -> 1 (out filled) / 0 (index out of range, end of list) */
 #define SYS_WIN_SET_BASE  37  /* win_set_base() -> 0 (marks the calling process as the compositor's base/backdrop layer - AxDesk only) */
 #define SYS_SOUND_BEEP    38  /* sound_beep(freq_hz, duration_ms) -> 0 ok / -1 err (no device, or device doesn't support S16 @ 44100/48000 Hz) */
+#define SYS_WIN_SET_TOPMOST 39 /* win_set_topmost() -> 0 (marks the calling process as the compositor's always-on-top layer - AxTaskbar only) */
+#define SYS_WIN_FOCUS       40 /* win_focus(pid) -> 0 ok / -1 err (brings another process's registered window to front - AxTaskbar only, on an open-window button click) */
 
 /* Mirrored byte-for-byte in src/user/rv64/syscall.h - same toolchain/ABI
  * compiles both sides, so field order/padding always match. */
@@ -48,6 +50,8 @@ typedef struct {
     int           state;
     int           priority;
     unsigned long ticks;
+    int           win_registered;  /* appended fields - see SYS_WIN_SET_RECT/SYS_PS_INFO */
+    int           win_is_base;
 } ps_entry_t;
 
 /* Kernel-side entry point.

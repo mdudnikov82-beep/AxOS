@@ -64,6 +64,17 @@ int main(void) {
     win_set_rect(0, 0, (int)w, (int)h);
     win_set_base();
 
+    /* Auto-launches the taskbar (Start menu + open-window buttons +
+     * clock) alongside the desktop - never needs a separate manual
+     * launch step. Non-blocking, same fire-and-forget exec() pattern as
+     * an icon click; checked here (unlike a plain icon click, which
+     * only fails visibly via the on-screen "launch failed" message)
+     * because a silent failure here would leave the desktop looking
+     * "done" with no taskbar at all and no obvious reason why. */
+    if (exec("AXTASKB.ELF") < 0) {
+        puts_rv("axdesk: failed to launch AXTASKB.ELF\r\n");
+    }
+
     icon_t icons[14];
     icons[0].label = "Term";  icons[0].file = "AXTERM.ELF";  icons[0].icon_bmp = "TERM.BMP";  icons[0].color = gfx_rgb(0, 150, 255);
     icons[1].label = "About"; icons[1].file = "AXABOUT.ELF"; icons[1].icon_bmp = "ABOUT.BMP"; icons[1].color = gfx_rgb(255, 140, 0);
