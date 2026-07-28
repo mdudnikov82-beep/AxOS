@@ -112,7 +112,7 @@ def main():
                     buf += d.decode(errors="replace")
             except socket.timeout:
                 pass
-            if "AxOS>" in buf or "[TRAP] kernel halted" in buf:
+            if "[AxOS " in buf or "[TRAP] kernel halted" in buf:
                 break
         sock.close()
         msock.close()
@@ -128,8 +128,8 @@ def main():
     print("----------------------------")
 
     ok = True
-    if "AxOS>" not in buf:
-        print("FAIL: AxSH prompt 'AxOS>' not found")
+    if "[AxOS " not in buf:
+        print("FAIL: AxSH prompt '[AxOS ' not found")
         ok = False
     if "[TRAP] kernel halted" in buf:
         print("FAIL: kernel halted on an unhandled trap")

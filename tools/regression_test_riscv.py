@@ -71,7 +71,7 @@ def connect_retry(port, timeout=5, attempts=30, delay=1):
 def read_until(sock, buf, needles, timeout, start=0):
     # Only checks buf[0][start:] for the needles - callers waiting for a
     # marker that may already exist earlier in the accumulated transcript
-    # (e.g. "AxOS>", already seen once at boot) must pass the offset where
+    # (e.g. "[AxOS ", already seen once at boot) must pass the offset where
     # THIS wait began, or it would return true immediately on stale data.
     sock.settimeout(1)
     deadline = time.time() + timeout
@@ -108,7 +108,7 @@ def main():
         msock.recv(4096)  # drain the "(qemu)" banner
         msock.sendall(b"cont\n")  # both sockets connected - safe to let the guest CPU run now
 
-        if not read_until(sock, buf, ["AxOS>"], BOOT_TIMEOUT_SEC):
+        if not read_until(sock, buf, ["[AxOS "], BOOT_TIMEOUT_SEC):
             print("FAIL: AxSH prompt not found within boot timeout")
             print(buf[0][-2000:])
             return 1
@@ -141,7 +141,7 @@ def main():
             for ch in cmd + "\r\n":
                 sock.sendall(ch.encode())
                 time.sleep(0.05)
-            if not read_until(sock, buf, ["AxOS>"], CMD_TIMEOUT_SEC, start=start):
+            if not read_until(sock, buf, ["[AxOS "], CMD_TIMEOUT_SEC, start=start):
                 print(f"WARN: prompt didn't reappear in time after '{cmd}' - continuing anyway")
 
         sock.close()

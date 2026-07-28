@@ -28,6 +28,26 @@ static void print_udec(unsigned long v) {
     write(1, buf, i);
 }
 
+/* Zero-padded 2-digit decimal, for HH:MM:SS - wraps past 99 (uptime
+ * would need 100+ hours), an acceptable tradeoff for a shell prompt. */
+static void print_udec2(unsigned int v) {
+    char buf[2];
+    buf[0] = (char)('0' + (v / 10) % 10);
+    buf[1] = (char)('0' + v % 10);
+    write(1, buf, 2);
+}
+
+/* Same h/m/s split as axclock.c's clock_get_uptime() - 10 MHz CLINT
+ * timebase, seconds = ticks / 10000000. */
+static void print_uptime(void) {
+    long secs = gettime() / 10000000;
+    print_udec2((unsigned int)((secs / 3600) % 100));
+    print(":");
+    print_udec2((unsigned int)((secs / 60) % 60));
+    print(":");
+    print_udec2((unsigned int)(secs % 60));
+}
+
 /* Вернуть указатель на первый символ после пробелов */
 static const char *skip_spaces(const char *p) {
     while (*p == ' ') p++;
@@ -275,7 +295,7 @@ static void cmd_ls(void) {
 }
 
 static void cmd_cat(const char *arg) {
-    if (!arg || !*arg) { print("Usage: cat <FILENAME>\r\n"); return; }
+    if (!arg || !*arg) { print("\033[33mUsage: cat <FILENAME>\033[0m\r\n"); return; }
 
     /* Upcase filename */
     char fname[14]; int fi = 0;
@@ -286,7 +306,7 @@ static void cmd_cat(const char *arg) {
     fname[fi] = '\0';
 
     int fd = open(fname, 0);
-    if (fd < 0) { print("cat: file not found: "); print(fname); print("\r\n"); return; }
+    if (fd < 0) { print("\033[31mcat: file not found: "); print(fname); print("\033[0m\r\n"); return; }
 
     char buf[64];
     long n;
@@ -311,7 +331,7 @@ static void cmd_echo(const char *arg) {
 /* "write <FILE> <text...>" — creates/overwrites FILE with text */
 static void cmd_write(const char *arg) {
     print("\r\n");
-    if (!arg || !*arg) { print("Usage: write <FILE> <text>\r\n\r\n"); return; }
+    if (!arg || !*arg) { print("\033[33mUsage: write <FILE> <text>\033[0m\r\n\r\n"); return; }
 
     /* First token = filename, rest = text */
     char fname[14]; int fi = 0;
@@ -329,14 +349,14 @@ static void cmd_write(const char *arg) {
     if (writefile(fname, p, len)) {
         print("Written.\r\n\r\n");
     } else {
-        print("write: failed (disk locked or no space)\r\n\r\n");
+        print("\033[31mwrite: failed (disk locked or no space)\033[0m\r\n\r\n");
     }
 }
 
 /* "rm <FILE>" */
 static void cmd_rm(const char *arg) {
     print("\r\n");
-    if (!arg || !*arg) { print("Usage: rm <FILE>\r\n\r\n"); return; }
+    if (!arg || !*arg) { print("\033[33mUsage: rm <FILE>\033[0m\r\n\r\n"); return; }
 
     char fname[14]; int fi = 0;
     while (*arg && fi < 13) {
@@ -349,9 +369,9 @@ static void cmd_rm(const char *arg) {
     if (result == 1) {
         print("removed '"); print(fname); print("'\r\n\r\n");
     } else if (result == -1) {
-        print("rm: no such file: "); print(fname); print("\r\n\r\n");
+        print("\033[31mrm: no such file: "); print(fname); print("\033[0m\r\n\r\n");
     } else {
-        print("rm: failed (disk locked or not ready)\r\n\r\n");
+        print("\033[31mrm: failed (disk locked or not ready)\033[0m\r\n\r\n");
     }
 }
 
@@ -362,7 +382,7 @@ static void cmd_time(void) {
 }
 
 static void cmd_run(const char *arg) {
-    if (!arg || !*arg) { print("Usage: run <FILE> [&]\r\n"); return; }
+    if (!arg || !*arg) { print("\033[33mUsage: run <FILE> [&]\033[0m\r\n"); return; }
 
     /* Check for background flag (&) at the end */
     char tmp[80]; int ti = 0;
@@ -403,9 +423,9 @@ static void cmd_run(const char *arg) {
 
     int pid = exec(cmdline);
     if (pid < 0) {
-        print("run: failed to load ");
+        print("\033[31mrun: failed to load ");
         print(fname);
-        print("\r\n");
+        print("\033[0m\r\n");
         return;
     }
 
@@ -449,13 +469,13 @@ static void cmd_pipe(const char *line, int pipe_pos) {
     while (m > 0 && cmd2[m-1] == ' ') m--;
     cmd2[m] = '\0';
 
-    if (!cmd1[0] || !cmd2[0]) { print("Usage: cmd1 | cmd2\r\n"); return; }
+    if (!cmd1[0] || !cmd2[0]) { print("\033[33mUsage: cmd1 | cmd2\033[0m\r\n"); return; }
 
     int pid1 = exec_pipe(cmd1, 0, -1);
-    if (pid1 < 0) { print("sh: pipe: left side not found\r\n"); return; }
+    if (pid1 < 0) { print("\033[31msh: pipe: left side not found\033[0m\r\n"); return; }
 
     int pid2 = exec_pipe(cmd2, -1, 0);
-    if (pid2 < 0) { print("sh: pipe: right side not found\r\n"); return; }
+    if (pid2 < 0) { print("\033[31msh: pipe: right side not found\033[0m\r\n"); return; }
 
     print("\r\n[pipe] pid=");
     print_udec((unsigned long)pid2);
@@ -469,14 +489,14 @@ static void cmd_pipe(const char *line, int pipe_pos) {
 }
 
 static void cmd_kill(const char *arg) {
-    if (!arg || !*arg) { print("Usage: kill <PID>\r\n"); return; }
+    if (!arg || !*arg) { print("\033[33mUsage: kill <PID>\033[0m\r\n"); return; }
     int pid = 0;
     const char *p = arg;
     while (*p >= '0' && *p <= '9') pid = pid * 10 + (*p++ - '0');
     if (kill(pid) < 0) {
-        print("kill: no such process: ");
+        print("\033[31mkill: no such process: ");
         print(arg);
-        print("\r\n");
+        print("\033[0m\r\n");
         return;
     }
     print("[kill] pid=");
@@ -485,7 +505,7 @@ static void cmd_kill(const char *arg) {
 }
 
 static void cmd_nice(const char *arg) {
-    if (!arg || !*arg) { print("Usage: nice <PID> <1-10>\r\n"); return; }
+    if (!arg || !*arg) { print("\033[33mUsage: nice <PID> <1-10>\033[0m\r\n"); return; }
     const char *p = arg;
     int pid = 0, prio = 0;
     while (*p >= '0' && *p <= '9') pid = pid * 10 + (*p++ - '0');
@@ -508,16 +528,25 @@ static void cmd_ps(void) {
 /* ---- Main ---- */
 
 int main(void) {
-    print("\r\n");
-    print("\033[1;36m  AxOS/RV64  --  AxSH v0.1\033[0m\r\n");
+    print("\r\n\033[1;36m");
+    print(" ### " "  " "#   #" "  " " ### " "  " " ####" "\r\n");
+    print("#   #" "  " "#   #" "  " "#   #" "  " "#    " "\r\n");
+    print("#   #" "  " " # # " "  " "#   #" "  " " ### " "\r\n");
+    print("#####" "  " "  #  " "  " "#   #" "  " "    #" "\r\n");
+    print("#   #" "  " " # # " "  " "#   #" "  " "    #" "\r\n");
+    print("#   #" "  " "#   #" "  " " ### " "  " "#### " "\r\n");
+    print("\033[0m");
+    print("      \033[36mRISC-V Edition -- AxSH v0.1\033[0m\r\n\r\n");
     print("  Type 'help' for commands.\r\n\r\n");
 
     char line[80];
 
     while (1) {
-        print("\033[32m[");
+        print("\033[36m[AxOS \033[33m");
+        print_uptime();
+        print("\033[36m]\033[32m[");
         print_udec((unsigned long)getpid());
-        print("] AxOS>\033[0m ");
+        print("]\033[1;36m>\033[0m ");
 
         int len = readline(line, sizeof(line));
         if (len == 0) continue;
@@ -585,9 +614,9 @@ int main(void) {
         if (seq(line, "rm")) { cmd_rm(0); continue; }
 
         /* Unknown command */
-        print("Unknown command: ");
+        print("\033[31mUnknown command: ");
         print(line);
-        print("\r\n");
+        print("\033[0m\r\n");
     }
     return 0;
 }
