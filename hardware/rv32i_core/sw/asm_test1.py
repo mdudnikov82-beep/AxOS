@@ -64,6 +64,30 @@ def lui(rd, imm20):
     return u_type(imm20, rd, 0b0110111)
 
 
+# Minimal RV32F (see control_unit.v/cpu_core.v): FLW/FSW use the exact
+# same I-type/S-type shapes as LW/SW, just different opcodes; rd/rs1/
+# rs2 for FLW/FSW/FADD.S/FSUB.S/FMUL.S address fp_regfile except FLW/
+# FSW's rs1 (base address), which is still an integer register.
+def flw(rd, imm, rs1):
+    return i_type(imm, rs1, 0b010, rd, 0b0000111)
+
+
+def fsw(rs2, imm, rs1):
+    return s_type(imm, rs2, rs1, 0b010, 0b0100111)
+
+
+def fadd_s(rd, rs1, rs2):
+    return r_type(0b0000000, rs2, rs1, 0b000, rd, 0b1010011)
+
+
+def fsub_s(rd, rs1, rs2):
+    return r_type(0b0000100, rs2, rs1, 0b000, rd, 0b1010011)
+
+
+def fmul_s(rd, rs1, rs2):
+    return r_type(0b0001000, rs2, rs1, 0b000, rd, 0b1010011)
+
+
 # x1=5, x2=10, x3=x1+x2=15, mem[0]=x3, x4=mem[0](=15),
 # BEQ x3,x4,+8 (taken -> skip the next instruction),
 # x5=999 (SKIPPED if branch worked), x10=42, ECALL (tohost=42 if

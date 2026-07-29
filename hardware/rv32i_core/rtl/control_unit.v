@@ -27,19 +27,39 @@ module control_unit (
     output reg [3:0]  alu_op,
     output reg [1:0]  mem_size,    // 00=byte 01=half 10=word
     output reg        mem_unsigned,// zero-extend (LBU/LHU) instead of sign-extend
-    output reg        illegal      // opcode not recognized - see cpu_core.v's own handling
+    output reg        illegal,     // opcode not recognized - see cpu_core.v's own handling
+
+    // Minimal RV32F (see fp_regfile.v/fp_addsub.v/fp_mul.v): FLW/FSW +
+    // FADD.S/FSUB.S/FMUL.S only. fp_reg_write means this instruction's
+    // RESULT targets fp_regfile, not the integer regfile (FLW and the
+    // 3 arithmetic ops). is_fp_mem means only FLW/FSW - address
+    // computation reuses mem_read/mem_write/alu_src/alu_op=ADD above
+    // completely unchanged; this just tells cpu_core.v which SIDE
+    // (a load's rd, or a store's rs2) is the FP register instead of
+    // the integer one. fp_op selects which FPU unit's result a
+    // FADD.S/FSUB.S/FMUL.S instruction writes back.
+    output reg        fp_reg_write,
+    output reg        is_fp_mem,
+    output reg [1:0]  fp_op        // 00=add 01=sub 10=mul
 );
-    localparam OP_LOAD   = 7'b0000011;
-    localparam OP_IMM    = 7'b0010011;
-    localparam OP_JALR   = 7'b1100111;
-    localparam OP_STORE  = 7'b0100011;
-    localparam OP_BRANCH = 7'b1100011;
-    localparam OP_LUI    = 7'b0110111;
-    localparam OP_AUIPC  = 7'b0010111;
-    localparam OP_JAL    = 7'b1101111;
-    localparam OP_REG    = 7'b0110011;
-    localparam OP_FENCE  = 7'b0001111;
-    localparam OP_SYSTEM = 7'b1110011;
+    localparam OP_LOAD    = 7'b0000011;
+    localparam OP_IMM     = 7'b0010011;
+    localparam OP_JALR    = 7'b1100111;
+    localparam OP_STORE   = 7'b0100011;
+    localparam OP_BRANCH  = 7'b1100011;
+    localparam OP_LUI     = 7'b0110111;
+    localparam OP_AUIPC   = 7'b0010111;
+    localparam OP_JAL     = 7'b1101111;
+    localparam OP_REG     = 7'b0110011;
+    localparam OP_FENCE   = 7'b0001111;
+    localparam OP_SYSTEM  = 7'b1110011;
+    localparam OP_LOAD_FP  = 7'b0000111;
+    localparam OP_STORE_FP = 7'b0100111;
+    localparam OP_FP       = 7'b1010011;
+
+    localparam FP_ADD = 2'b00;
+    localparam FP_SUB = 2'b01;
+    localparam FP_MUL = 2'b10;
 
     // ALU op encoding shared with alu.v.
     localparam ALU_ADD  = 4'b0000;
@@ -92,6 +112,9 @@ module control_unit (
         mem_size     = 2'b10;
         mem_unsigned = 1'b0;
         illegal      = 1'b0;
+        fp_reg_write = 1'b0;
+        is_fp_mem    = 1'b0;
+        fp_op        = FP_ADD;
 
         case (opcode)
             OP_REG: begin
@@ -125,6 +148,54 @@ module control_unit (
                 alu_op    = ALU_ADD;
                 mem_size  = (funct3 == 3'b000) ? 2'b00 :
                             (funct3 == 3'b001) ? 2'b01 : 2'b10;
+            end
+
+            OP_LOAD_FP: begin
+                // Same address computation as OP_LOAD (rs1+imm, an
+                // INTEGER register base) - only the destination is
+                // different (fp_regfile, not the integer regfile).
+                // reg_write stays 0 deliberately: rd's 5-bit number
+                // aliases between the two register files, so leaving
+                // the integer regfile's write enable off is required
+                // correctness here, not just unnecessary caution.
+                fp_reg_write = 1'b1;
+                is_fp_mem    = 1'b1;
+                mem_read     = 1'b1;
+                alu_src      = 1'b1;
+                alu_op       = ALU_ADD;
+                mem_size     = 2'b10; // FLW is always a full word
+            end
+
+            OP_STORE_FP: begin
+                // Same address computation as OP_STORE - only the
+                // store DATA source differs (fp_regfile's rs2, not the
+                // integer regfile's).
+                is_fp_mem = 1'b1;
+                mem_write = 1'b1;
+                alu_src   = 1'b1;
+                alu_op    = ALU_ADD;
+                mem_size  = 2'b10; // FSW is always a full word
+            end
+
+            OP_FP: begin
+                // FADD.S/FSUB.S/FMUL.S - rs1/rs2/rd are ALL fp_regfile
+                // registers, no integer regfile or ALU involvement at
+                // all. funct7[6:2] is the real RV32F "funct5" operation
+                // field (funct7[1:0] is the format field, 00=single -
+                // ignored here since this project only implements
+                // single precision).
+                case (funct7[6:2])
+                    5'b00000: begin fp_op = FP_ADD; fp_reg_write = 1'b1; end // FADD.S
+                    5'b00001: begin fp_op = FP_SUB; fp_reg_write = 1'b1; end // FSUB.S
+                    5'b00010: begin fp_op = FP_MUL; fp_reg_write = 1'b1; end // FMUL.S
+                    // unimplemented RV32F op (div/sqrt/etc - out of
+                    // scope): fp_reg_write stays 0 (its default),
+                    // deliberately NOT set here, so an unrecognized op
+                    // can never sneak a garbage FP register write
+                    // through - same principle as the top-level
+                    // default case below for entirely unknown opcodes.
+                    default:  illegal = 1'b1;
+                endcase
             end
 
             OP_BRANCH: begin

@@ -22,14 +22,20 @@ module imm_gen (
     localparam OP_LUI    = 7'b0110111;
     localparam OP_AUIPC  = 7'b0010111;
     localparam OP_JAL    = 7'b1101111;
+    // Minimal RV32F (see control_unit.v) - FLW/FSW use the exact same
+    // I-type/S-type immediate layout as LW/SW, just under different
+    // opcode values this case statement didn't recognize before,
+    // which would otherwise silently fall through to imm=0.
+    localparam OP_LOAD_FP  = 7'b0000111;
+    localparam OP_STORE_FP = 7'b0100111;
 
     wire [6:0] opcode = instr[6:0];
 
     always @(*) begin
         case (opcode)
-            OP_LOAD, OP_IMM, OP_JALR:
+            OP_LOAD, OP_IMM, OP_JALR, OP_LOAD_FP:
                 imm = {{20{instr[31]}}, instr[31:20]};
-            OP_STORE:
+            OP_STORE, OP_STORE_FP:
                 imm = {{20{instr[31]}}, instr[31:25], instr[11:7]};
             OP_BRANCH:
                 imm = {{19{instr[31]}}, instr[31], instr[7], instr[30:25], instr[11:8], 1'b0};

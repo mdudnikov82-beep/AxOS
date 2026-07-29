@@ -53,6 +53,12 @@ module cpu_core #(
     wire [3:0]  alu_op;
     wire [1:0]  mem_size;
 
+    // Minimal RV32F (see fp_regfile.v/fp_addsub.v/fp_mul.v).
+    wire        fp_reg_write, is_fp_mem;
+    wire [1:0]  fp_op;
+    wire [31:0] fp_rs1_data, fp_rs2_data;
+    reg  [31:0] fp_rd_data;
+
     wire [31:0] alu_a = auipc ? pc : (lui ? 32'b0 : rs1_data);
     wire [31:0] alu_b = alu_src ? imm : rs2_data;
     wire [31:0] alu_result;
@@ -70,9 +76,16 @@ module cpu_core #(
     // that local window before crossing the bus, the same way a real
     // memory-mapped peripheral's own internal offset differs from its
     // address in the CPU's global map.
+    // FSW's store data comes from fp_regfile's rs2, not the integer
+    // regfile's - this single mux feeds BOTH store-data sites below
+    // (the private data_mem AND the shared bus each have their own
+    // write_data wire today, so this needs to reach both, not just
+    // one - flagged specifically by this feature's design review).
+    wire [31:0] store_data = is_fp_mem ? fp_rs2_data : rs2_data;
+
     assign bus_req          = is_shared_access;
     assign bus_addr          = alu_result - SHARED_MEM_BASE;
-    assign bus_write_data    = rs2_data;
+    assign bus_write_data    = store_data;
     assign bus_mem_write     = mem_write;
     assign bus_mem_size      = mem_size;
     assign bus_mem_unsigned  = mem_unsigned;
@@ -108,7 +121,8 @@ module cpu_core #(
         .mem_to_reg(mem_to_reg), .alu_src(alu_src), .branch(branch),
         .jump(jump), .jalr(jalr), .auipc(auipc), .lui(lui),
         .alu_op(alu_op), .mem_size(mem_size), .mem_unsigned(mem_unsigned),
-        .illegal(illegal)
+        .illegal(illegal),
+        .fp_reg_write(fp_reg_write), .is_fp_mem(is_fp_mem), .fp_op(fp_op)
     );
 
     alu ax (.a(alu_a), .b(alu_b), .alu_op(alu_op), .result(alu_result), .zero(alu_zero));
@@ -117,10 +131,52 @@ module cpu_core #(
     // of that address's own valid range anyway, but the decode belongs
     // here at the bus level, not left to the memory to silently no-op).
     data_mem #(.MEM_BYTES(DATA_MEM_BYTES)) dmem (
-        .clk(clk), .addr(alu_result), .write_data(rs2_data),
+        .clk(clk), .addr(alu_result), .write_data(store_data),
         .mem_write(mem_write && !is_shared_access), .mem_size(mem_size), .mem_unsigned(mem_unsigned),
         .read_data(mem_read_data)
     );
+
+    // Minimal RV32F datapath: FLW/FSW's address still comes from the
+    // INTEGER regfile via rs1/alu_result above, completely unchanged -
+    // only the DATA side (fp_regfile's rs1/rs2/rd) is new here.
+    // FADD.S/FSUB.S/FMUL.S touch fp_regfile exclusively; the integer
+    // regfile and ALU are never involved for those (control_unit.v
+    // already keeps the integer regfile's reg_write=0 for every
+    // RV32F instruction, since rd's 5-bit number aliases between the
+    // two register files).
+    wire [31:0] fpu_addsub_result, fpu_mul_result;
+
+    // Same !mem_stall gating as the integer regfile's write enable -
+    // a stalled FLW (targeting the shared-bus region) must not commit
+    // garbage into fp_regfile on a losing arbitration cycle, the exact
+    // bug class mem_stall already exists to prevent on the integer side.
+    wire fp_regfile_write_en = fp_reg_write && !mem_stall;
+
+    fp_regfile fprf (
+        .clk(clk), .rs1_addr(rs1), .rs2_addr(rs2),
+        .rs1_data(fp_rs1_data), .rs2_data(fp_rs2_data),
+        .rd_addr(rd), .rd_data(fp_rd_data), .reg_write(fp_regfile_write_en)
+    );
+
+    fp_addsub fpas (
+        .a(fp_rs1_data), .b(fp_rs2_data), .op_sub(fp_op[0]),
+        .result(fpu_addsub_result)
+    );
+
+    fp_mul fpmul (
+        .a(fp_rs1_data), .b(fp_rs2_data),
+        .result(fpu_mul_result)
+    );
+
+    // FLW's write-back is the loaded memory data; FADD.S/FSUB.S write
+    // fp_addsub's result (op_sub selects which); FMUL.S writes
+    // fp_mul's - a dedicated mux kept independent of the integer
+    // path's mem_to_reg mux, per this feature's design review.
+    always @(*) begin
+        if (is_fp_mem)          fp_rd_data = effective_mem_read_data;
+        else if (fp_op == 2'b10) fp_rd_data = fpu_mul_result;
+        else                      fp_rd_data = fpu_addsub_result;
+    end
 
     // Branch comparison - funct3 selects which relation BEQ/BNE/BLT/
     // BGE/BLTU/BGEU tests, independent of the ALU (which is busy
