@@ -64,7 +64,7 @@ module soc_top #(
     );
 
     shared_bus #(.MEM_BYTES(SHARED_MEM_BYTES)) sbus (
-        .clk(clk),
+        .clk(clk), .reset(reset),
         .p_req(p_bus_req), .p_addr(p_bus_addr), .p_write_data(p_bus_write_data),
         .p_mem_write(p_bus_mem_write), .p_mem_size(p_bus_mem_size),
         .p_mem_unsigned(p_bus_mem_unsigned), .p_grant(p_bus_grant), .p_read_data(p_bus_read_data),

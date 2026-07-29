@@ -1,17 +1,19 @@
-// Fixed-priority arbiter + one shared data_mem instance, giving the
+// Round-robin arbiter + one shared data_mem instance, giving the
 // P-core and E-core a real communication channel (a small memory
 // region both can read/write) instead of each only ever seeing its
-// own private memory. P always wins a simultaneous request - a known,
-// documented simplification (real designs would round-robin to avoid
-// starving E permanently); not a problem for a 2-core proof where
-// P's own poll loop only asks for the bus every few cycles, not
-// every single cycle.
+// own private memory. A LONE requester is always granted immediately
+// (no reason to make an uncontended access wait); on an actual TIE,
+// the grant alternates via last_granted so neither core can be
+// permanently starved by the other - unlike a fixed-priority arbiter,
+// where a core that always wins ties could, in principle, lock the
+// other out forever.
 `timescale 1ns/1ps
 
 module shared_bus #(
     parameter MEM_BYTES = 256
 ) (
     input  wire        clk,
+    input  wire        reset,
 
     input  wire        p_req,
     input  wire [31:0]  p_addr,
@@ -31,8 +33,23 @@ module shared_bus #(
     output wire         e_grant,
     output wire [31:0]  e_read_data
 );
-    assign p_grant = p_req;
-    assign e_grant = e_req && !p_req;
+    // 0 = P was last granted, 1 = E was last granted.
+    reg last_granted;
+
+    assign p_grant = p_req && (!e_req || last_granted);
+    assign e_grant = e_req && (!p_req || !last_granted);
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            // Fiction "E was last granted" so P wins the FIRST real
+            // tie after reset - an arbitrary but fixed, testable choice.
+            last_granted <= 1'b1;
+        end else begin
+            if (p_grant)      last_granted <= 1'b0;
+            else if (e_grant) last_granted <= 1'b1;
+            // neither granted this cycle: hold (no update)
+        end
+    end
 
     wire [31:0] sel_addr         = p_grant ? p_addr         : e_addr;
     wire [31:0] sel_write_data   = p_grant ? p_write_data   : e_write_data;
