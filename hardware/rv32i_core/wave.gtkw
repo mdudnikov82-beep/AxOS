@@ -1,0 +1,25 @@
+[dumpfile] "tb_cpu_pipelined.vcd"
+[timestart] 0
+[size] 1500 850
+[treeopen] tb_cpu_pipelined.
+[treeopen] tb_cpu_pipelined.dut.
+[sst_expanded] 1
+tb_cpu_pipelined.clk
+tb_cpu_pipelined.reset
+-
+tb_cpu_pipelined.dut.pc[31:0]
+tb_cpu_pipelined.dut.if_id_instr[31:0]
+tb_cpu_pipelined.dut.if_id_pc[31:0]
+-
+tb_cpu_pipelined.dut.stall
+tb_cpu_pipelined.dut.ex_taken
+tb_cpu_pipelined.dut.forward_a[1:0]
+tb_cpu_pipelined.dut.forward_b[1:0]
+-
+tb_cpu_pipelined.dut.id_ex_rd[4:0]
+tb_cpu_pipelined.dut.mem_wb_rd[4:0]
+tb_cpu_pipelined.dut.wb_reg_write
+tb_cpu_pipelined.dut.wb_rd_data[31:0]
+-
+tb_cpu_pipelined.dut.halted
+tb_cpu_pipelined.dut.tohost_value[31:0]
