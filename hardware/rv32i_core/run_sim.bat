@@ -112,6 +112,15 @@ if %errorlevel% neq 0 (echo FAILED: pipelined, hazard stress test & "%VVP%" out_
 echo   OK (tohost=119)
 
 echo.
+echo ===== Mini-SoC: 1 P-core + 1 E-core (soc_top.v) =====
+echo P-core runs hazard_test.hex (119), E-core runs test_basic.hex (110), at the same time
+"%IVERILOG%" -o out_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\forward_unit.v rtl\hazard_unit.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\soc_top.v tb\tb_soc.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_soc.vvp | findstr /C:"PASS: both cores matched" >nul
+if %errorlevel% neq 0 (echo FAILED: mini-SoC & "%VVP%" out_soc.vvp & goto :error)
+echo   OK (P=119, E=110, both concurrent)
+
+echo.
 echo ===== ALL SIMULATIONS PASSED =====
 exit /b 0
 
