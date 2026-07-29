@@ -101,6 +101,52 @@ static int bmp_load(const char *filename, bmp_image_t *img) {
     return 1;
 }
 
+/* Same happy-path parsing as bmp_load() above, but from an in-memory
+ * buffer (data[0..len)) instead of a FAT12 file - for AxBrowser, whose
+ * image bytes arrive over HTTP into RAM, not from open()/read(). Every
+ * "read" becomes a bounds-checked copy from data[off..]; returns 0 (not
+ * 1) the instant a would-be read runs past `len`, same "any error is
+ * just no image" contract bmp_load() already has. */
+static int bmp_decode_mem(const unsigned char *data, unsigned int len, bmp_image_t *img) {
+    if (len < 54 || data[0] != 'B' || data[1] != 'M') return 0;
+    const unsigned char *hdr = data;
+
+    unsigned int   data_off     = bmp_rd32(hdr + 10);
+    unsigned int   dib_size     = bmp_rd32(hdr + 14);
+    int            width        = (int)bmp_rd32(hdr + 18);
+    int            height       = (int)bmp_rd32(hdr + 22);
+    unsigned short bpp          = bmp_rd16(hdr + 28);
+    unsigned int   compression  = bmp_rd32(hdr + 30);
+
+    if (dib_size < 40 || compression != 0 || (bpp != 24 && bpp != 32) ||
+        width <= 0 || height <= 0 ||
+        (unsigned int)width > BMP_MAX_W || (unsigned int)height > BMP_MAX_H) {
+        return 0;
+    }
+    if (data_off < 54) return 0;
+
+    unsigned int bytes_per_px = bpp / 8u;
+    unsigned int row_bytes    = ((unsigned int)width * bytes_per_px + 3u) & ~3u;
+    unsigned int off = data_off;
+
+    for (int y = 0; y < height; y++) {
+        if (off + row_bytes > len) return 0;
+        const unsigned char *row = data + off;
+        off += row_bytes;
+        int dst_row = height - 1 - y;
+        for (int x = 0; x < width; x++) {
+            unsigned char b = row[(unsigned int)x * bytes_per_px + 0];
+            unsigned char g = row[(unsigned int)x * bytes_per_px + 1];
+            unsigned char r = row[(unsigned int)x * bytes_per_px + 2];
+            img->pixels[(unsigned int)dst_row * (unsigned int)width + (unsigned int)x] = gfx_rgb(r, g, b);
+        }
+    }
+
+    img->width  = (unsigned int)width;
+    img->height = (unsigned int)height;
+    return 1;
+}
+
 /* Рисует img левым верхним углом в (x, y) - по одному gfx_putpixel() на
  * пиксель, см. коммент вверху файла про цену ecall'ов. */
 static void bmp_draw(const bmp_image_t *img, unsigned int x, unsigned int y) {

@@ -2,6 +2,7 @@
 #include "window.h"
 #include "dns.h"
 #include "tcp.h"
+#include "bmp.h"
 
 /* AxBrowser — a genuine from-scratch "reader mode" text browser,
  * RISC-V only (x86's GUI kernel has no network stack linked in at all,
@@ -19,11 +20,16 @@
  * not just flat plain text. Still deliberately NOT pretending to be
  * more: no HTTPS (no TLS stack exists anywhere in this codebase -
  * clicking an https:// link shows a clear error instead of
- * navigating), no CSS, no images, no tables, no JavaScript, no
- * history/back button, no real DOM (tag styling is a single active
- * span at a time, not a real nesting stack - see style_active's own
- * comment). Links ARE clickable: document-relative/host-absolute/
- * protocol-relative hrefs resolve against the current page, but
+ * navigating), no CSS, no tables, no JavaScript, no history/back
+ * button, no real DOM (tag styling is a single active span at a time,
+ * not a real nesting stack - see style_active's own comment).
+ * `<img>` support is BMP-only (see bmp.h's bmp_decode_mem()) - real
+ * web images are almost always JPEG/PNG, which this codebase has no
+ * decoder for at all (no DEFLATE/DCT - out of scope entirely, not a
+ * bug), so this only ever shows a real picture on pages that happen
+ * to link a `.bmp` file. Links ARE clickable: document-relative/
+ * host-absolute/protocol-relative hrefs resolve against the current
+ * page, but
  * there's no "../" collapsing (naive concatenation - honest partial
  * support, matches the entity-decoding below), and `#fragment`/
  * `mailto:`/`javascript:` hrefs render as plain non-clickable text
@@ -82,6 +88,23 @@ static int style_active = 0;
 static unsigned char style_kind = 0;
 static unsigned int style_start = 0;
 
+/* <img src="..."> support - BMP only (see bmp.h's bmp_decode_mem()
+ * and this file's own top-of-file comment on why). html_strip() only
+ * COLLECTS resolved image URLs into pending_img_urls[] and writes a
+ * 2-byte marker ('\x02' + the slot index, both safe control bytes -
+ * never produced by entity-decoding or raw body text, and distinct
+ * from the '\x01' hr marker) into content_buf; it does NOT fetch
+ * anything itself (parsing stays pure string processing). do_fetch()
+ * fetches+decodes each one into page_images[]/image_ok[] in a separate
+ * pass AFTER html_strip() returns. MAX_IMAGES=4 also caps how long a
+ * page load can take, since each image needs its own full DNS+TCP+
+ * HTTP round trip. */
+#define MAX_IMAGES 4
+static char pending_img_urls[MAX_IMAGES][176];
+static bmp_image_t page_images[MAX_IMAGES];
+static int image_ok[MAX_IMAGES];
+static int image_count = 0;
+
 /* Current page's host/port/path, promoted from do_fetch()'s locals so
  * html_strip() (called later in the same do_fetch()) can resolve
  * relative hrefs against them. */
@@ -122,11 +145,12 @@ static unsigned int parse_ip_literal(const char *host, int len) {
     return IP4(octs[0], octs[1], octs[2], octs[3]);
 }
 
-/* Parses addr_buf into host/port/path. Accepts an optional "http://"
- * prefix (case-insensitive), an optional ":port", and an optional
- * "/path..." - matches a plain browser address bar's usual shorthand. */
-static void parse_url(char *host, int host_max, int *port, char *path, int path_max) {
-    const char *p = addr_buf;
+/* Parses an arbitrary URL string (the caller decides the source -
+ * addr_buf for the page itself, a resolved <img src> for an inline
+ * image). Accepts an optional "http://" prefix (case-insensitive), an
+ * optional ":port", and an optional "/path..." - matches a plain
+ * browser address bar's usual shorthand. */
+static void parse_url_str(const char *p, char *host, int host_max, int *port, char *path, int path_max) {
     if ((p[0] == 'h' || p[0] == 'H') && (p[1] == 't' || p[1] == 'T') &&
         (p[2] == 't' || p[2] == 'T') && (p[3] == 'p' || p[3] == 'P') &&
         p[4] == ':' && p[5] == '/' && p[6] == '/') {
@@ -219,17 +243,19 @@ static void bcat_uint(char *dst, int dst_max, unsigned int v) {
     bcat_bounded(dst, dst_max, rev);
 }
 
-/* Scans a raw tag's bytes [tag, tag+tag_len) (e.g. `<a href="x">`) for
- * an href="..."/'...'/unquoted attribute value, decoding entities
- * inline via the existing decode_entity() (so href="a.html?x=1&amp;y=2"
- * decodes the &amp; correctly - same function already used for body
- * text, pure reuse). Returns 1 if a non-empty value was captured. */
-static int extract_href(const unsigned char *tag, unsigned int tag_len, char *out, int out_max) {
+/* Scans a raw tag's bytes [tag, tag+tag_len) (e.g. `<a href="x">` or
+ * `<img src="y">`) for an attr_name="..."/'...'/unquoted attribute
+ * value, decoding entities inline via the existing decode_entity() (so
+ * href="a.html?x=1&amp;y=2" decodes the &amp; correctly - same function
+ * already used for body text, pure reuse). Returns 1 if a non-empty
+ * value was captured. */
+static int extract_attr(const unsigned char *tag, unsigned int tag_len, const char *attr_name, char *out, int out_max) {
+    int an = slen_i(attr_name);
     unsigned int i = 0;
     while (i < tag_len) {
-        if (ci_starts_with(tag + i, tag_len - i, "href") &&
+        if (ci_starts_with(tag + i, tag_len - i, attr_name) &&
             (i == 0 || is_ws(tag[i - 1]))) {
-            unsigned int j = i + 4;
+            unsigned int j = i + (unsigned int)an;
             while (j < tag_len && is_ws(tag[j])) j++;
             if (j < tag_len && tag[j] == '=') {
                 j++;
@@ -252,6 +278,10 @@ static int extract_href(const unsigned char *tag, unsigned int tag_len, char *ou
         i++;
     }
     return 0;
+}
+
+static int extract_href(const unsigned char *tag, unsigned int tag_len, char *out, int out_max) {
+    return extract_attr(tag, tag_len, "href", out, out_max);
 }
 
 /* Resolves a raw href value against the current page (g_host/g_port/
@@ -424,6 +454,7 @@ static void html_strip(const unsigned char *body, unsigned int body_len) {
     pending_link_active = 0;
     style_count = 0;
     style_active = 0;
+    image_count = 0;
     unsigned int i = 0;
     while (i < body_len && content_len < CONTENT_BUF_SIZE - 1) {
         unsigned char c = body[i];
@@ -448,6 +479,10 @@ static void html_strip(const unsigned char *body, unsigned int body_len) {
             int is_open_a = ci_starts_with(body + i, body_len - i, "<a") &&
                             (body_len - i <= 2 || is_ws(body[i + 2]) || body[i + 2] == '>');
             int is_close_a = ci_starts_with(body + i, body_len - i, "</a>");
+            /* "<img" - same word-boundary check as "<a" above (so it
+             * doesn't also match a hypothetical "<imgur>" or similar). */
+            int is_img = ci_starts_with(body + i, body_len - i, "<img") &&
+                         (body_len - i <= 4 || is_ws(body[i + 4]) || body[i + 4] == '>' || body[i + 4] == '/');
 
             if (is_close_a && pending_link_active) {
                 /* Closes the pending link's range at exactly content_len
@@ -474,19 +509,47 @@ static void html_strip(const unsigned char *body, unsigned int body_len) {
                 }
             }
 
+            /* <img src="..."> - queues the resolved URL for do_fetch()
+             * to fetch AFTER this whole parse finishes (see
+             * pending_img_urls[]'s own comment); writes a 2-byte
+             * marker into content_buf so render_browser() knows where
+             * to draw it once fetched. Isolated onto its own blank-
+             * line-separated "paragraph", same block treatment as
+             * <hr>/<p>. */
+            if (is_img && image_count < MAX_IMAGES) {
+                unsigned int tag_end = tag_start;
+                while (tag_end < body_len && body[tag_end] != '>') tag_end++;
+                char src_buf[160];
+                if (extract_attr(body + tag_start, tag_end - tag_start, "src", src_buf, (int)sizeof(src_buf))) {
+                    char resolved[176];
+                    resolve_href(src_buf, resolved, (int)sizeof(resolved));
+                    if (resolved[0]) {
+                        bcopy_bounded(pending_img_urls[image_count], (int)sizeof(pending_img_urls[image_count]), resolved);
+                        ensure_blank_line();
+                        if (content_len + 2 < CONTENT_BUF_SIZE) {
+                            content_buf[content_len++] = '\x02';
+                            content_buf[content_len++] = (char)image_count;
+                        }
+                        ensure_blank_line();
+                        image_count++;
+                    }
+                }
+            }
+
             int tag_close = 0;
             int kind = T_NONE;
-            if (!is_open_a && !is_close_a) kind = classify_tag(body, tag_start, body_len, &tag_close);
+            if (!is_open_a && !is_close_a && !is_img) kind = classify_tag(body, tag_start, body_len, &tag_close);
 
             while (i < body_len && body[i] != '>') i++;
             if (i < body_len) i++;
 
             /* <a>/</a> are inline (no break at all - handled by the
-             * separate open/close-a logic above/below). Everything
-             * else dispatches by category; T_NONE (unrecognized tags)
-             * falls back to the single-newline behavior this file
-             * always had. */
-            if (!is_open_a && !is_close_a) {
+             * separate open/close-a logic above/below); <img> is
+             * handled entirely by its own block above. Everything else
+             * dispatches by category; T_NONE (unrecognized tags) falls
+             * back to the single-newline behavior this file always
+             * had. */
+            if (!is_open_a && !is_close_a && !is_img) {
                 switch (kind) {
                     case T_HEADING:
                         if (!tag_close) { ensure_blank_line(); style_open(STYLE_HEADING); }
@@ -554,12 +617,89 @@ static void set_status(const char *s) {
     content_len = 0;
 }
 
+#define HTTP_OK            0
+#define HTTP_ERR_NO_NET    1
+#define HTTP_ERR_DNS       2
+#define HTTP_ERR_CONNECT   3
+#define HTTP_ERR_SEND      4
+#define HTTP_ERR_EMPTY     5
+#define HTTP_ERR_NO_BODY   6
+
+/* One blocking HTTP/1.0 GET for `path` on `host`:`port`, collecting the
+ * full response into raw_buf. On HTTP_OK, *out_body_start/*out_total
+ * mark where the body starts (right after the blank line ending the
+ * headers) and the total bytes fetched. Shared by do_fetch() (the page
+ * itself) and the inline-image fetch loop below - both need the exact
+ * same DNS/connect/send/recv/header-skip dance, just for a different
+ * host/port/path each time. Returns a specific HTTP_ERR_* so callers
+ * that show it to the user (do_fetch()) can keep the same precise
+ * status messages this file always had; the image loop just checks
+ * for HTTP_OK/not. */
+static int http_get(const char *host, int port, const char *path,
+                    unsigned int *out_body_start, unsigned int *out_total) {
+    unsigned char mac[6];
+    if (!net_mac(mac)) return HTTP_ERR_NO_NET;
+
+    unsigned int ip;
+    int hlen = slen_i(host);
+    if (is_ip_literal(host, hlen)) {
+        ip = parse_ip_literal(host, hlen);
+    } else if (!dns_resolve_a(host, IP4(10, 0, 2, 3), 3000, &ip)) {
+        return HTTP_ERR_DNS;
+    }
+
+    static tcp_conn_t conn;
+    if (!tcp_connect(&conn, ip, (unsigned short)port, 3000)) return HTTP_ERR_CONNECT;
+
+    char req[256]; int rn = 0;
+    const char *p1 = "GET "; while (*p1 && rn < 255) req[rn++] = *p1++;
+    for (int i = 0; path[i] && rn < 255; i++) req[rn++] = path[i];
+    const char *p2 = " HTTP/1.0\r\nHost: ";
+    while (*p2 && rn < 255) req[rn++] = *p2++;
+    for (int i = 0; host[i] && rn < 255; i++) req[rn++] = host[i];
+    const char *p3 = "\r\nConnection: close\r\n\r\n";
+    while (*p3 && rn < 255) req[rn++] = *p3++;
+
+    if (tcp_send(&conn, req, (unsigned int)rn) != 0) {
+        tcp_close(&conn);
+        return HTTP_ERR_SEND;
+    }
+
+    unsigned int total = 0;
+    for (;;) {
+        int n = tcp_recv(&conn, raw_buf + total, RAW_BUF_SIZE - total - 1, 5000);
+        if (n > 0) {
+            total += (unsigned int)n;
+            if (total >= RAW_BUF_SIZE - 1) break;
+        } else {
+            break;   /* n==0 idle timeout, n<0 peer closed - either way, done */
+        }
+    }
+    tcp_close(&conn);
+    raw_buf[total] = '\0';
+    if (total == 0) return HTTP_ERR_EMPTY;
+
+    /* Body starts right after the blank line ending the headers. */
+    unsigned int body_start = total;
+    for (unsigned int i = 0; i + 3 < total; i++) {
+        if (raw_buf[i] == '\r' && raw_buf[i+1] == '\n' && raw_buf[i+2] == '\r' && raw_buf[i+3] == '\n') {
+            body_start = i + 4;
+            break;
+        }
+    }
+    if (body_start >= total) return HTTP_ERR_NO_BODY;
+
+    *out_body_start = body_start;
+    *out_total = total;
+    return HTTP_OK;
+}
+
 static void do_fetch(window_t *win) {
     if (addr_len == 0) return;
 
     /* No TLS stack anywhere in this codebase - catch this BEFORE
-     * parse_url() mangles the "https://" prefix into garbage hostname
-     * text (parse_url() only strips a literal 7-char "http://", so an
+     * parse_url_str() mangles the "https://" prefix into garbage
+     * hostname text (it only strips a literal 7-char "http://", so an
      * 8-char "https://" URL would otherwise fall through as if the
      * whole scheme were part of the host). Clickable links make this
      * far more likely to actually happen than it was when the address
@@ -578,72 +718,43 @@ static void do_fetch(window_t *win) {
     gfx_flush();
 
     char host[64]; int port; char path[160];
-    parse_url(host, sizeof(host), &port, path, sizeof(path));
+    parse_url_str(addr_buf, host, sizeof(host), &port, path, sizeof(path));
     bcopy_bounded(g_host, (int)sizeof(g_host), host);
     g_port = port;
     bcopy_bounded(g_path, (int)sizeof(g_path), path);
 
-    unsigned char mac[6];
-    if (!net_mac(mac)) { set_status("No network device found"); return; }
-
-    unsigned int ip;
-    int hlen = slen_i(host);
-    if (is_ip_literal(host, hlen)) {
-        ip = parse_ip_literal(host, hlen);
-    } else {
-        if (!dns_resolve_a(host, IP4(10, 0, 2, 3), 3000, &ip)) {
-            set_status("DNS resolve failed");
-            return;
+    unsigned int body_start, total;
+    int err = http_get(host, port, path, &body_start, &total);
+    if (err != HTTP_OK) {
+        switch (err) {
+            case HTTP_ERR_NO_NET:  set_status("No network device found"); break;
+            case HTTP_ERR_DNS:     set_status("DNS resolve failed"); break;
+            case HTTP_ERR_CONNECT: set_status("Connection failed"); break;
+            case HTTP_ERR_SEND:    set_status("Request send failed"); break;
+            case HTTP_ERR_EMPTY:   set_status("Empty response"); break;
+            default:               set_status("No response body"); break;
         }
-    }
-
-    static tcp_conn_t conn;
-    if (!tcp_connect(&conn, ip, (unsigned short)port, 3000)) {
-        set_status("Connection failed");
         return;
     }
-
-    char req[256]; int rn = 0;
-    const char *p1 = "GET "; while (*p1 && rn < 255) req[rn++] = *p1++;
-    for (int i = 0; path[i] && rn < 255; i++) req[rn++] = path[i];
-    const char *p2 = " HTTP/1.0\r\nHost: ";
-    while (*p2 && rn < 255) req[rn++] = *p2++;
-    for (int i = 0; host[i] && rn < 255; i++) req[rn++] = host[i];
-    const char *p3 = "\r\nConnection: close\r\n\r\n";
-    while (*p3 && rn < 255) req[rn++] = *p3++;
-
-    if (tcp_send(&conn, req, (unsigned int)rn) != 0) {
-        tcp_close(&conn);
-        set_status("Request send failed");
-        return;
-    }
-
-    unsigned int total = 0;
-    for (;;) {
-        int n = tcp_recv(&conn, raw_buf + total, RAW_BUF_SIZE - total - 1, 5000);
-        if (n > 0) {
-            total += (unsigned int)n;
-            if (total >= RAW_BUF_SIZE - 1) break;
-        } else {
-            break;   /* n==0 idle timeout, n<0 peer closed - either way, done */
-        }
-    }
-    tcp_close(&conn);
-    raw_buf[total] = '\0';
-
-    if (total == 0) { set_status("Empty response"); return; }
-
-    /* Body starts right after the blank line ending the headers. */
-    unsigned int body_start = total;
-    for (unsigned int i = 0; i + 3 < total; i++) {
-        if (raw_buf[i] == '\r' && raw_buf[i+1] == '\n' && raw_buf[i+2] == '\r' && raw_buf[i+3] == '\n') {
-            body_start = i + 4;
-            break;
-        }
-    }
-    if (body_start >= total) { set_status("No response body"); return; }
 
     html_strip(raw_buf + body_start, total - body_start);
+
+    /* One more blocking fetch per <img> found (see html_strip()'s
+     * pending_img_urls[]) - deliberately sequential and AFTER the page
+     * itself is fully parsed, reusing the same raw_buf/http_get() as
+     * the page fetch (its content is no longer needed once html_strip()
+     * has consumed it into content_buf/links[]/styles[]). A failed
+     * fetch or a non-BMP/oversized image just leaves image_ok[k]==0 -
+     * render_browser() skips drawing that slot, doesn't error the
+     * whole page. */
+    for (int k = 0; k < image_count; k++) {
+        char ihost[64]; int iport; char ipath[160];
+        parse_url_str(pending_img_urls[k], ihost, sizeof(ihost), &iport, ipath, sizeof(ipath));
+        unsigned int ibody, itotal;
+        image_ok[k] = (http_get(ihost, iport, ipath, &ibody, &itotal) == HTTP_OK) &&
+                      bmp_decode_mem(raw_buf + ibody, itotal - ibody, &page_images[k]);
+    }
+
     scroll_offset = 0;
     status_msg[0] = '\0';
 }
@@ -736,17 +847,48 @@ static void draw_styled_row(unsigned int x, unsigned int y, const char *text, in
     }
 }
 
-/* Draws one already-wrapped row: a horizontal rule if it's exactly the
- * <hr> sentinel byte (see html_strip()'s T_HR case), otherwise a
- * normal styled text row. Shared by both draw sites in the wrap loop
- * below so the "\x01 means hr" special case only needs to live once. */
+/* How many ROW_H-tall line-units this already-wrapped row occupies:
+ * always 1, except a valid decoded <img> marker (see html_strip()'s
+ * '\x02' case), which needs ceil(image height / ROW_H). A failed/
+ * undecoded image (image_ok[slot]==0 - fetch failed, wrong format,
+ * bigger than BMP_MAX_W/H) collapses to a single blank row rather than
+ * some indeterminate size - render_browser() just won't draw anything
+ * there. Called BEFORE knowing whether this row actually fits in the
+ * remaining visible viewport, so it must not touch drawing state. */
+static int content_row_height(const char *linebuf, int col) {
+    if (col == 2 && linebuf[0] == '\x02') {
+        int slot = (int)(unsigned char)linebuf[1];
+        if (slot >= 0 && slot < MAX_IMAGES && image_ok[slot]) {
+            int h = (int)((page_images[slot].height + ROW_H - 1) / ROW_H);
+            return h > 0 ? h : 1;
+        }
+    }
+    return 1;
+}
+
+/* Draws one already-wrapped row: a horizontal rule for the <hr>
+ * sentinel byte (html_strip()'s T_HR case), a decoded image for the
+ * <img> marker pair (html_strip()'s is_img case - per-pixel
+ * gfx_putpixel() loop, same cost/reasoning as bmp.h's own bmp_draw()),
+ * or a normal styled text row otherwise. Shared by both draw sites in
+ * the wrap loop below so these special cases only need to live once. */
 static void draw_content_row(const window_t *win, const char *linebuf, int col,
                              unsigned int y, unsigned int row_start) {
     if (col == 1 && linebuf[0] == '\x01') {
         gfx_fill_rect(win->x + PAD, y + ROW_H / 2, win->w - 2 * PAD, 1, gfx_rgb(120, 120, 120));
-    } else {
-        draw_styled_row(win->x + PAD, y, linebuf, col, row_start);
+        return;
     }
+    if (col == 2 && linebuf[0] == '\x02') {
+        int slot = (int)(unsigned char)linebuf[1];
+        if (slot >= 0 && slot < MAX_IMAGES && image_ok[slot]) {
+            const bmp_image_t *img = &page_images[slot];
+            for (unsigned int dy = 0; dy < img->height; dy++)
+                for (unsigned int dx = 0; dx < img->width; dx++)
+                    gfx_putpixel(win->x + PAD + dx, y + dy, img->pixels[dy * img->width + dx]);
+        }
+        return;
+    }
+    draw_styled_row(win->x + PAD, y, linebuf, col, row_start);
 }
 
 static void render_browser(const window_t *win) {
@@ -780,22 +922,38 @@ static void render_browser(const window_t *win) {
 
         if (is_wrap) {
             linebuf[col] = '\0';
-            if (line >= scroll_offset && drawn < visible_rows) {
+            if (line >= scroll_offset) {
                 unsigned int row_start = i - (unsigned int)col;
-                draw_content_row(win, linebuf, col, text_y0 + (unsigned int)drawn * ROW_H, row_start);
-                if (drawn < MAX_VISIBLE_ROWS) { row_start_idx[drawn] = (int)row_start; row_count = drawn + 1; }
-                drawn++;
+                int row_h = content_row_height(linebuf, col);
+                /* Only actually draws if the WHOLE row (1 line-unit for
+                 * text/hr, several for a tall image) fits in what's left
+                 * of the viewport - avoids partial-image-clipping math;
+                 * see this file's own comment on content_row_height(). */
+                if (drawn + row_h <= visible_rows)
+                    draw_content_row(win, linebuf, col, text_y0 + (unsigned int)drawn * ROW_H, row_start);
+                for (int rr = 0; rr < row_h && drawn + rr < visible_rows && drawn + rr < MAX_VISIBLE_ROWS; rr++)
+                    row_start_idx[drawn + rr] = (int)row_start;
+                int filled = row_h;
+                if (drawn + filled > visible_rows) filled = visible_rows - drawn;
+                if (filled > 0 && drawn + filled > row_count) row_count = drawn + filled;
+                drawn += row_h;
             }
             line++; col = 0;
             continue;
         }
         if (is_newline || is_end) {
             linebuf[col] = '\0';
-            if (col > 0 && line >= scroll_offset && drawn < visible_rows) {
+            if (col > 0 && line >= scroll_offset) {
                 unsigned int row_start = i - (unsigned int)col;
-                draw_content_row(win, linebuf, col, text_y0 + (unsigned int)drawn * ROW_H, row_start);
-                if (drawn < MAX_VISIBLE_ROWS) { row_start_idx[drawn] = (int)row_start; row_count = drawn + 1; }
-                drawn++;
+                int row_h = content_row_height(linebuf, col);
+                if (drawn + row_h <= visible_rows)
+                    draw_content_row(win, linebuf, col, text_y0 + (unsigned int)drawn * ROW_H, row_start);
+                for (int rr = 0; rr < row_h && drawn + rr < visible_rows && drawn + rr < MAX_VISIBLE_ROWS; rr++)
+                    row_start_idx[drawn + rr] = (int)row_start;
+                int filled = row_h;
+                if (drawn + filled > visible_rows) filled = visible_rows - drawn;
+                if (filled > 0 && drawn + filled > row_count) row_count = drawn + filled;
+                drawn += row_h;
             }
             line++; col = 0; i++;
             if (is_end) break;
