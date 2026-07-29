@@ -1,0 +1,182 @@
+// Pure combinational instruction decode: opcode/funct3/funct7 (bits
+// 6:0, 14:12, 31:25 of the instruction) -> every control signal the
+// rest of the single-cycle datapath needs. No state, no memory - this
+// module IS the decode stage.
+`timescale 1ns/1ps
+
+module control_unit (
+    input  wire [6:0] opcode,
+    input  wire [2:0] funct3,
+    input  wire [6:0] funct7,
+
+    output reg        reg_write,   // write ALU/mem/pc+4 result back to rd
+    output reg        mem_read,    // this is a load
+    output reg        mem_write,   // this is a store
+    output reg        mem_to_reg,  // rd <= memory data, not ALU result
+    output reg        alu_src,     // ALU's B input is the immediate, not rs2
+    output reg        branch,      // this is a conditional branch
+    output reg        jump,        // this is JAL (unconditional, PC-relative)
+    output reg        jalr,        // this is JALR (unconditional, register-relative)
+    output reg        auipc,       // ALU's A input is PC, not rs1
+    output reg        lui,         // ALU's A input is 0, not rs1 - LUI's instr[19:15] bits are
+                                    // part of its immediate, NOT a real rs1 field (U-type has no
+                                    // rs1 at all); feeding them to the regfile as rs1_addr and
+                                    // adding whatever garbage register that reads as would corrupt
+                                    // every LUI result - caught while wiring up cpu_core.v, before
+                                    // it ever ran, by re-checking U-type's actual bit layout.
+    output reg [3:0]  alu_op,
+    output reg [1:0]  mem_size,    // 00=byte 01=half 10=word
+    output reg        mem_unsigned,// zero-extend (LBU/LHU) instead of sign-extend
+    output reg        illegal      // opcode not recognized - see cpu_core.v's own handling
+);
+    localparam OP_LOAD   = 7'b0000011;
+    localparam OP_IMM    = 7'b0010011;
+    localparam OP_JALR   = 7'b1100111;
+    localparam OP_STORE  = 7'b0100011;
+    localparam OP_BRANCH = 7'b1100011;
+    localparam OP_LUI    = 7'b0110111;
+    localparam OP_AUIPC  = 7'b0010111;
+    localparam OP_JAL    = 7'b1101111;
+    localparam OP_REG    = 7'b0110011;
+    localparam OP_FENCE  = 7'b0001111;
+    localparam OP_SYSTEM = 7'b1110011;
+
+    // ALU op encoding shared with alu.v.
+    localparam ALU_ADD  = 4'b0000;
+    localparam ALU_SUB  = 4'b0001;
+    localparam ALU_SLL  = 4'b0010;
+    localparam ALU_SLT  = 4'b0011;
+    localparam ALU_SLTU = 4'b0100;
+    localparam ALU_XOR  = 4'b0101;
+    localparam ALU_SRL  = 4'b0110;
+    localparam ALU_SRA  = 4'b0111;
+    localparam ALU_OR   = 4'b1000;
+    localparam ALU_AND  = 4'b1001;
+
+    // funct3-driven ALU selection shared by OP_IMM and OP_REG - the
+    // only difference between them is whether SUB/SRA are possible
+    // (only OP_REG's SUB/ADD share funct3=000 and need funct7 bit 30
+    // to disambiguate; OP_IMM's funct3=000 is always ADDI).
+    function [3:0] alu_op_for_funct3;
+        input [2:0] f3;
+        input       is_sub_or_sra; // funct7[5] (bit 30 of instr) when opcode==OP_REG, or SRAI's funct7 bit for OP_IMM
+        begin
+            case (f3)
+                3'b000:  alu_op_for_funct3 = is_sub_or_sra ? ALU_SUB : ALU_ADD;
+                3'b001:  alu_op_for_funct3 = ALU_SLL;
+                3'b010:  alu_op_for_funct3 = ALU_SLT;
+                3'b011:  alu_op_for_funct3 = ALU_SLTU;
+                3'b100:  alu_op_for_funct3 = ALU_XOR;
+                3'b101:  alu_op_for_funct3 = is_sub_or_sra ? ALU_SRA : ALU_SRL;
+                3'b110:  alu_op_for_funct3 = ALU_OR;
+                3'b111:  alu_op_for_funct3 = ALU_AND;
+                default: alu_op_for_funct3 = ALU_ADD;
+            endcase
+        end
+    endfunction
+
+    always @(*) begin
+        // Defaults - every non-taken path below starts here, so each
+        // case only needs to set what actually differs.
+        reg_write    = 1'b0;
+        mem_read     = 1'b0;
+        mem_write    = 1'b0;
+        mem_to_reg   = 1'b0;
+        alu_src      = 1'b0;
+        branch       = 1'b0;
+        jump         = 1'b0;
+        jalr         = 1'b0;
+        auipc        = 1'b0;
+        lui          = 1'b0;
+        alu_op       = ALU_ADD;
+        mem_size     = 2'b10;
+        mem_unsigned = 1'b0;
+        illegal      = 1'b0;
+
+        case (opcode)
+            OP_REG: begin
+                reg_write = 1'b1;
+                alu_op    = alu_op_for_funct3(funct3, funct7[5]);
+            end
+
+            OP_IMM: begin
+                reg_write = 1'b1;
+                alu_src   = 1'b1;
+                // SRAI is the only OP_IMM case where funct7 matters
+                // (SLLI/SRLI/SRAI's shift amount lives in imm[4:0];
+                // imm[11:5] doubles as funct7 for exactly this reason).
+                alu_op    = alu_op_for_funct3(funct3, (funct3 == 3'b101) && funct7[5]);
+            end
+
+            OP_LOAD: begin
+                reg_write  = 1'b1;
+                mem_read   = 1'b1;
+                mem_to_reg = 1'b1;
+                alu_src    = 1'b1;      // address = rs1 + imm
+                alu_op     = ALU_ADD;
+                mem_size   = (funct3[1:0] == 2'b00) ? 2'b00 :
+                             (funct3[1:0] == 2'b01) ? 2'b01 : 2'b10;
+                mem_unsigned = funct3[2];  // LBU/LHU have funct3[2]=1
+            end
+
+            OP_STORE: begin
+                mem_write = 1'b1;
+                alu_src   = 1'b1;       // address = rs1 + imm
+                alu_op    = ALU_ADD;
+                mem_size  = (funct3 == 3'b000) ? 2'b00 :
+                            (funct3 == 3'b001) ? 2'b01 : 2'b10;
+            end
+
+            OP_BRANCH: begin
+                branch = 1'b1;
+                // funct3 selects the comparison the same way alu_op
+                // does for SLT/SLTU - cpu_core.v derives the branch
+                // decision from a compare, not directly from alu_op,
+                // so this just needs SUB-style equality/relational
+                // info; see cpu_core.v for exactly how funct3 is used.
+            end
+
+            OP_LUI: begin
+                reg_write = 1'b1;
+                alu_src   = 1'b1;
+                lui       = 1'b1;
+                alu_op    = ALU_ADD;   // rd = 0 + imm (imm already shifted by imm_gen)
+            end
+
+            OP_AUIPC: begin
+                reg_write = 1'b1;
+                alu_src   = 1'b1;
+                auipc     = 1'b1;      // rd = PC + imm
+                alu_op    = ALU_ADD;
+            end
+
+            OP_JAL: begin
+                reg_write = 1'b1;
+                jump      = 1'b1;
+            end
+
+            OP_JALR: begin
+                reg_write = 1'b1;
+                jalr      = 1'b1;
+                alu_src   = 1'b1;
+                alu_op    = ALU_ADD;   // target = rs1 + imm (LSB cleared in cpu_core.v)
+            end
+
+            OP_FENCE: begin
+                // No-op: single-hart, non-pipelined, no cache - there
+                // is nothing for FENCE to actually order.
+            end
+
+            OP_SYSTEM: begin
+                // ECALL/EBREAK - repurposed as the testbench tohost
+                // convention (see cpu_core.v/tb_cpu.v), not real trap
+                // handling. No datapath signals needed here; cpu_core.v
+                // watches (opcode==OP_SYSTEM) directly to latch a0.
+            end
+
+            default: begin
+                illegal = 1'b1;
+            end
+        endcase
+    end
+endmodule
