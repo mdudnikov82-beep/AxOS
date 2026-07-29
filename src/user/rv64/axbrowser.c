@@ -5,22 +5,29 @@
 
 /* AxBrowser — a genuine from-scratch "reader mode" text browser,
  * RISC-V only (x86's GUI kernel has no network stack linked in at all,
- * same gap as AxChat/AxTaskMgr). Real WebKit is not possible on AxOS at
- * all (millions of lines of C++ needing POSIX/threads/virtual memory/a
- * JS JIT/dozens of external libraries - this OS is plain C with no
- * standard library) - this is the honest alternative: fetches a page
- * over plain HTTP (reusing the exact dns_resolve_a/tcp_connect/
- * tcp_send/tcp_recv flow already proven in httpget.c), strips HTML
- * tags down to plain readable text, and shows it in a scrollable
- * window. Deliberately NOT pretending to be more: no HTTPS (no TLS
- * stack exists anywhere in this codebase - clicking an https:// link
- * shows a clear error instead of navigating), no CSS/layout, no
- * images, no JavaScript, no history/back button. Links ARE clickable:
- * document-relative/host-absolute/protocol-relative hrefs resolve
- * against the current page, but there's no "../" collapsing (naive
- * concatenation - honest partial support, matches the entity-decoding
- * below), and `#fragment`/`mailto:`/`javascript:` hrefs render as
- * plain non-clickable text rather than mis-navigating. */
+ * same gap as AxChat/AxTaskMgr). Real Blink/WebKit is not possible on
+ * AxOS at all (~30M lines of C++ needing POSIX/threads/dynamic
+ * linking/a JS JIT/GPU/dozens of external libraries - this OS is
+ * plain C with no standard library, single-core, freestanding) - this
+ * is the honest alternative, grown incrementally instead of imported:
+ * fetches a page over plain HTTP (reusing the exact dns_resolve_a/
+ * tcp_connect/tcp_send/tcp_recv flow already proven in httpget.c) and
+ * renders SOME real block structure - headings, paragraph spacing,
+ * list items, bold/italic emphasis, horizontal rules, and inline
+ * links/emphasis that flow within a paragraph's wrapped text (see
+ * html_strip()'s tag-category dispatch and draw_styled_row() below) -
+ * not just flat plain text. Still deliberately NOT pretending to be
+ * more: no HTTPS (no TLS stack exists anywhere in this codebase -
+ * clicking an https:// link shows a clear error instead of
+ * navigating), no CSS, no images, no tables, no JavaScript, no
+ * history/back button, no real DOM (tag styling is a single active
+ * span at a time, not a real nesting stack - see style_active's own
+ * comment). Links ARE clickable: document-relative/host-absolute/
+ * protocol-relative hrefs resolve against the current page, but
+ * there's no "../" collapsing (naive concatenation - honest partial
+ * support, matches the entity-decoding below), and `#fragment`/
+ * `mailto:`/`javascript:` hrefs render as plain non-clickable text
+ * rather than mis-navigating. */
 
 #define ROW_H 16
 #define PAD 10
@@ -51,6 +58,29 @@ static int link_count = 0;
 static int pending_link_active = 0;
 static unsigned int pending_link_start = 0;
 static char pending_url[160];
+
+/* Same byte-range-annotation technique as links[] above, for
+ * <b>/<strong>/<em>/<i>/<h1>-<h6> emphasis - see draw_styled_row().
+ * Only ONE span can be active at a time (style_active/style_kind/
+ * style_start below), not a real nesting stack: opening a style tag
+ * while one is already active, or closing one while a DIFFERENT kind
+ * is active, is a no-op. This mirrors pending_link_active's own
+ * existing simplicity and this file's established "honest partial
+ * support" philosophy (see the entity table / no "../" collapsing) -
+ * nested emphasis in real pages is rare enough that getting it
+ * partially wrong (inner span just doesn't get its own styling) beats
+ * the complexity of a real stack for what's still just a reader mode. */
+#define STYLE_BOLD    1
+#define STYLE_EM      2
+#define STYLE_HEADING 3
+#define MAX_STYLES 64
+struct style_ent { unsigned int start; unsigned int len; unsigned char kind; };
+static struct style_ent styles[MAX_STYLES];
+static int style_count = 0;
+
+static int style_active = 0;
+static unsigned char style_kind = 0;
+static unsigned int style_start = 0;
 
 /* Current page's host/port/path, promoted from do_fetch()'s locals so
  * html_strip() (called later in the same do_fetch()) can resolve
@@ -285,19 +315,115 @@ static void resolve_href(const char *href, char *out, int out_max) {
     bcat_bounded(out, out_max, stripped);
 }
 
+/* True if body[i] (which points at '<') is exactly the tag `name`
+ * (case-insensitive), open or close per `close`, followed by a real
+ * word boundary ('>', '/', or whitespace) - not just a prefix match,
+ * so e.g. "b" doesn't also match "<blockquote>". Mirrors the boundary
+ * check already used for "<a" above, generalized to any tag name. */
+static int tag_name_is(const unsigned char *body, unsigned int i, unsigned int body_len,
+                       const char *name, int close) {
+    unsigned int j = i + 1;
+    if (close) {
+        if (j >= body_len || body[j] != '/') return 0;
+        j++;
+    }
+    int n = slen_i(name);
+    if (!ci_starts_with(body + j, body_len - j, name)) return 0;
+    unsigned int after = j + (unsigned int)n;
+    if (after >= body_len) return 0;
+    unsigned char c = body[after];
+    return c == '>' || c == '/' || is_ws(c);
+}
+
+#define T_NONE    0   /* not specially recognized - default single newline */
+#define T_HEADING 1   /* h1-h6 */
+#define T_BOLD    2   /* b, strong */
+#define T_EM      3   /* em, i */
+#define T_LI      4   /* li */
+#define T_BLOCK   5   /* p, div, blockquote */
+#define T_BR      6
+#define T_HR      7
+#define T_SPAN    8   /* inline, no break at all */
+
+/* Classifies a non-<a> tag at body[i] (which must point at '<').
+ * Sets *out_close. Word-boundary-checked via tag_name_is() above, so
+ * checking order doesn't matter - "b" can never accidentally match
+ * "blockquote" etc. */
+static int classify_tag(const unsigned char *body, unsigned int i, unsigned int body_len, int *out_close) {
+    int close = (i + 1 < body_len && body[i + 1] == '/');
+    *out_close = close;
+    static const char *const headings[6] = { "h1", "h2", "h3", "h4", "h5", "h6" };
+    for (int k = 0; k < 6; k++)
+        if (tag_name_is(body, i, body_len, headings[k], close)) return T_HEADING;
+    if (tag_name_is(body, i, body_len, "b", close) || tag_name_is(body, i, body_len, "strong", close)) return T_BOLD;
+    if (tag_name_is(body, i, body_len, "em", close) || tag_name_is(body, i, body_len, "i", close)) return T_EM;
+    if (tag_name_is(body, i, body_len, "li", close)) return T_LI;
+    if (tag_name_is(body, i, body_len, "p", close) || tag_name_is(body, i, body_len, "div", close) ||
+        tag_name_is(body, i, body_len, "blockquote", close)) return T_BLOCK;
+    if (tag_name_is(body, i, body_len, "br", close)) return T_BR;
+    if (tag_name_is(body, i, body_len, "hr", close)) return T_HR;
+    if (tag_name_is(body, i, body_len, "span", close)) return T_SPAN;
+    return T_NONE;
+}
+
+/* Ensures content_buf ends with a newline (adds one if the last byte
+ * isn't already '\n', or the buffer is still empty - matches the
+ * unconditional check this file used everywhere before this feature). */
+static void ensure_newline(void) {
+    if (content_len < CONTENT_BUF_SIZE - 1 &&
+        (content_len == 0 || content_buf[content_len - 1] != '\n'))
+        content_buf[content_len++] = '\n';
+}
+
+/* Ensures a full BLANK line (two consecutive newlines) - real
+ * paragraph separation for block-level tags, instead of every block
+ * just running into the next on its own line. Idempotent: calling it
+ * repeatedly (e.g. </p><div>) never accumulates more than one blank
+ * line. */
+static void ensure_blank_line(void) {
+    ensure_newline();
+    if (content_len < CONTENT_BUF_SIZE - 1 &&
+        (content_len < 2 || content_buf[content_len - 2] != '\n'))
+        content_buf[content_len++] = '\n';
+}
+
+static void style_open(unsigned char kind) {
+    if (style_active) return;   /* nested style tag - no-op, see styles[]'s own comment */
+    style_active = 1;
+    style_kind = kind;
+    style_start = content_len;
+}
+
+static void style_close(unsigned char kind) {
+    if (!style_active || style_kind != kind) return;   /* mismatched/no-op close */
+    style_active = 0;
+    if (style_count < MAX_STYLES && content_len > style_start) {
+        styles[style_count].start = style_start;
+        styles[style_count].len   = content_len - style_start;
+        styles[style_count].kind  = kind;
+        style_count++;
+    }
+}
+
 /* Strips HTML tags down to plain text: TEXT / IN_TAG / SKIP_SCRIPT /
  * SKIP_STYLE. <script>/<style> CONTENTS are skipped entirely (not real
- * page text), every other tag is dropped but its surrounding text kept.
- * A handful of common entities are decoded (see decode_entity).
- * <a href=...>/</a> pairs are ALSO tracked into the links[] table (see
- * that table's own comment) - since every tag close already forces a
- * newline (below), an anchor's visible text is already isolated onto
- * its own contiguous content_buf run before this feature ever needed
- * to add anything to that mechanic. */
+ * page text). A handful of common entities are decoded (see
+ * decode_entity). <a href=...>/</a> pairs are tracked into the
+ * links[] table (see that table's own comment); <b>/<strong>/<em>/
+ * <i>/<h1>-<h6> into styles[] (see that table's own comment). Other
+ * tags are dispatched by category (classify_tag() above): blank-line
+ * block (p/div/li/blockquote/headings), single-line block (br),
+ * inline/no-break (a/b/strong/em/i/span - lets these flow within a
+ * paragraph's wrapped text instead of always being isolated on their
+ * own line), or the default single newline for anything else
+ * (unrecognized tags - preserves this file's original behavior for
+ * everything not explicitly special-cased above). */
 static void html_strip(const unsigned char *body, unsigned int body_len) {
     content_len = 0;
     link_count = 0;
     pending_link_active = 0;
+    style_count = 0;
+    style_active = 0;
     unsigned int i = 0;
     while (i < body_len && content_len < CONTENT_BUF_SIZE - 1) {
         unsigned char c = body[i];
@@ -324,9 +450,10 @@ static void html_strip(const unsigned char *body, unsigned int body_len) {
             int is_close_a = ci_starts_with(body + i, body_len - i, "</a>");
 
             if (is_close_a && pending_link_active) {
-                /* Close off the pending link BEFORE this tag's own
-                 * forced newline below, so trailing whitespace isn't
-                 * counted as part of the clickable range. */
+                /* Closes the pending link's range at exactly content_len
+                 * as of right now - <a> is inline (no break forced
+                 * anywhere near this), so this is the link's true end,
+                 * not an approximation. */
                 pending_link_active = 0;
                 if (link_count < MAX_LINKS && content_len > pending_link_start) {
                     links[link_count].start = pending_link_start;
@@ -347,16 +474,57 @@ static void html_strip(const unsigned char *body, unsigned int body_len) {
                 }
             }
 
+            int tag_close = 0;
+            int kind = T_NONE;
+            if (!is_open_a && !is_close_a) kind = classify_tag(body, tag_start, body_len, &tag_close);
+
             while (i < body_len && body[i] != '>') i++;
             if (i < body_len) i++;
-            /* A closed tag boundary is a reasonable place to force a
-             * line break in the output - keeps block-level elements
-             * (paragraphs, headings, list items) from all running
-             * together on one line. Cheap approximation, not real
-             * block/inline awareness. */
-            if (content_len < CONTENT_BUF_SIZE - 1 &&
-                (content_len == 0 || content_buf[content_len - 1] != '\n'))
-                content_buf[content_len++] = '\n';
+
+            /* <a>/</a> are inline (no break at all - handled by the
+             * separate open/close-a logic above/below). Everything
+             * else dispatches by category; T_NONE (unrecognized tags)
+             * falls back to the single-newline behavior this file
+             * always had. */
+            if (!is_open_a && !is_close_a) {
+                switch (kind) {
+                    case T_HEADING:
+                        if (!tag_close) { ensure_blank_line(); style_open(STYLE_HEADING); }
+                        else            { style_close(STYLE_HEADING); ensure_blank_line(); }
+                        break;
+                    case T_BOLD:
+                        if (!tag_close) style_open(STYLE_BOLD); else style_close(STYLE_BOLD);
+                        break;
+                    case T_EM:
+                        if (!tag_close) style_open(STYLE_EM); else style_close(STYLE_EM);
+                        break;
+                    case T_LI:
+                        ensure_blank_line();
+                        if (!tag_close && content_len + 2 < CONTENT_BUF_SIZE) {
+                            /* No bullet glyph in the 8x8 font's ASCII
+                             * 0x20-0x7F range - a plain "* " is the
+                             * honest substitute. */
+                            content_buf[content_len++] = '*';
+                            content_buf[content_len++] = ' ';
+                        }
+                        break;
+                    case T_BLOCK:
+                        ensure_blank_line();
+                        break;
+                    case T_BR:
+                        ensure_newline();
+                        break;
+                    case T_HR:
+                        if (content_len + 1 < CONTENT_BUF_SIZE) content_buf[content_len++] = '\x01';
+                        ensure_newline();
+                        break;
+                    case T_SPAN:
+                        break;   /* inline, no break */
+                    default:
+                        ensure_newline();
+                        break;
+                }
+            }
 
             if (is_open_a && have_href) {
                 char resolved[176];
@@ -505,6 +673,82 @@ static int find_link_at(unsigned int idx) {
     return -1;
 }
 
+/* Same lookup as find_link_at(), for styles[] - *out_kind is only
+ * meaningful when the return value is >= 0. */
+static int find_style_at(unsigned int idx, unsigned char *out_kind) {
+    for (int k = 0; k < style_count; k++)
+        if (idx >= styles[k].start && idx < styles[k].start + styles[k].len) {
+            *out_kind = styles[k].kind;
+            return k;
+        }
+    return -1;
+}
+
+/* Per-character color/weight: link color always wins over inherited
+ * emphasis (matches how a real browser's link color usually overrides
+ * surrounding bold/italic text). "bold" here means "draw twice, 1px
+ * offset" - the fixed 8x8@2x bitmap font has no real bold glyph or
+ * size variation, so this is an honest, cheap approximation, not
+ * actual bold. Italic gets a distinct tint instead, for the same
+ * reason (no way to slant a bitmap glyph). */
+static void char_style(unsigned int idx, unsigned int *color, int *bold) {
+    if (find_link_at(idx) >= 0) { *color = gfx_rgb(120, 170, 255); *bold = 0; return; }
+    unsigned char kind;
+    int k = find_style_at(idx, &kind);
+    if (k >= 0 && kind == STYLE_HEADING) { *color = gfx_rgb(255, 255, 255); *bold = 1; return; }
+    if (k >= 0 && kind == STYLE_BOLD)    { *color = gfx_rgb(200, 200, 200); *bold = 1; return; }
+    if (k >= 0 && kind == STYLE_EM)      { *color = gfx_rgb(255, 220, 120); *bold = 0; return; }
+    *color = gfx_rgb(200, 200, 200); *bold = 0;
+}
+
+/* Draws one already-wrapped row in per-character-styled runs instead
+ * of a single gfx_draw_text() call - needed because inline tags
+ * (<a>/<b>/<em>/...) no longer force their own line (see html_strip()),
+ * so a single row can now mix plain text with a link or emphasis run.
+ * Groups consecutive same-(color,bold) characters into one draw call
+ * each, same "one syscall per contiguous run, not per pixel/char"
+ * cost discipline as gfx_ui.h's ui_vgrad(). */
+static void draw_styled_row(unsigned int x, unsigned int y, const char *text, int len, unsigned int row_start) {
+    int start = 0;
+    while (start < len) {
+        unsigned int color; int bold;
+        char_style(row_start + (unsigned int)start, &color, &bold);
+
+        int end = start + 1;
+        while (end < len) {
+            unsigned int c2; int b2;
+            char_style(row_start + (unsigned int)end, &c2, &b2);
+            if (c2 != color || b2 != bold) break;
+            end++;
+        }
+
+        char seg[128];
+        int seg_len = end - start;
+        if (seg_len > 127) seg_len = 127;
+        for (int k = 0; k < seg_len; k++) seg[k] = text[start + k];
+        seg[seg_len] = '\0';
+
+        unsigned int seg_x = x + (unsigned int)start * ROW_H;
+        gfx_draw_text(seg_x, y, seg, color);
+        if (bold) gfx_draw_text(seg_x + 1, y, seg, color);
+
+        start = end;
+    }
+}
+
+/* Draws one already-wrapped row: a horizontal rule if it's exactly the
+ * <hr> sentinel byte (see html_strip()'s T_HR case), otherwise a
+ * normal styled text row. Shared by both draw sites in the wrap loop
+ * below so the "\x01 means hr" special case only needs to live once. */
+static void draw_content_row(const window_t *win, const char *linebuf, int col,
+                             unsigned int y, unsigned int row_start) {
+    if (col == 1 && linebuf[0] == '\x01') {
+        gfx_fill_rect(win->x + PAD, y + ROW_H / 2, win->w - 2 * PAD, 1, gfx_rgb(120, 120, 120));
+    } else {
+        draw_styled_row(win->x + PAD, y, linebuf, col, row_start);
+    }
+}
+
 static void render_browser(const window_t *win) {
     gfx_fill_rect(win->x + 2, win->content_y, win->w - 4, win->content_h, win->bg);
 
@@ -538,9 +782,7 @@ static void render_browser(const window_t *win) {
             linebuf[col] = '\0';
             if (line >= scroll_offset && drawn < visible_rows) {
                 unsigned int row_start = i - (unsigned int)col;
-                unsigned int color = (find_link_at(row_start) >= 0)
-                                    ? gfx_rgb(120, 170, 255) : gfx_rgb(200, 200, 200);
-                gfx_draw_text(win->x + PAD, text_y0 + (unsigned int)drawn * ROW_H, linebuf, color);
+                draw_content_row(win, linebuf, col, text_y0 + (unsigned int)drawn * ROW_H, row_start);
                 if (drawn < MAX_VISIBLE_ROWS) { row_start_idx[drawn] = (int)row_start; row_count = drawn + 1; }
                 drawn++;
             }
@@ -551,9 +793,7 @@ static void render_browser(const window_t *win) {
             linebuf[col] = '\0';
             if (col > 0 && line >= scroll_offset && drawn < visible_rows) {
                 unsigned int row_start = i - (unsigned int)col;
-                unsigned int color = (find_link_at(row_start) >= 0)
-                                    ? gfx_rgb(120, 170, 255) : gfx_rgb(200, 200, 200);
-                gfx_draw_text(win->x + PAD, text_y0 + (unsigned int)drawn * ROW_H, linebuf, color);
+                draw_content_row(win, linebuf, col, text_y0 + (unsigned int)drawn * ROW_H, row_start);
                 if (drawn < MAX_VISIBLE_ROWS) { row_start_idx[drawn] = (int)row_start; row_count = drawn + 1; }
                 drawn++;
             }
