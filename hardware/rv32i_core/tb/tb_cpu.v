@@ -28,8 +28,13 @@ module tb_cpu;
     integer max_cycles;
     integer cycle_count;
 
+    // bus_grant tied high / bus_read_data tied to 0: this standalone
+    // testbench's program never generates a shared-range address, so
+    // mem_stall structurally stays 0 regardless - these two ports are
+    // simply inert here (no shared_bus in this testbench at all).
     cpu_core #(.INSTR_MEM_WORDS(1024), .INSTR_INIT_FILE(`INSTR_HEX), .DATA_MEM_BYTES(8192)) dut (
-        .clk(clk), .reset(reset), .halted(halted), .tohost_value(tohost_value)
+        .clk(clk), .reset(reset), .halted(halted), .tohost_value(tohost_value),
+        .bus_grant(1'b1), .bus_read_data(32'b0)
     );
 
     always #5 clk = ~clk;

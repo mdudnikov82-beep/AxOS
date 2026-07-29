@@ -20,8 +20,12 @@ module tb_cpu_pipelined;
     integer cycle_count;
     integer trace_enabled;
 
+    // bus_grant tied high / bus_read_data tied to 0: this standalone
+    // testbench's programs never generate a shared-range address, so
+    // mem_stall structurally stays 0 regardless - inert here.
     cpu_core_pipelined #(.INSTR_MEM_WORDS(1024), .INSTR_INIT_FILE(`INSTR_HEX), .DATA_MEM_BYTES(8192)) dut (
-        .clk(clk), .reset(reset), .halted(halted), .tohost_value(tohost_value)
+        .clk(clk), .reset(reset), .halted(halted), .tohost_value(tohost_value),
+        .bus_grant(1'b1), .bus_read_data(32'b0)
     );
 
     always #5 clk = ~clk;

@@ -59,6 +59,13 @@ if %errorlevel% neq 0 goto :error
 if %errorlevel% neq 0 (echo FAILED: tb_hazard_unit & "%VVP%" out_tb_hazard.vvp & goto :error)
 echo   OK
 
+echo [8] shared_bus...
+"%IVERILOG%" -o out_tb_sbus.vvp rtl\data_mem.v rtl\shared_bus.v tb\tb_shared_bus.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_sbus.vvp | findstr /C:"ALL SHARED_BUS TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_shared_bus & "%VVP%" out_tb_sbus.vvp & goto :error)
+echo   OK
+
 echo.
 echo ===== Full core: hand-assembled program (asm_test1.py) =====
 python sw\asm_test1.py sw\test1.hex
@@ -114,11 +121,24 @@ echo   OK (tohost=119)
 echo.
 echo ===== Mini-SoC: 1 P-core + 1 E-core (soc_top.v) =====
 echo P-core runs hazard_test.hex (119), E-core runs test_basic.hex (110), at the same time
-"%IVERILOG%" -o out_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\forward_unit.v rtl\hazard_unit.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\soc_top.v tb\tb_soc.v
+"%IVERILOG%" -o out_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\forward_unit.v rtl\hazard_unit.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\shared_bus.v rtl\soc_top.v tb\tb_soc.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_soc.vvp | findstr /C:"PASS: both cores matched" >nul
 if %errorlevel% neq 0 (echo FAILED: mini-SoC & "%VVP%" out_soc.vvp & goto :error)
 echo   OK (P=119, E=110, both concurrent)
+
+echo.
+echo ===== Shared bus: cross-core communication (soc_top.v + shared_bus.v) =====
+echo E-core (producer) writes a payload+flag to shared mem, P-core (consumer) polls and reads it back
+python sw\asm_shared_producer.py sw\shared_producer.hex
+if %errorlevel% neq 0 goto :error
+python sw\asm_shared_consumer.py sw\shared_consumer.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_shared_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\forward_unit.v rtl\hazard_unit.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\shared_bus.v rtl\soc_top.v tb\tb_shared_soc.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_shared_soc.vvp | findstr /C:"PASS: cross-core communication verified" >nul
+if %errorlevel% neq 0 (echo FAILED: shared-bus cross-core test & "%VVP%" out_shared_soc.vvp & goto :error)
+echo   OK (P=127, E=77, cross-core communication verified)
 
 echo.
 echo ===== ALL SIMULATIONS PASSED =====

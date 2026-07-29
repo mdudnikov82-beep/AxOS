@@ -9,12 +9,26 @@
 module cpu_core_pipelined #(
     parameter INSTR_MEM_WORDS = 1024,
     parameter INSTR_INIT_FILE = "",
-    parameter DATA_MEM_BYTES  = 8192
+    parameter DATA_MEM_BYTES  = 8192,
+    parameter SHARED_MEM_BASE  = 32'h0000_2000,
+    parameter SHARED_MEM_BYTES = 256
 ) (
     input  wire        clk,
     input  wire        reset,
     output wire        halted,
-    output wire [31:0] tohost_value
+    output wire [31:0] tohost_value,
+
+    // Shared-bus master port (see shared_bus.v and cpu_core.v's matching
+    // port) - driven from EX/MEM, since that's where a memory op
+    // actually touches memory in this pipeline.
+    output wire        bus_req,
+    output wire [31:0] bus_addr,
+    output wire [31:0] bus_write_data,
+    output wire        bus_mem_write,
+    output wire [1:0]  bus_mem_size,
+    output wire        bus_mem_unsigned,
+    input  wire        bus_grant,
+    input  wire [31:0] bus_read_data
 );
     localparam OP_SYSTEM = 7'b1110011;
     localparam WB_ALU  = 2'b00;
@@ -191,13 +205,33 @@ module cpu_core_pipelined #(
     end
 
     // ==================== MEM stage ====================
+    // Is the memory op CURRENTLY sitting in EX/MEM targeting the shared
+    // region instead of this core's own private data_mem? A losing
+    // arbitration here must hold EX/MEM (and everything ahead of it) in
+    // place until granted - see the sequential blocks below.
+    wire ex_mem_is_shared_access = (ex_mem_mem_read || ex_mem_mem_write) &&
+        (ex_mem_alu_result >= SHARED_MEM_BASE) && (ex_mem_alu_result < SHARED_MEM_BASE + SHARED_MEM_BYTES);
+
+    // Re-base to shared_bus's own local (0-based) address window - see
+    // the matching comment in cpu_core.v.
+    assign bus_req          = ex_mem_is_shared_access;
+    assign bus_addr          = ex_mem_alu_result - SHARED_MEM_BASE;
+    assign bus_write_data    = ex_mem_store_data;
+    assign bus_mem_write     = ex_mem_mem_write;
+    assign bus_mem_size      = ex_mem_mem_size;
+    assign bus_mem_unsigned  = ex_mem_mem_unsigned;
+
+    wire mem_stall = ex_mem_is_shared_access && !bus_grant;
+
     wire [31:0] mem_read_data;
 
     data_mem #(.MEM_BYTES(DATA_MEM_BYTES)) dmem (
         .clk(clk), .addr(ex_mem_alu_result), .write_data(ex_mem_store_data),
-        .mem_write(ex_mem_mem_write), .mem_size(ex_mem_mem_size),
+        .mem_write(ex_mem_mem_write && !ex_mem_is_shared_access), .mem_size(ex_mem_mem_size),
         .mem_unsigned(ex_mem_mem_unsigned), .read_data(mem_read_data)
     );
+
+    wire [31:0] effective_mem_read_data = ex_mem_is_shared_access ? bus_read_data : mem_read_data;
 
     // ==================== MEM/WB register ====================
     reg [31:0] mem_wb_pc_plus4;
@@ -238,7 +272,7 @@ module cpu_core_pipelined #(
             pc       <= 32'b0;
             halted_r <= 1'b0;
         end else if (!halted_r) begin
-            if (!stall) pc <= next_pc;
+            if (!(stall || mem_stall)) pc <= next_pc;
             if (mem_wb_is_system) halted_r <= 1'b1;
         end
     end
@@ -248,7 +282,14 @@ module cpu_core_pipelined #(
             if_id_pc    <= 32'b0;
             if_id_instr <= 32'b0;
         end else if (!halted_r) begin
-            if (ex_taken) begin
+            if (mem_stall) begin
+                // Hold unconditionally - PC is frozen too (above), so
+                // if_instr/pc wouldn't have changed anyway. A pending
+                // ex_taken flush is simply deferred until mem_stall
+                // clears (see the ID/EX block: whatever's driving
+                // ex_taken is ALSO held frozen every cycle mem_stall
+                // lasts, so nothing is lost by waiting).
+            end else if (ex_taken) begin
                 if_id_pc    <= 32'b0;
                 if_id_instr <= 32'b0;
             end else if (!stall) begin
@@ -271,7 +312,14 @@ module cpu_core_pipelined #(
             id_ex_rs1_data <= 32'b0; id_ex_rs2_data <= 32'b0; id_ex_imm <= 32'b0;
             id_ex_mem_read_r <= 1'b0; id_ex_rd_r <= 5'b0;
         end else if (!halted_r) begin
-            if (ex_taken || stall) begin
+            if (mem_stall) begin
+                // Hold entirely (not a bubble) - the instruction here is
+                // itself waiting on the older memory op stuck in EX/MEM
+                // (a structural resource conflict: EX/MEM physically
+                // can't accept a new value this cycle), so it must stay
+                // put rather than be silently discarded like a normal
+                // hazard bubble would discard it.
+            end else if (ex_taken || stall) begin
                 // Bubble: either flushing a wrong-path instruction, or
                 // holding back a load-use-hazardous one for one cycle.
                 id_ex_reg_write <= 1'b0; id_ex_mem_read <= 1'b0; id_ex_mem_write <= 1'b0;
@@ -304,8 +352,12 @@ module cpu_core_pipelined #(
             end
             // Hazard unit needs THIS cycle's about-to-be-latched values
             // available for NEXT cycle's stall check - mirror what's
-            // being written above (0 for a bubble, real values otherwise).
-            if (ex_taken || stall) begin
+            // being written above (hold under mem_stall since ID/EX
+            // itself isn't changing; 0 for a bubble; real values
+            // otherwise).
+            if (mem_stall) begin
+                // hold (no assignment)
+            end else if (ex_taken || stall) begin
                 id_ex_mem_read_r <= 1'b0;
                 id_ex_rd_r       <= 5'b0;
             end else begin
@@ -322,17 +374,21 @@ module cpu_core_pipelined #(
             ex_mem_mem_write <= 1'b0; ex_mem_mem_unsigned <= 1'b0; ex_mem_is_system <= 1'b0;
             ex_mem_mem_size <= 2'b0; ex_mem_wb_sel <= 2'b0;
         end else if (!halted_r) begin
-            ex_mem_pc_plus4     <= id_ex_pc_plus4;
-            ex_mem_alu_result   <= ex_alu_result;
-            ex_mem_store_data   <= fwd_rs2;
-            ex_mem_rd           <= id_ex_rd;
-            ex_mem_reg_write    <= id_ex_reg_write;
-            ex_mem_mem_read     <= id_ex_mem_read;
-            ex_mem_mem_write    <= id_ex_mem_write;
-            ex_mem_mem_unsigned <= id_ex_mem_unsigned;
-            ex_mem_is_system    <= id_ex_is_system;
-            ex_mem_mem_size     <= id_ex_mem_size;
-            ex_mem_wb_sel       <= id_ex_wb_sel;
+            if (!mem_stall) begin
+                ex_mem_pc_plus4     <= id_ex_pc_plus4;
+                ex_mem_alu_result   <= ex_alu_result;
+                ex_mem_store_data   <= fwd_rs2;
+                ex_mem_rd           <= id_ex_rd;
+                ex_mem_reg_write    <= id_ex_reg_write;
+                ex_mem_mem_read     <= id_ex_mem_read;
+                ex_mem_mem_write    <= id_ex_mem_write;
+                ex_mem_mem_unsigned <= id_ex_mem_unsigned;
+                ex_mem_is_system    <= id_ex_is_system;
+                ex_mem_mem_size     <= id_ex_mem_size;
+                ex_mem_wb_sel       <= id_ex_wb_sel;
+            end
+            // mem_stall: hold - the stuck access retries with the SAME
+            // ex_mem_* values (address, size, etc.) next cycle.
         end
     end
 
@@ -342,13 +398,24 @@ module cpu_core_pipelined #(
             mem_wb_rd <= 5'b0; mem_wb_reg_write <= 1'b0; mem_wb_is_system <= 1'b0;
             mem_wb_wb_sel <= 2'b0;
         end else if (!halted_r) begin
-            mem_wb_pc_plus4   <= ex_mem_pc_plus4;
-            mem_wb_alu_result <= ex_mem_alu_result;
-            mem_wb_mem_data   <= mem_read_data;
-            mem_wb_rd         <= ex_mem_rd;
-            mem_wb_reg_write  <= ex_mem_reg_write;
-            mem_wb_is_system  <= ex_mem_is_system;
-            mem_wb_wb_sel     <= ex_mem_wb_sel;
+            if (!mem_stall) begin
+                mem_wb_pc_plus4   <= ex_mem_pc_plus4;
+                mem_wb_alu_result <= ex_mem_alu_result;
+                mem_wb_mem_data   <= effective_mem_read_data;
+                mem_wb_rd         <= ex_mem_rd;
+                mem_wb_reg_write  <= ex_mem_reg_write;
+                mem_wb_is_system  <= ex_mem_is_system;
+                mem_wb_wb_sel     <= ex_mem_wb_sel;
+            end
+            // mem_stall: HOLD (not bubble) - EX/MEM is frozen too, so
+            // nothing new is arriving here anyway. Holding (rather than
+            // zeroing mem_wb_reg_write like a bubble would) keeps
+            // forward_unit's MEM/WB source valid for however many
+            // cycles the stall lasts - bubbling here was the bug an
+            // earlier design review caught: it would silently flip
+            // forward_a/forward_b back to "no forward" mid-stall,
+            // corrupting fwd_rs1/fwd_rs2 for whatever instruction in
+            // ID/EX is frozen waiting on that exact forwarded value.
         end
     end
 endmodule

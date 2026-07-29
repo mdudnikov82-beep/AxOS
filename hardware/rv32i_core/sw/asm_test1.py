@@ -56,6 +56,14 @@ def ecall():
     return i_type(0, 0, 0b000, 0, 0b1110011)
 
 
+def u_type(imm20, rd, opcode):
+    return ((imm20 & 0xFFFFF) << 12) | (rd << 7) | opcode
+
+
+def lui(rd, imm20):
+    return u_type(imm20, rd, 0b0110111)
+
+
 # x1=5, x2=10, x3=x1+x2=15, mem[0]=x3, x4=mem[0](=15),
 # BEQ x3,x4,+8 (taken -> skip the next instruction),
 # x5=999 (SKIPPED if branch worked), x10=42, ECALL (tohost=42 if
