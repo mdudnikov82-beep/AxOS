@@ -38,6 +38,25 @@ module regfile (
         for (i = 0; i < 32; i = i + 1) regs[i] = 32'b0;
     end
 
+    // NOT a write-through bypass, deliberately: an earlier draft added
+    // one directly here (assign rs1_data = (reg_write && rd_addr==
+    // rs1_addr) ? rd_data : regs[rs1_addr]), reasoning it would be a
+    // no-op for the single-cycle core. That reasoning was wrong and
+    // caused a real hang, found live (a vvp process spinning for
+    // minutes instead of finishing in milliseconds): the single-cycle
+    // core routinely has ONE instruction whose own rd equals its own
+    // rs1 - e.g. `addi x1, x1, 5` - where reg_write/rd_addr/rs1_addr
+    // all describe the SAME in-flight instruction, not a different
+    // one. That bypass would then feed the ALU's own about-to-be-
+    // computed output (rd_data) back into the ALU's own input
+    // (rs1_data) - a genuine combinational loop, not just a stale-data
+    // bug. The pipelined core's actual need (WB-stage instruction I
+    // writing while a DIFFERENT, ID-stage instruction I+3 reads the
+    // same register the same cycle) is instead handled by
+    // cpu_core_pipelined.v's own ID-stage mux, comparing MEM/WB's
+    // (registered, one-cycle-old) rd against IF/ID's rs1/rs2 - which
+    // can't loop, since it depends on already-latched values from an
+    // earlier cycle, never on its own same-cycle output.
     assign rs1_data = (rs1_addr == 5'd0) ? 32'b0 : regs[rs1_addr];
     assign rs2_data = (rs2_addr == 5'd0) ? 32'b0 : regs[rs2_addr];
 

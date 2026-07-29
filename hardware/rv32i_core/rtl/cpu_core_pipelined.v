@@ -1,0 +1,354 @@
+// Classic 5-stage IF/ID/EX/MEM/WB pipelined RV32I core. Reuses the
+// exact same alu.v/imm_gen.v/control_unit.v/instr_mem.v/data_mem.v as
+// the single-cycle cpu_core.v (all already stage-agnostic), plus the
+// new forward_unit.v/hazard_unit.v. Branches AND jumps both resolve
+// in EX - a taken one flushes whatever's currently in IF/ID and ID/EX
+// (the 2 instructions fetched behind it on the wrong-path assumption).
+`timescale 1ns/1ps
+
+module cpu_core_pipelined #(
+    parameter INSTR_MEM_WORDS = 1024,
+    parameter INSTR_INIT_FILE = "",
+    parameter DATA_MEM_BYTES  = 8192
+) (
+    input  wire        clk,
+    input  wire        reset,
+    output wire        halted,
+    output wire [31:0] tohost_value
+);
+    localparam OP_SYSTEM = 7'b1110011;
+    localparam WB_ALU  = 2'b00;
+    localparam WB_MEM  = 2'b01;
+    localparam WB_PC4  = 2'b10;
+
+    reg halted_r;
+    assign halted = halted_r;
+
+    // ==================== IF stage ====================
+    reg  [31:0] pc;
+    wire [31:0] if_instr;
+    wire [31:0] pc_plus4_if = pc + 32'd4;
+
+    instr_mem #(.MEM_WORDS(INSTR_MEM_WORDS), .INIT_FILE(INSTR_INIT_FILE)) imem (
+        .addr(pc), .instr(if_instr)
+    );
+
+    // ==================== IF/ID register ====================
+    reg [31:0] if_id_pc;
+    reg [31:0] if_id_instr;
+
+    wire [6:0] if_id_opcode = if_id_instr[6:0];
+    wire [4:0] if_id_rs1    = if_id_instr[19:15];
+    wire [4:0] if_id_rs2    = if_id_instr[24:20];
+
+    // ==================== ID stage ====================
+    wire [2:0] id_funct3 = if_id_instr[14:12];
+    wire [6:0] id_funct7 = if_id_instr[31:25];
+    wire [4:0] id_rd     = if_id_instr[11:7];
+    wire [31:0] id_pc_plus4 = if_id_pc + 32'd4;
+
+    wire [31:0] id_imm;
+    imm_gen ig (.instr(if_id_instr), .imm(id_imm));
+
+    wire id_reg_write, id_mem_read, id_mem_write, id_mem_to_reg, id_alu_src;
+    wire id_branch, id_jump, id_jalr, id_auipc, id_lui, id_mem_unsigned, id_illegal;
+    wire [3:0] id_alu_op;
+    wire [1:0] id_mem_size;
+
+    control_unit cu (
+        .opcode(if_id_opcode), .funct3(id_funct3), .funct7(id_funct7),
+        .reg_write(id_reg_write), .mem_read(id_mem_read), .mem_write(id_mem_write),
+        .mem_to_reg(id_mem_to_reg), .alu_src(id_alu_src), .branch(id_branch),
+        .jump(id_jump), .jalr(id_jalr), .auipc(id_auipc), .lui(id_lui),
+        .alu_op(id_alu_op), .mem_size(id_mem_size), .mem_unsigned(id_mem_unsigned),
+        .illegal(id_illegal)
+    );
+
+    wire [1:0] id_wb_sel = (id_jump || id_jalr) ? WB_PC4 : (id_mem_to_reg ? WB_MEM : WB_ALU);
+    wire       id_is_system = (if_id_opcode == OP_SYSTEM);
+
+    wire [31:0] x10_debug;
+
+    // Regfile write port driven by WB stage (declared ahead of use).
+    wire        wb_reg_write;
+    wire [4:0]  wb_rd_addr;
+    wire [31:0] wb_rd_data;
+
+    wire [31:0] id_rs1_data_raw, id_rs2_data_raw;
+
+    regfile rf (
+        .clk(clk), .rs1_addr(if_id_rs1), .rs2_addr(if_id_rs2),
+        .rs1_data(id_rs1_data_raw), .rs2_data(id_rs2_data_raw),
+        .rd_addr(wb_rd_addr), .rd_data(wb_rd_data), .reg_write(wb_reg_write),
+        .x10_debug(x10_debug)
+    );
+
+    // Distance-3 RAW hazard: MEM/WB retiring THIS cycle writes a
+    // register that IF/ID's instruction (about to move into ID/EX)
+    // also needs. forward_unit.v can't cover this (it forwards into EX
+    // from EX/MEM/MEM/WB relative to ID/EX, one stage later than
+    // this), and regfile.v's own combinational read can't see a
+    // same-cycle write either. This mux is safe where a same-cycle
+    // bypass INSIDE regfile.v was not: mem_wb_reg_write/mem_wb_rd/
+    // wb_data_r are all REGISTERED values latched on an EARLIER clock
+    // edge, so this can never loop back into its own output the way
+    // the single-cycle core's `addi x1, x1, 5` did when the bypass
+    // lived inside regfile.v itself (see that file's own comment - a
+    // real combinational-loop hang was found live from that draft).
+    wire [31:0] id_rs1_data = (mem_wb_reg_write && mem_wb_rd != 5'd0 && mem_wb_rd == if_id_rs1) ? wb_data_r : id_rs1_data_raw;
+    wire [31:0] id_rs2_data = (mem_wb_reg_write && mem_wb_rd != 5'd0 && mem_wb_rd == if_id_rs2) ? wb_data_r : id_rs2_data_raw;
+
+    // ==================== Hazard detection (combinational, uses ID/EX + IF/ID) ====================
+    reg        id_ex_mem_read_r;
+    reg [4:0]  id_ex_rd_r;
+    wire       stall;
+
+    hazard_unit hz (
+        .id_ex_mem_read(id_ex_mem_read_r), .id_ex_rd(id_ex_rd_r),
+        .if_id_rs1(if_id_rs1), .if_id_rs2(if_id_rs2),
+        .stall(stall)
+    );
+
+    // ==================== ID/EX register ====================
+    reg [31:0] id_ex_pc, id_ex_pc_plus4;
+    reg [31:0] id_ex_rs1_data, id_ex_rs2_data, id_ex_imm;
+    reg [4:0]  id_ex_rs1, id_ex_rs2, id_ex_rd;
+    reg        id_ex_reg_write, id_ex_mem_read, id_ex_mem_write, id_ex_alu_src;
+    reg        id_ex_branch, id_ex_jump, id_ex_jalr, id_ex_auipc, id_ex_lui;
+    reg        id_ex_mem_unsigned, id_ex_is_system;
+    reg [3:0]  id_ex_alu_op;
+    reg [1:0]  id_ex_mem_size, id_ex_wb_sel;
+    reg [2:0]  id_ex_funct3;
+
+    // ==================== EX stage ====================
+    // Forwarding compares ID/EX's own rs1/rs2 against EX/MEM's and
+    // MEM/WB's destinations (declared ahead of use, driven by those
+    // later pipeline registers below).
+    reg [4:0]  ex_mem_rd_r;
+    reg        ex_mem_reg_write_r;
+    reg [4:0]  mem_wb_rd_r;
+    reg        mem_wb_reg_write_r;
+    wire [1:0] forward_a, forward_b;
+
+    forward_unit fu (
+        .id_ex_rs1(id_ex_rs1), .id_ex_rs2(id_ex_rs2),
+        .ex_mem_rd(ex_mem_rd_r), .ex_mem_reg_write(ex_mem_reg_write_r),
+        .mem_wb_rd(mem_wb_rd_r), .mem_wb_reg_write(mem_wb_reg_write_r),
+        .forward_a(forward_a), .forward_b(forward_b)
+    );
+
+    // ex_mem_alu_result / mem_wb_wb_data_r are declared with the later
+    // pipeline registers/WB-mux below - Verilog module-level wires/regs
+    // don't need forward declaration by position, only used-before-
+    // declared within the SAME always block would be a problem, and
+    // none of these are.
+    wire [31:0] fwd_rs1 = (forward_a == 2'b10) ? ex_mem_alu_result :
+                          (forward_a == 2'b01) ? mem_wb_wb_data_r  : id_ex_rs1_data;
+    wire [31:0] fwd_rs2 = (forward_b == 2'b10) ? ex_mem_alu_result :
+                          (forward_b == 2'b01) ? mem_wb_wb_data_r  : id_ex_rs2_data;
+
+    wire [31:0] ex_alu_a = id_ex_auipc ? id_ex_pc : (id_ex_lui ? 32'b0 : fwd_rs1);
+    wire [31:0] ex_alu_b = id_ex_alu_src ? id_ex_imm : fwd_rs2;
+    wire [31:0] ex_alu_result;
+    wire        ex_alu_zero;
+
+    alu ax (.a(ex_alu_a), .b(ex_alu_b), .alu_op(id_ex_alu_op), .result(ex_alu_result), .zero(ex_alu_zero));
+
+    reg ex_branch_taken;
+    always @(*) begin
+        case (id_ex_funct3)
+            3'b000:  ex_branch_taken = (fwd_rs1 == fwd_rs2);
+            3'b001:  ex_branch_taken = (fwd_rs1 != fwd_rs2);
+            3'b100:  ex_branch_taken = ($signed(fwd_rs1) <  $signed(fwd_rs2));
+            3'b101:  ex_branch_taken = ($signed(fwd_rs1) >= $signed(fwd_rs2));
+            3'b110:  ex_branch_taken = (fwd_rs1 <  fwd_rs2);
+            3'b111:  ex_branch_taken = (fwd_rs1 >= fwd_rs2);
+            default: ex_branch_taken = 1'b0;
+        endcase
+    end
+
+    wire ex_taken = (id_ex_branch && ex_branch_taken) || id_ex_jump || id_ex_jalr;
+    wire [31:0] ex_branch_target = id_ex_pc + id_ex_imm;
+    wire [31:0] ex_jalr_target   = (fwd_rs1 + id_ex_imm) & 32'hFFFFFFFE;
+    wire [31:0] ex_target        = id_ex_jalr ? ex_jalr_target : ex_branch_target;
+
+    // ==================== EX/MEM register ====================
+    reg [31:0] ex_mem_pc_plus4;
+    reg [31:0] ex_mem_alu_result;
+    reg [31:0] ex_mem_store_data;
+    reg [4:0]  ex_mem_rd;
+    reg        ex_mem_reg_write, ex_mem_mem_read, ex_mem_mem_write, ex_mem_mem_unsigned;
+    reg        ex_mem_is_system;
+    reg [1:0]  ex_mem_mem_size, ex_mem_wb_sel;
+
+    // Aliases so forward_unit's inputs (declared above, before this
+    // register block) can reference this cycle's live EX/MEM contents.
+    // (Verilog doesn't need textual reordering for this - these are
+    // just plain continuous references to the regs declared here.)
+    always @(*) begin
+        ex_mem_rd_r        = ex_mem_rd;
+        ex_mem_reg_write_r = ex_mem_reg_write;
+    end
+
+    // ==================== MEM stage ====================
+    wire [31:0] mem_read_data;
+
+    data_mem #(.MEM_BYTES(DATA_MEM_BYTES)) dmem (
+        .clk(clk), .addr(ex_mem_alu_result), .write_data(ex_mem_store_data),
+        .mem_write(ex_mem_mem_write), .mem_size(ex_mem_mem_size),
+        .mem_unsigned(ex_mem_mem_unsigned), .read_data(mem_read_data)
+    );
+
+    // ==================== MEM/WB register ====================
+    reg [31:0] mem_wb_pc_plus4;
+    reg [31:0] mem_wb_alu_result;
+    reg [31:0] mem_wb_mem_data;
+    reg [4:0]  mem_wb_rd;
+    reg        mem_wb_reg_write, mem_wb_is_system;
+    reg [1:0]  mem_wb_wb_sel;
+
+    always @(*) begin
+        mem_wb_rd_r        = mem_wb_rd;
+        mem_wb_reg_write_r = mem_wb_reg_write;
+    end
+
+    // ==================== WB stage ====================
+    reg [31:0] wb_data_r;
+    always @(*) begin
+        case (mem_wb_wb_sel)
+            WB_MEM:  wb_data_r = mem_wb_mem_data;
+            WB_PC4:  wb_data_r = mem_wb_pc_plus4;
+            default: wb_data_r = mem_wb_alu_result;
+        endcase
+    end
+    wire [31:0] mem_wb_wb_data_r = wb_data_r;
+
+    assign wb_reg_write = mem_wb_reg_write;
+    assign wb_rd_addr   = mem_wb_rd;
+    assign wb_rd_data   = wb_data_r;
+
+    assign tohost_value = x10_debug;
+
+    // ==================== Next-PC selection ====================
+    wire [31:0] next_pc = ex_taken ? ex_target : pc_plus4_if;
+
+    // ==================== Sequential updates ====================
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            pc       <= 32'b0;
+            halted_r <= 1'b0;
+        end else if (!halted_r) begin
+            if (!stall) pc <= next_pc;
+            if (mem_wb_is_system) halted_r <= 1'b1;
+        end
+    end
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            if_id_pc    <= 32'b0;
+            if_id_instr <= 32'b0;
+        end else if (!halted_r) begin
+            if (ex_taken) begin
+                if_id_pc    <= 32'b0;
+                if_id_instr <= 32'b0;
+            end else if (!stall) begin
+                if_id_pc    <= pc;
+                if_id_instr <= if_instr;
+            end
+            // stall && !ex_taken: hold current if_id_* (no assignment)
+        end
+    end
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            id_ex_reg_write <= 1'b0; id_ex_mem_read <= 1'b0; id_ex_mem_write <= 1'b0;
+            id_ex_alu_src <= 1'b0; id_ex_branch <= 1'b0; id_ex_jump <= 1'b0;
+            id_ex_jalr <= 1'b0; id_ex_auipc <= 1'b0; id_ex_lui <= 1'b0;
+            id_ex_mem_unsigned <= 1'b0; id_ex_is_system <= 1'b0;
+            id_ex_alu_op <= 4'b0; id_ex_mem_size <= 2'b0; id_ex_wb_sel <= 2'b0;
+            id_ex_funct3 <= 3'b0; id_ex_rd <= 5'b0; id_ex_rs1 <= 5'b0; id_ex_rs2 <= 5'b0;
+            id_ex_pc <= 32'b0; id_ex_pc_plus4 <= 32'b0;
+            id_ex_rs1_data <= 32'b0; id_ex_rs2_data <= 32'b0; id_ex_imm <= 32'b0;
+            id_ex_mem_read_r <= 1'b0; id_ex_rd_r <= 5'b0;
+        end else if (!halted_r) begin
+            if (ex_taken || stall) begin
+                // Bubble: either flushing a wrong-path instruction, or
+                // holding back a load-use-hazardous one for one cycle.
+                id_ex_reg_write <= 1'b0; id_ex_mem_read <= 1'b0; id_ex_mem_write <= 1'b0;
+                id_ex_branch <= 1'b0; id_ex_jump <= 1'b0; id_ex_jalr <= 1'b0;
+                id_ex_is_system <= 1'b0; id_ex_rd <= 5'b0;
+            end else begin
+                id_ex_reg_write     <= id_reg_write;
+                id_ex_mem_read      <= id_mem_read;
+                id_ex_mem_write     <= id_mem_write;
+                id_ex_alu_src       <= id_alu_src;
+                id_ex_branch        <= id_branch;
+                id_ex_jump          <= id_jump;
+                id_ex_jalr          <= id_jalr;
+                id_ex_auipc         <= id_auipc;
+                id_ex_lui           <= id_lui;
+                id_ex_mem_unsigned  <= id_mem_unsigned;
+                id_ex_is_system     <= id_is_system;
+                id_ex_alu_op        <= id_alu_op;
+                id_ex_mem_size      <= id_mem_size;
+                id_ex_wb_sel        <= id_wb_sel;
+                id_ex_funct3        <= id_funct3;
+                id_ex_rd            <= id_rd;
+                id_ex_rs1           <= if_id_rs1;
+                id_ex_rs2           <= if_id_rs2;
+                id_ex_pc            <= if_id_pc;
+                id_ex_pc_plus4      <= id_pc_plus4;
+                id_ex_rs1_data      <= id_rs1_data;
+                id_ex_rs2_data      <= id_rs2_data;
+                id_ex_imm           <= id_imm;
+            end
+            // Hazard unit needs THIS cycle's about-to-be-latched values
+            // available for NEXT cycle's stall check - mirror what's
+            // being written above (0 for a bubble, real values otherwise).
+            if (ex_taken || stall) begin
+                id_ex_mem_read_r <= 1'b0;
+                id_ex_rd_r       <= 5'b0;
+            end else begin
+                id_ex_mem_read_r <= id_mem_read;
+                id_ex_rd_r       <= id_rd;
+            end
+        end
+    end
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            ex_mem_pc_plus4 <= 32'b0; ex_mem_alu_result <= 32'b0; ex_mem_store_data <= 32'b0;
+            ex_mem_rd <= 5'b0; ex_mem_reg_write <= 1'b0; ex_mem_mem_read <= 1'b0;
+            ex_mem_mem_write <= 1'b0; ex_mem_mem_unsigned <= 1'b0; ex_mem_is_system <= 1'b0;
+            ex_mem_mem_size <= 2'b0; ex_mem_wb_sel <= 2'b0;
+        end else if (!halted_r) begin
+            ex_mem_pc_plus4     <= id_ex_pc_plus4;
+            ex_mem_alu_result   <= ex_alu_result;
+            ex_mem_store_data   <= fwd_rs2;
+            ex_mem_rd           <= id_ex_rd;
+            ex_mem_reg_write    <= id_ex_reg_write;
+            ex_mem_mem_read     <= id_ex_mem_read;
+            ex_mem_mem_write    <= id_ex_mem_write;
+            ex_mem_mem_unsigned <= id_ex_mem_unsigned;
+            ex_mem_is_system    <= id_ex_is_system;
+            ex_mem_mem_size     <= id_ex_mem_size;
+            ex_mem_wb_sel       <= id_ex_wb_sel;
+        end
+    end
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            mem_wb_pc_plus4 <= 32'b0; mem_wb_alu_result <= 32'b0; mem_wb_mem_data <= 32'b0;
+            mem_wb_rd <= 5'b0; mem_wb_reg_write <= 1'b0; mem_wb_is_system <= 1'b0;
+            mem_wb_wb_sel <= 2'b0;
+        end else if (!halted_r) begin
+            mem_wb_pc_plus4   <= ex_mem_pc_plus4;
+            mem_wb_alu_result <= ex_mem_alu_result;
+            mem_wb_mem_data   <= mem_read_data;
+            mem_wb_rd         <= ex_mem_rd;
+            mem_wb_reg_write  <= ex_mem_reg_write;
+            mem_wb_is_system  <= ex_mem_is_system;
+            mem_wb_wb_sel     <= ex_mem_wb_sel;
+        end
+    end
+endmodule

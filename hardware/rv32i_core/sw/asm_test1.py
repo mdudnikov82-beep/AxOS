@@ -60,21 +60,22 @@ def ecall():
 # BEQ x3,x4,+8 (taken -> skip the next instruction),
 # x5=999 (SKIPPED if branch worked), x10=42, ECALL (tohost=42 if
 # the skip worked; tohost would differ if branch/skip logic is broken).
-program = [
-    addi(1, 0, 5),
-    addi(2, 0, 10),
-    add(3, 1, 2),
-    sw(3, 0, 0),
-    lw(4, 0, 0),
-    beq(3, 4, 8),
-    addi(5, 0, 999),   # PC=20, should be skipped
-    addi(10, 0, 42),   # PC=24, branch target
-    ecall(),
-]
+if __name__ == "__main__":
+    program = [
+        addi(1, 0, 5),
+        addi(2, 0, 10),
+        add(3, 1, 2),
+        sw(3, 0, 0),
+        lw(4, 0, 0),
+        beq(3, 4, 8),
+        addi(5, 0, 999),   # PC=20, should be skipped
+        addi(10, 0, 42),   # PC=24, branch target
+        ecall(),
+    ]
 
-out_path = sys.argv[1] if len(sys.argv) > 1 else "test1.hex"
-with open(out_path, "w") as f:
-    for word in program:
-        f.write("%08x\n" % (word & 0xFFFFFFFF))
+    out_path = sys.argv[1] if len(sys.argv) > 1 else "test1.hex"
+    with open(out_path, "w") as f:
+        for word in program:
+            f.write("%08x\n" % (word & 0xFFFFFFFF))
 
-print("wrote", len(program), "words to", out_path)
+    print("wrote", len(program), "words to", out_path)

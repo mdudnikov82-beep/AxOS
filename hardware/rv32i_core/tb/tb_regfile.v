@@ -69,6 +69,23 @@ module tb_regfile;
         rs1_addr = 5'd10;
         #1 check(rs1_data, 32'hAAAA0000, "reg_write=0 does not write");
 
+        // Deliberately NO write-through bypass: reading the SAME
+        // address being written THIS cycle must see the OLD value
+        // (the write only lands on the next clock edge) - this is
+        // exactly the property `addi x1, x1, 5` in the single-cycle
+        // core depends on (rs1 must read x1's OLD value even though
+        // rd==rs1==x1 for that same instruction). An earlier draft
+        // added a same-cycle bypass here and it caused a real
+        // combinational-loop hang - see this file's own comment above
+        // `regs[rd_addr] <= rd_data` for the full story.
+        rd_addr = 5'd7; rd_data = 32'h12345678; reg_write = 1;
+        rs1_addr = 5'd7; rs2_addr = 5'd7;
+        #1 check(rs1_data, 32'd0, "same-cycle read sees OLD value, not the pending write (rs1)");
+        #0 check(rs2_data, 32'd0, "same-cycle read sees OLD value, not the pending write (rs2)");
+        @(posedge clk); #1;
+        reg_write = 0;
+        #1 check(rs1_data, 32'h12345678, "value visible normally on the NEXT cycle after the write lands");
+
         if (errors == 0) $display("ALL REGFILE TESTS PASSED");
         else $display("%0d REGFILE TESTS FAILED", errors);
         $finish;

@@ -45,6 +45,20 @@ if %errorlevel% neq 0 goto :error
 if %errorlevel% neq 0 (echo FAILED: tb_data_mem & "%VVP%" out_tb_datamem.vvp & goto :error)
 echo   OK
 
+echo [6] forward_unit...
+"%IVERILOG%" -o out_tb_forward.vvp rtl\forward_unit.v tb\tb_forward_unit.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_forward.vvp | findstr /C:"ALL FORWARD_UNIT TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_forward_unit & "%VVP%" out_tb_forward.vvp & goto :error)
+echo   OK
+
+echo [7] hazard_unit...
+"%IVERILOG%" -o out_tb_hazard.vvp rtl\hazard_unit.v tb\tb_hazard_unit.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_hazard.vvp | findstr /C:"ALL HAZARD_UNIT TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_hazard_unit & "%VVP%" out_tb_hazard.vvp & goto :error)
+echo   OK
+
 echo.
 echo ===== Full core: hand-assembled program (asm_test1.py) =====
 python sw\asm_test1.py sw\test1.hex
@@ -70,6 +84,32 @@ if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_cpu2.vvp +EXPECT_TOHOST=110 | findstr /C:"PASS: tohost matches" >nul
 if %errorlevel% neq 0 (echo FAILED: compiled C program & "%VVP%" out_tb_cpu2.vvp +EXPECT_TOHOST=110 & goto :error)
 echo   OK (tohost=110)
+
+echo.
+echo ===== Pipelined core (cpu_core_pipelined.v) =====
+
+echo Cross-check 1: hand-assembled program (must match single-cycle: 42)
+"%IVERILOG%" -o out_tb_pipe1.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_pipe1.vvp +EXPECT_TOHOST=42 | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: pipelined, hand-assembled program & "%VVP%" out_tb_pipe1.vvp +EXPECT_TOHOST=42 & goto :error)
+echo   OK (tohost=42, matches single-cycle)
+
+echo Cross-check 2: real compiled C program (must match single-cycle: 110)
+"%IVERILOG%" -DINSTR_HEX=\"sw/test_basic.hex\" -o out_tb_pipe2.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_pipe2.vvp +EXPECT_TOHOST=110 | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: pipelined, compiled C program & "%VVP%" out_tb_pipe2.vvp +EXPECT_TOHOST=110 & goto :error)
+echo   OK (tohost=110, matches single-cycle)
+
+echo Hazard stress test (forwarding + load-use stall + branch flush together)
+python sw\asm_hazard_test.py sw\hazard_test.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -DINSTR_HEX=\"sw/hazard_test.hex\" -o out_tb_pipe3.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_pipe3.vvp +EXPECT_TOHOST=119 | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: pipelined, hazard stress test & "%VVP%" out_tb_pipe3.vvp +EXPECT_TOHOST=119 & goto :error)
+echo   OK (tohost=119)
 
 echo.
 echo ===== ALL SIMULATIONS PASSED =====
