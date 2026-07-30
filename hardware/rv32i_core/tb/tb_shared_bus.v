@@ -1,31 +1,34 @@
+// Tests the generalized N-way (NUM_CORES=4 by default) round-robin
+// shared_bus.v. Expected bit patterns / grant sequences are derived
+// directly from the rotating-priority rule (scan starts at
+// last_granted+1, grants the first requester found) - the same
+// discipline as this project's other testbenches, just applied to an
+// arbiter instead of arithmetic.
 `timescale 1ns/1ps
 
 module tb_shared_bus;
-    reg         clk;
-    reg         reset;
-    reg         p_req, e_req;
-    reg  [31:0] p_addr, e_addr;
-    reg  [31:0] p_write_data, e_write_data;
-    reg         p_mem_write, e_mem_write;
-    reg  [1:0]  p_mem_size, e_mem_size;
-    reg         p_mem_unsigned, e_mem_unsigned;
-    wire        p_grant, e_grant;
-    wire [31:0] p_read_data, e_read_data;
-    integer     errors;
+    localparam NUM_CORES = 4;
 
-    shared_bus dut (
+    reg         clk, reset;
+    reg  [NUM_CORES-1:0]      req;
+    reg  [NUM_CORES*32-1:0]   addr_flat, write_data_flat;
+    reg  [NUM_CORES-1:0]      mem_write;
+    reg  [NUM_CORES*2-1:0]    mem_size_flat;
+    reg  [NUM_CORES-1:0]      mem_unsigned;
+    wire [NUM_CORES-1:0]      grant;
+    wire [31:0]                read_data;
+    integer                    errors;
+
+    shared_bus #(.NUM_CORES(NUM_CORES)) dut (
         .clk(clk), .reset(reset),
-        .p_req(p_req), .p_addr(p_addr), .p_write_data(p_write_data),
-        .p_mem_write(p_mem_write), .p_mem_size(p_mem_size), .p_mem_unsigned(p_mem_unsigned),
-        .p_grant(p_grant), .p_read_data(p_read_data),
-        .e_req(e_req), .e_addr(e_addr), .e_write_data(e_write_data),
-        .e_mem_write(e_mem_write), .e_mem_size(e_mem_size), .e_mem_unsigned(e_mem_unsigned),
-        .e_grant(e_grant), .e_read_data(e_read_data)
+        .req(req), .addr_flat(addr_flat), .write_data_flat(write_data_flat),
+        .mem_write(mem_write), .mem_size_flat(mem_size_flat), .mem_unsigned(mem_unsigned),
+        .grant(grant), .read_data(read_data)
     );
 
     always #5 clk = ~clk;
 
-    task check(input got, input expected, input [40*8-1:0] name);
+    task check(input [NUM_CORES-1:0] got, input [NUM_CORES-1:0] expected, input [40*8-1:0] name);
         begin
             if (got !== expected) begin
                 $display("FAIL %0s: got=%b expected=%b", name, got, expected);
@@ -36,105 +39,135 @@ module tb_shared_bus;
         end
     endtask
 
+    task set_addr(input integer idx, input [31:0] a);
+        begin
+            addr_flat[idx*32 +: 32] = a;
+        end
+    endtask
+
+    task set_write_data(input integer idx, input [31:0] d);
+        begin
+            write_data_flat[idx*32 +: 32] = d;
+        end
+    endtask
+
+    task set_mem_size(input integer idx, input [1:0] s);
+        begin
+            mem_size_flat[idx*2 +: 2] = s;
+        end
+    endtask
+
     initial begin
         errors = 0;
         clk = 0;
         reset = 1;
-        p_req = 0; e_req = 0;
-        p_addr = 0; e_addr = 0;
-        p_write_data = 0; e_write_data = 0;
-        p_mem_write = 0; e_mem_write = 0;
-        p_mem_size = 2'b10; e_mem_size = 2'b10;
-        p_mem_unsigned = 0; e_mem_unsigned = 0;
+        req = {NUM_CORES{1'b0}};
+        addr_flat = 0; write_data_flat = 0; mem_write = 0; mem_unsigned = 0;
+        set_mem_size(0, 2'b10); set_mem_size(1, 2'b10);
+        set_mem_size(2, 2'b10); set_mem_size(3, 2'b10);
         @(posedge clk); #1;
         reset = 0;
 
-        // Neither requests - neither granted.
+        // Neither requests - no grants.
         #1;
-        check(p_grant, 1'b0, "no requests: p_grant=0");
-        check(e_grant, 1'b0, "no requests: e_grant=0");
+        check(grant, 4'b0000, "no requests: no grants");
 
-        // Only E requests - E granted.
-        e_req = 1;
+        // Only core 1 requests - core 1 granted.
+        req = 4'b0010;
         #1;
-        check(p_grant, 1'b0, "E alone: p_grant=0");
-        check(e_grant, 1'b1, "E alone: e_grant=1");
+        check(grant, 4'b0010, "core1 alone: granted");
 
-        // Only P requests - P granted.
-        e_req = 0; p_req = 1;
+        // Only core 0 requests - core 0 granted.
+        req = 4'b0001;
         #1;
-        check(p_grant, 1'b1, "P alone: p_grant=1");
-        check(e_grant, 1'b0, "P alone: e_grant=0");
+        check(grant, 4'b0001, "core0 alone: granted");
 
-        // BOTH request the same cycle - the FIRST tie after reset goes
-        // to P (an arbitrary but fixed, testable reset default - see
-        // shared_bus.v's own reset block), NOT because P always wins.
-        e_req = 1; p_req = 1;
+        // Both core0 and core1 request - first tie after reset goes to
+        // core 0 (reset default last_granted=NUM_CORES-1=3, scan starts
+        // at 0).
+        req = 4'b0011;
         #1;
-        check(p_grant, 1'b1, "first tie after reset: P wins (p_grant=1)");
-        check(e_grant, 1'b0, "first tie after reset: E loses (e_grant=0)");
+        check(grant, 4'b0001, "first tie after reset: core0 wins");
 
-        // Round-robin proof: keep BOTH requesting for several MORE
-        // consecutive cycles with no reset in between - a fixed-
-        // priority arbiter would let P win every single one of these;
-        // real round-robin must alternate P, E, P, E, ...
+        // Keep both requesting for several more cycles with no reset -
+        // must alternate 0,1,0,1,... (round-robin, not fixed priority).
         @(posedge clk); #1;
-        check(p_grant, 1'b0, "round-robin tie 2: P loses this time (p_grant=0)");
-        check(e_grant, 1'b1, "round-robin tie 2: E wins this time (e_grant=1)");
-
+        check(grant, 4'b0010, "tie 2: core1 (alternates)");
         @(posedge clk); #1;
-        check(p_grant, 1'b1, "round-robin tie 3: back to P (p_grant=1)");
-        check(e_grant, 1'b0, "round-robin tie 3: E loses (e_grant=0)");
-
+        check(grant, 4'b0001, "tie 3: back to core0");
         @(posedge clk); #1;
-        check(p_grant, 1'b0, "round-robin tie 4: back to E (p_grant=0)");
-        check(e_grant, 1'b1, "round-robin tie 4: E wins (e_grant=1)");
+        check(grant, 4'b0010, "tie 4: back to core1");
 
-        p_req = 0; e_req = 0;
-
-        // A lone requester must still be granted immediately regardless
-        // of whatever the alternating history says - round-robin only
-        // decides actual TIES, it must never make an uncontended access
-        // wait its turn.
-        @(posedge clk); #1;
-        e_req = 1;
+        // ===== N=4 fairness: all four request continuously =====
+        // From reset, rotation should visit exactly 0,1,2,3,0,1,2,3 -
+        // deterministic proof no core is ever skipped among 4.
+        reset = 1; @(posedge clk); #1; reset = 0;
+        req = 4'b1111;
         #1;
-        check(e_grant, 1'b1, "E alone after ties: still granted immediately");
-        e_req = 0;
-
-        // Reset again before the next scenario, so it starts from the
-        // same known "P wins the first tie" state the test after it
-        // depends on.
-        reset = 1;
+        check(grant, 4'b0001, "4-way rotation: core0 (1st)");
         @(posedge clk); #1;
-        reset = 0;
-
-        // Real memory behavior through the arbiter: E writes a word
-        // while it holds the bus alone, P later reads it back through
-        // ITS OWN port - proves both cores really share the same
-        // underlying memory, not two separate ones.
-        e_req = 1; e_addr = 32'h10; e_write_data = 32'hCAFEBABE;
-        e_mem_write = 1; e_mem_size = 2'b10;
+        check(grant, 4'b0010, "4-way rotation: core1 (2nd)");
         @(posedge clk); #1;
-        e_mem_write = 0; e_req = 0;
+        check(grant, 4'b0100, "4-way rotation: core2 (3rd)");
+        @(posedge clk); #1;
+        check(grant, 4'b1000, "4-way rotation: core3 (4th)");
+        @(posedge clk); #1;
+        check(grant, 4'b0001, "4-way rotation: wraps back to core0");
+        @(posedge clk); #1;
+        check(grant, 4'b0010, "4-way rotation: core1 again");
 
-        p_req = 1; p_addr = 32'h10; p_mem_size = 2'b10;
+        // Core2 goes momentarily idle right when it would be its turn -
+        // the arbiter must move on to the next actual requester instead
+        // of stalling. (Each check below reflects the grant computed
+        // from the register state the PRECEDING edge just latched,
+        // combined with whatever req currently is - since req is set
+        // BEFORE each edge and held through its check, this correctly
+        // traces one rotation step per edge.)
+        req = 4'b1011; // core2 not requesting this cycle
+        @(posedge clk); #1;
+        check(grant, 4'b1000, "core2 idle: rotation moves on, doesn't stall on the gap");
+
+        // Core2 rejoins - must be served on ITS next real opportunity,
+        // not skipped forever for having missed one turn.
+        req = 4'b1111;
+        @(posedge clk); #1;
+        check(grant, 4'b1000, "core3 still being served this step");
+        @(posedge clk); #1;
+        check(grant, 4'b0001, "rotation continues to core0");
+        @(posedge clk); #1;
+        check(grant, 4'b0010, "rotation reaches core1 again");
+        @(posedge clk); #1;
+        check(grant, 4'b0100, "core2 confirmed NOT skipped - gets its turn");
+
+        req = {NUM_CORES{1'b0}};
+
+        // Real memory behavior through the arbiter: core1 writes a
+        // word while it holds the bus alone, core0 later reads it back
+        // through ITS OWN port - proves all cores really share the
+        // same underlying memory.
+        req = 4'b0010; set_addr(1, 32'h10); set_write_data(1, 32'hCAFEBABE);
+        mem_write[1] = 1; set_mem_size(1, 2'b10);
+        @(posedge clk); #1;
+        mem_write[1] = 0; req = 4'b0000;
+
+        req = 4'b0001; set_addr(0, 32'h10); set_mem_size(0, 2'b10);
         #1;
-        check((p_read_data === 32'hCAFEBABE), 1'b1, "P reads back E's write through shared mem");
+        check((read_data === 32'hCAFEBABE), 4'b0001, "core0 reads back core1's write through shared mem");
 
         // A write attempted while LOSING arbitration must not land -
-        // E tries to write while P is simultaneously requesting; this
-        // is (thanks to the reset just above) the first tie again, so
-        // P wins, and E's write this cycle must be silently dropped,
-        // not just delayed.
-        p_req = 1; p_addr = 32'h20; p_mem_write = 0; p_mem_size = 2'b10;
-        e_req = 1; e_addr = 32'h20; e_write_data = 32'h11111111;
-        e_mem_write = 1; e_mem_size = 2'b10;
+        // core1 tries to write while core0 is simultaneously
+        // requesting (core0 wins per the first-tie-after-this-point
+        // rotation state), so core1's write this cycle must be
+        // silently dropped, not just delayed.
+        reset = 1; @(posedge clk); #1; reset = 0; // fresh: core0 wins next tie
+        req = 4'b0001; set_addr(0, 32'h20); mem_write[0] = 0; set_mem_size(0, 2'b10);
+        req = req | 4'b0010; set_addr(1, 32'h20); set_write_data(1, 32'h11111111);
+        mem_write[1] = 1; set_mem_size(1, 2'b10);
         @(posedge clk); #1;
-        p_mem_write = 0; e_mem_write = 0; p_req = 0; e_req = 0;
-        p_req = 1; p_addr = 32'h20; p_mem_size = 2'b10;
+        mem_write[0] = 0; mem_write[1] = 0; req = 4'b0000;
+        req = 4'b0001; set_addr(0, 32'h20); set_mem_size(0, 2'b10);
         #1;
-        check((p_read_data === 32'h00000000), 1'b1, "E write dropped, lost arbitration");
+        check((read_data === 32'h00000000), 4'b0001, "core1 write dropped, lost arbitration");
 
         if (errors == 0) $display("ALL SHARED_BUS TESTS PASSED");
         else $display("%0d SHARED_BUS TESTS FAILED", errors);

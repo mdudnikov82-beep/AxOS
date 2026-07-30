@@ -1,100 +1,112 @@
-// Cross-core communication test: E-core (sw/shared_producer.hex)
-// writes a payload + ready flag into shared memory; P-core
+// Cross-core communication test: e0-core (sw/shared_producer.hex)
+// writes a payload + ready flag into shared memory; p0-core
 // (sw/shared_consumer.hex) polls for it, reads the payload, and
 // computes a result that can only be correct (127) if it genuinely
 // observed the OTHER core's write through the arbitrated shared_bus -
-// not just "both cores ran without crashing" like tb_soc.v proves.
+// not just "cores ran without crashing" like tb_soc.v proves. p1/e1
+// run independent private-memory-only programs alongside, proving the
+// cross-core handshake still works correctly on the generalized N-way
+// bus with OTHER cores concurrently active too, not just as a 2-core
+// degenerate case.
 `timescale 1ns/1ps
 
-`ifndef P_INSTR_HEX
-`define P_INSTR_HEX "sw/shared_consumer.hex"
+`ifndef P0_INSTR_HEX
+`define P0_INSTR_HEX "sw/shared_consumer.hex"
 `endif
-`ifndef E_INSTR_HEX
-`define E_INSTR_HEX "sw/shared_producer.hex"
+`ifndef E0_INSTR_HEX
+`define E0_INSTR_HEX "sw/shared_producer.hex"
+`endif
+`ifndef P1_INSTR_HEX
+`define P1_INSTR_HEX "sw/test1.hex"
+`endif
+`ifndef E1_INSTR_HEX
+`define E1_INSTR_HEX "sw/test1.hex"
 `endif
 
 module tb_shared_soc;
     reg clk;
     reg reset;
-    wire p_halted, e_halted, both_halted;
-    wire [31:0] p_tohost, e_tohost;
+    wire p0_halted, p1_halted, e0_halted, e1_halted, all_halted;
+    wire [31:0] p0_tohost, p1_tohost, e0_tohost, e1_tohost;
 
-    integer expect_p_tohost, expect_e_tohost;
+    integer expect_p0, expect_e0, expect_p1, expect_e1;
     integer max_cycles;
     integer cycle_count;
     integer trace_enabled;
-    integer p_fail, e_fail;
+    integer any_fail;
 
     soc_top #(
         .INSTR_MEM_WORDS(1024),
-        .P_INSTR_HEX(`P_INSTR_HEX),
-        .E_INSTR_HEX(`E_INSTR_HEX),
+        .P0_INSTR_HEX(`P0_INSTR_HEX), .P1_INSTR_HEX(`P1_INSTR_HEX),
+        .E0_INSTR_HEX(`E0_INSTR_HEX), .E1_INSTR_HEX(`E1_INSTR_HEX),
         .DATA_MEM_BYTES(8192)
     ) dut (
         .clk(clk), .reset(reset),
-        .p_halted(p_halted), .p_tohost(p_tohost),
-        .e_halted(e_halted), .e_tohost(e_tohost),
-        .both_halted(both_halted)
+        .p0_halted(p0_halted), .p0_tohost(p0_tohost),
+        .p1_halted(p1_halted), .p1_tohost(p1_tohost),
+        .e0_halted(e0_halted), .e0_tohost(e0_tohost),
+        .e1_halted(e1_halted), .e1_tohost(e1_tohost),
+        .all_halted(all_halted)
     );
 
     always #5 clk = ~clk;
+
+    task check_core(input [31:0] got, input [31:0] expected, input [24*8-1:0] name);
+        begin
+            $display("%0s: tohost=%0d (0x%h)", name, got, got);
+            if (got === expected) begin
+                $display("PASS: %0s matches expected value %0d", name, expected);
+            end else begin
+                $display("FAIL: %0s tohost=%0d, expected=%0d", name, got, expected);
+                any_fail = 1;
+            end
+        end
+    endtask
 
     initial begin
         $dumpfile("tb_shared_soc.vcd");
         $dumpvars(0, tb_shared_soc);
 
-        if (!$value$plusargs("EXPECT_P_TOHOST=%d", expect_p_tohost)) expect_p_tohost = 127;
-        if (!$value$plusargs("EXPECT_E_TOHOST=%d", expect_e_tohost)) expect_e_tohost = 77;
+        if (!$value$plusargs("EXPECT_P0_TOHOST=%d", expect_p0)) expect_p0 = 127;
+        if (!$value$plusargs("EXPECT_E0_TOHOST=%d", expect_e0)) expect_e0 = 77;
+        if (!$value$plusargs("EXPECT_P1_TOHOST=%d", expect_p1)) expect_p1 = 42;
+        if (!$value$plusargs("EXPECT_E1_TOHOST=%d", expect_e1)) expect_e1 = 42;
         if (!$value$plusargs("MAX_CYCLES=%d", max_cycles)) max_cycles = 150;
         trace_enabled = $test$plusargs("TRACE");
 
         clk = 0;
         reset = 1;
         cycle_count = 0;
+        any_fail = 0;
         @(posedge clk); @(posedge clk);
         reset = 0;
 
         if (trace_enabled) begin
-            $display("cyc | P: pc       stall | E: pc       stall | p_req p_gr e_req e_gr");
-            $display("----+---------------------+---------------------+---------------------");
+            $display("cyc | p0: pc       stall | e0: pc       stall | p0_req p0_gr e0_req e0_gr");
+            $display("----+---------------------+---------------------+---------------------------");
         end
 
-        while (!both_halted && cycle_count < max_cycles) begin
+        while (!all_halted && cycle_count < max_cycles) begin
             @(posedge clk);
             cycle_count = cycle_count + 1;
             if (trace_enabled) begin
-                $display("%3d | P: %h  %b     | E: %h  %b     |   %b     %b    %b     %b",
-                         cycle_count, dut.p_core.pc, dut.p_core.mem_stall,
-                         dut.e_core.pc, dut.e_core.mem_stall,
-                         dut.p_bus_req, dut.p_bus_grant, dut.e_bus_req, dut.e_bus_grant);
+                $display("%3d | p0: %h  %b     | e0: %h  %b     |    %b      %b      %b      %b",
+                         cycle_count, dut.p0_core.pc, dut.p0_core.mem_stall,
+                         dut.e0_core.pc, dut.e0_core.mem_stall,
+                         dut.p0_bus_req, dut.p0_bus_grant, dut.e0_bus_req, dut.e0_bus_grant);
             end
         end
 
-        if (!both_halted) begin
-            $display("FAIL: not both cores halted within %0d cycles (P halted=%b, E halted=%b)",
-                      max_cycles, p_halted, e_halted);
+        if (!all_halted) begin
+            $display("FAIL: not all 4 cores halted within %0d cycles (p0=%b p1=%b e0=%b e1=%b)",
+                      max_cycles, p0_halted, p1_halted, e0_halted, e1_halted);
         end else begin
-            $display("Both cores halted after %0d cycles.", cycle_count);
-
-            p_fail = 0;
-            $display("P-core (consumer): tohost=%0d (0x%h)", p_tohost, p_tohost);
-            if (p_tohost === expect_p_tohost) begin
-                $display("PASS: P-core tohost matches expected value %0d", expect_p_tohost);
-            end else begin
-                $display("FAIL: P-core tohost=%0d, expected=%0d", p_tohost, expect_p_tohost);
-                p_fail = 1;
-            end
-
-            e_fail = 0;
-            $display("E-core (producer): tohost=%0d (0x%h)", e_tohost, e_tohost);
-            if (e_tohost === expect_e_tohost) begin
-                $display("PASS: E-core tohost matches expected value %0d", expect_e_tohost);
-            end else begin
-                $display("FAIL: E-core tohost=%0d, expected=%0d", e_tohost, expect_e_tohost);
-                e_fail = 1;
-            end
-
-            if (!p_fail && !e_fail) $display("PASS: cross-core communication verified (P read E's write)");
+            $display("All 4 cores halted after %0d cycles.", cycle_count);
+            check_core(p0_tohost, expect_p0, "p0-core (consumer)");
+            check_core(e0_tohost, expect_e0, "e0-core (producer)");
+            check_core(p1_tohost, expect_p1, "p1-core (independent)");
+            check_core(e1_tohost, expect_e1, "e1-core (independent)");
+            if (!any_fail) $display("PASS: cross-core communication verified (p0 read e0's write)");
         end
 
         $finish;
