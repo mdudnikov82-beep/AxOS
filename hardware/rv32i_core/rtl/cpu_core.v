@@ -53,9 +53,12 @@ module cpu_core #(
     wire [3:0]  alu_op;
     wire [1:0]  mem_size;
 
-    // Minimal RV32F (see fp_regfile.v/fp_addsub.v/fp_mul.v).
+    // Minimal RV32F (see fp_regfile.v/fp_addsub.v/fp_mul.v/fp_div.v).
+    localparam FP_MUL = 3'b010;
+    localparam FP_DIV = 3'b011;
+
     wire        fp_reg_write, is_fp_mem;
-    wire [1:0]  fp_op;
+    wire [2:0]  fp_op;
     wire [31:0] fp_rs1_data, fp_rs2_data;
     reg  [31:0] fp_rd_data;
 
@@ -144,13 +147,26 @@ module cpu_core #(
     // already keeps the integer regfile's reg_write=0 for every
     // RV32F instruction, since rd's 5-bit number aliases between the
     // two register files).
-    wire [31:0] fpu_addsub_result, fpu_mul_result;
+    wire [31:0] fpu_addsub_result, fpu_mul_result, fpu_div_result;
+
+    // FDIV.S is a genuine multi-cycle operation (see fp_div.v) - a new
+    // functional-unit-latency stall, distinct from mem_stall (shared-
+    // bus arbitration wait). start pulses exactly once (the cycle
+    // fpu_div_busy is still 0, before the unit's own registered state
+    // takes over) and does not re-fire while busy holds this same
+    // still-decoded instruction in place.
+    wire is_fdiv_instr = fp_reg_write && !is_fp_mem && (fp_op == FP_DIV);
+    wire fpu_div_busy, fpu_div_done;
+    wire fpu_div_start = is_fdiv_instr && !fpu_div_busy;
+    wire fpu_div_stall = is_fdiv_instr && !fpu_div_done;
 
     // Same !mem_stall gating as the integer regfile's write enable -
     // a stalled FLW (targeting the shared-bus region) must not commit
     // garbage into fp_regfile on a losing arbitration cycle, the exact
     // bug class mem_stall already exists to prevent on the integer side.
-    wire fp_regfile_write_en = fp_reg_write && !mem_stall;
+    // fpu_div_stall gets the identical treatment: a division result
+    // only commits on the one cycle it's actually done.
+    wire fp_regfile_write_en = fp_reg_write && !mem_stall && !fpu_div_stall;
 
     fp_regfile fprf (
         .clk(clk), .rs1_addr(rs1), .rs2_addr(rs2),
@@ -168,14 +184,25 @@ module cpu_core #(
         .result(fpu_mul_result)
     );
 
+    fp_div fpdiv (
+        .clk(clk), .reset(reset), .start(fpu_div_start),
+        .a(fp_rs1_data), .b(fp_rs2_data),
+        .busy(fpu_div_busy), .done(fpu_div_done), .result(fpu_div_result)
+    );
+
     // FLW's write-back is the loaded memory data; FADD.S/FSUB.S write
     // fp_addsub's result (op_sub selects which); FMUL.S writes
-    // fp_mul's - a dedicated mux kept independent of the integer
+    // fp_mul's; FDIV.S writes fp_div's (an explicit branch - falling
+    // through to the addsub default here would silently compute the
+    // wrong operation instead of dividing, the same "silent wrong
+    // branch" bug class already documented in control_unit.v's own
+    // LUI comment) - a dedicated mux kept independent of the integer
     // path's mem_to_reg mux, per this feature's design review.
     always @(*) begin
-        if (is_fp_mem)          fp_rd_data = effective_mem_read_data;
-        else if (fp_op == 2'b10) fp_rd_data = fpu_mul_result;
-        else                      fp_rd_data = fpu_addsub_result;
+        if (is_fp_mem)           fp_rd_data = effective_mem_read_data;
+        else if (fp_op == FP_MUL) fp_rd_data = fpu_mul_result;
+        else if (fp_op == FP_DIV) fp_rd_data = fpu_div_result;
+        else                       fp_rd_data = fpu_addsub_result;
     end
 
     // Branch comparison - funct3 selects which relation BEQ/BNE/BLT/
@@ -220,7 +247,7 @@ module cpu_core #(
         if (reset) begin
             pc       <= 32'b0;
             halted_r <= 1'b0;
-        end else if (!halted_r && !mem_stall) begin
+        end else if (!halted_r && !mem_stall && !fpu_div_stall) begin
             pc <= next_pc;
             if (opcode == OP_SYSTEM) halted_r <= 1'b1;
         end

@@ -87,12 +87,19 @@ if %errorlevel% neq 0 goto :error
 if %errorlevel% neq 0 (echo FAILED: tb_fp_forward_unit & "%VVP%" out_tb_fpfwd.vvp & goto :error)
 echo   OK
 
+echo [12] fp_div (multi-cycle)...
+"%IVERILOG%" -o out_tb_fpdiv.vvp rtl\fp_div.v tb\tb_fp_div.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_fpdiv.vvp | findstr /C:"ALL FP_DIV TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_fp_div & "%VVP%" out_tb_fpdiv.vvp & goto :error)
+echo   OK
+
 echo.
 echo ===== Full core: hand-assembled program (asm_test1.py) =====
 python sw\asm_test1.py sw\test1.hex
 if %errorlevel% neq 0 goto :error
 
-"%IVERILOG%" -o out_tb_cpu1.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v tb\tb_cpu.v
+"%IVERILOG%" -o out_tb_cpu1.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\cpu_core.v tb\tb_cpu.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_cpu1.vvp +EXPECT_TOHOST=42 | findstr /C:"PASS: tohost matches" >nul
 if %errorlevel% neq 0 (echo FAILED: hand-assembled program & "%VVP%" out_tb_cpu1.vvp +EXPECT_TOHOST=42 & goto :error)
@@ -107,7 +114,7 @@ if %errorlevel% neq 0 goto :error
 python sw\bin2hex.py sw\test_basic.bin sw\test_basic.hex
 if %errorlevel% neq 0 goto :error
 
-"%IVERILOG%" -DINSTR_HEX=\"sw/test_basic.hex\" -o out_tb_cpu2.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v tb\tb_cpu.v
+"%IVERILOG%" -DINSTR_HEX=\"sw/test_basic.hex\" -o out_tb_cpu2.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\cpu_core.v tb\tb_cpu.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_cpu2.vvp +EXPECT_TOHOST=110 | findstr /C:"PASS: tohost matches" >nul
 if %errorlevel% neq 0 (echo FAILED: compiled C program & "%VVP%" out_tb_cpu2.vvp +EXPECT_TOHOST=110 & goto :error)
@@ -142,7 +149,7 @@ echo   OK (tohost=119)
 echo.
 echo ===== Mini-SoC: 2 P-cores + 2 E-cores (soc_top.v, N-way shared_bus) =====
 echo p0=hazard_test.hex(119) p1=test1.hex(42) e0=test_basic.hex(110) e1=test1.hex(42), all concurrent
-"%IVERILOG%" -o out_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\shared_bus.v rtl\soc_top.v tb\tb_soc.v
+"%IVERILOG%" -o out_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\shared_bus.v rtl\soc_top.v tb\tb_soc.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_soc.vvp | findstr /C:"PASS: all 4 cores matched" >nul
 if %errorlevel% neq 0 (echo FAILED: mini-SoC & "%VVP%" out_soc.vvp & goto :error)
@@ -155,7 +162,7 @@ python sw\asm_shared_producer.py sw\shared_producer.hex
 if %errorlevel% neq 0 goto :error
 python sw\asm_shared_consumer.py sw\shared_consumer.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -o out_shared_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\shared_bus.v rtl\soc_top.v tb\tb_shared_soc.v
+"%IVERILOG%" -o out_shared_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\shared_bus.v rtl\soc_top.v tb\tb_shared_soc.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_shared_soc.vvp | findstr /C:"PASS: cross-core communication verified" >nul
 if %errorlevel% neq 0 (echo FAILED: shared-bus cross-core test & "%VVP%" out_shared_soc.vvp & goto :error)
@@ -165,7 +172,7 @@ echo.
 echo ===== Minimal RV32F: FLW/FSW + FADD.S/FSUB.S/FMUL.S (E-core only) =====
 python sw\asm_fp_test.py sw\fp_test.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -o out_tb_cpufp.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v tb\tb_cpu_fp.v
+"%IVERILOG%" -o out_tb_cpufp.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\cpu_core.v tb\tb_cpu_fp.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_cpufp.vvp | findstr /C:"PASS: tohost matches" >nul
 if %errorlevel% neq 0 (echo FAILED: RV32F integration test & "%VVP%" out_tb_cpufp.vvp & goto :error)
@@ -188,6 +195,16 @@ if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_cpufppipe2.vvp +EXPECT_TOHOST=1094713344 | findstr /C:"PASS: tohost matches" >nul
 if %errorlevel% neq 0 (echo FAILED: pipelined RV32F hazard stress test & "%VVP%" out_tb_cpufppipe2.vvp +EXPECT_TOHOST=1094713344 & goto :error)
 echo   OK (tohost=1094713344 = 0x41400000 = 12.0)
+
+echo.
+echo ===== FDIV.S: multi-cycle restoring division (E-core only) =====
+python sw\asm_fp_div_test.py sw\fp_div_test.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_tb_cpufpdiv.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\cpu_core.v tb\tb_cpu_fp_div.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_cpufpdiv.vvp | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: FDIV.S integration test & "%VVP%" out_tb_cpufpdiv.vvp & goto :error)
+echo   OK (tohost=1080033280 = 0x40600000 = 3.5)
 
 echo.
 echo ===== ALL SIMULATIONS PASSED =====

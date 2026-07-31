@@ -88,6 +88,10 @@ def fmul_s(rd, rs1, rs2):
     return r_type(0b0001000, rs2, rs1, 0b000, rd, 0b1010011)
 
 
+def fdiv_s(rd, rs1, rs2):
+    return r_type(0b0001100, rs2, rs1, 0b000, rd, 0b1010011)
+
+
 # x1=5, x2=10, x3=x1+x2=15, mem[0]=x3, x4=mem[0](=15),
 # BEQ x3,x4,+8 (taken -> skip the next instruction),
 # x5=999 (SKIPPED if branch worked), x10=42, ECALL (tohost=42 if

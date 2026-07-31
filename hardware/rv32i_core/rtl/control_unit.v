@@ -40,7 +40,7 @@ module control_unit (
     // FADD.S/FSUB.S/FMUL.S instruction writes back.
     output reg        fp_reg_write,
     output reg        is_fp_mem,
-    output reg [1:0]  fp_op        // 00=add 01=sub 10=mul
+    output reg [2:0]  fp_op        // 000=add 001=sub 010=mul 011=div
 );
     localparam OP_LOAD    = 7'b0000011;
     localparam OP_IMM     = 7'b0010011;
@@ -57,9 +57,10 @@ module control_unit (
     localparam OP_STORE_FP = 7'b0100111;
     localparam OP_FP       = 7'b1010011;
 
-    localparam FP_ADD = 2'b00;
-    localparam FP_SUB = 2'b01;
-    localparam FP_MUL = 2'b10;
+    localparam FP_ADD = 3'b000;
+    localparam FP_SUB = 3'b001;
+    localparam FP_MUL = 3'b010;
+    localparam FP_DIV = 3'b011;
 
     // ALU op encoding shared with alu.v.
     localparam ALU_ADD  = 4'b0000;
@@ -188,7 +189,8 @@ module control_unit (
                     5'b00000: begin fp_op = FP_ADD; fp_reg_write = 1'b1; end // FADD.S
                     5'b00001: begin fp_op = FP_SUB; fp_reg_write = 1'b1; end // FSUB.S
                     5'b00010: begin fp_op = FP_MUL; fp_reg_write = 1'b1; end // FMUL.S
-                    // unimplemented RV32F op (div/sqrt/etc - out of
+                    5'b00011: begin fp_op = FP_DIV; fp_reg_write = 1'b1; end // FDIV.S
+                    // unimplemented RV32F op (sqrt/etc - out of
                     // scope): fp_reg_write stays 0 (its default),
                     // deliberately NOT set here, so an unrecognized op
                     // can never sneak a garbage FP register write

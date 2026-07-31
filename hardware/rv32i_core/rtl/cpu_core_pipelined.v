@@ -73,7 +73,7 @@ module cpu_core_pipelined #(
     // this ports the exact same 5-instruction subset already verified
     // on the single-cycle core: FLW/FSW + FADD.S/FSUB.S/FMUL.S).
     wire       id_fp_reg_write, id_is_fp_mem;
-    wire [1:0] id_fp_op;
+    wire [2:0] id_fp_op;
 
     control_unit cu (
         .opcode(if_id_opcode), .funct3(id_funct3), .funct7(id_funct7),
@@ -170,7 +170,7 @@ module cpu_core_pipelined #(
     // Minimal RV32F (see the ID-stage fp_regfile/control_unit wiring
     // above).
     reg        id_ex_fp_reg_write, id_ex_is_fp_mem;
-    reg [1:0]  id_ex_fp_op;
+    reg [2:0]  id_ex_fp_op;
     reg [31:0] id_ex_fp_rs1_data, id_ex_fp_rs2_data;
 
     // ==================== EX stage ====================
@@ -243,7 +243,12 @@ module cpu_core_pipelined #(
         .result(fpu_mul_result)
     );
 
-    wire [31:0] ex_fpu_result = (id_ex_fp_op == 2'b10) ? fpu_mul_result : fpu_addsub_result;
+    // Only add/sub/mul are wired on this core (FDIV.S is E-core only
+    // for now - see fp_div.v's own project notes) - an FDIV.S that
+    // somehow reached this pipeline would silently fall through to
+    // the addsub result rather than actually dividing, a known,
+    // documented gap rather than real support.
+    wire [31:0] ex_fpu_result = (id_ex_fp_op == 3'b010) ? fpu_mul_result : fpu_addsub_result;
 
     wire [31:0] ex_alu_a = id_ex_auipc ? id_ex_pc : (id_ex_lui ? 32'b0 : fwd_rs1);
     wire [31:0] ex_alu_b = id_ex_alu_src ? id_ex_imm : fwd_rs2;
@@ -414,7 +419,7 @@ module cpu_core_pipelined #(
             id_ex_pc <= 32'b0; id_ex_pc_plus4 <= 32'b0;
             id_ex_rs1_data <= 32'b0; id_ex_rs2_data <= 32'b0; id_ex_imm <= 32'b0;
             id_ex_mem_read_r <= 1'b0; id_ex_rd_r <= 5'b0;
-            id_ex_fp_reg_write <= 1'b0; id_ex_is_fp_mem <= 1'b0; id_ex_fp_op <= 2'b0;
+            id_ex_fp_reg_write <= 1'b0; id_ex_is_fp_mem <= 1'b0; id_ex_fp_op <= 3'b0;
             id_ex_fp_rs1_data <= 32'b0; id_ex_fp_rs2_data <= 32'b0;
             id_ex_fp_reg_write_r <= 1'b0;
         end else if (!halted_r) begin
