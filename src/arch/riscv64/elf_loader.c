@@ -34,12 +34,111 @@ typedef struct {
     unsigned long  p_align;
 } __attribute__((packed)) elf64_phdr_t;
 
+typedef struct {
+    unsigned int   sh_name;
+    unsigned int   sh_type;
+    unsigned long  sh_flags;
+    unsigned long  sh_addr;
+    unsigned long  sh_offset;
+    unsigned long  sh_size;
+    unsigned int   sh_link;
+    unsigned int   sh_info;
+    unsigned long  sh_addralign;
+    unsigned long  sh_entsize;
+} __attribute__((packed)) elf64_shdr_t;
+
+typedef struct {
+    unsigned long  r_offset;
+    unsigned long  r_info;
+    long           r_addend;
+} __attribute__((packed)) elf64_rela_t;
+
 #define ET_EXEC    2
 #define EM_RISCV   0xF3
 #define PT_LOAD    1
 #define ELFCLASS64 2
 
+#define SHT_RELA   4
+#define SHF_ALLOC  0x2UL
+#define ELF64_R_TYPE(info) ((unsigned int)((info) & 0xFFFFFFFFUL))
+
+/* Relocation types actually emitted by this repo's toolchain (GCC and
+ * rustc, both -mcmodel=medany) under --emit-relocs, confirmed empirically
+ * across every shipped rv64 user program (both C and Rust-linked) - see
+ * [[project_riscv_code_aslr]] for the readelf -r survey. R_RISCV_64 is
+ * the ONLY absolute-address type this codegen produces in a loaded
+ * section (literal pointers baked into .data/.rodata, e.g. axtaskb.c's
+ * launch_item_t[] table) - everything else below is either PC-relative
+ * (needs no fixup under a uniform load-address slide) or pure linker
+ * bookkeeping (ADD/SUB/SET delta-pairs and RELAX/ALIGN hints, invariant
+ * under a uniform slide by construction). */
+#define R_RISCV_NONE          0
+#define R_RISCV_64            2
+#define R_RISCV_BRANCH        16
+#define R_RISCV_JAL           17
+#define R_RISCV_CALL          18
+#define R_RISCV_CALL_PLT      19
+#define R_RISCV_PCREL_HI20    23
+#define R_RISCV_PCREL_LO12_I  24
+#define R_RISCV_PCREL_LO12_S  25
+#define R_RISCV_ADD8          33
+#define R_RISCV_ADD16         34
+#define R_RISCV_ADD32         35
+#define R_RISCV_ADD64         36
+#define R_RISCV_SUB8          37
+#define R_RISCV_SUB16         38
+#define R_RISCV_SUB32         39
+#define R_RISCV_SUB64         40
+#define R_RISCV_ALIGN         43
+#define R_RISCV_RVC_BRANCH    44
+#define R_RISCV_RVC_JUMP      45
+#define R_RISCV_RELAX         51
+#define R_RISCV_SET6          53
+#define R_RISCV_SET8          54
+#define R_RISCV_SET16         55
+#define R_RISCV_SET32         56
+
+/* Anything NOT in this list and not R_RISCV_64 (checked separately) is
+ * treated as unrecognized -> fail-closed fallback (see elf_load()):
+ * this program simply loads with code_slide=0 instead of risking a
+ * silently-wrong pointer from a fixup this loader doesn't understand. */
+static int reloc_is_skip_safe(unsigned int type) {
+    switch (type) {
+        case R_RISCV_NONE:
+        case R_RISCV_BRANCH: case R_RISCV_JAL:
+        case R_RISCV_CALL: case R_RISCV_CALL_PLT:
+        case R_RISCV_PCREL_HI20:
+        case R_RISCV_PCREL_LO12_I: case R_RISCV_PCREL_LO12_S:
+        case R_RISCV_ADD8: case R_RISCV_ADD16:
+        case R_RISCV_ADD32: case R_RISCV_ADD64:
+        case R_RISCV_SUB8: case R_RISCV_SUB16:
+        case R_RISCV_SUB32: case R_RISCV_SUB64:
+        case R_RISCV_ALIGN:
+        case R_RISCV_RVC_BRANCH: case R_RISCV_RVC_JUMP:
+        case R_RISCV_RELAX:
+        case R_RISCV_SET6: case R_RISCV_SET8:
+        case R_RISCV_SET16: case R_RISCV_SET32:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 #define ELF_ARGS_MAX 15 /* макс. число argv[] - см. запись в USER_ARGS_VA ниже */
+#define MAX_LOAD_SEGS 8 /* больше, чем реально бывает PT_LOAD в любой текущей программе (обычно 2) */
+
+/* Записи per-segment таблицы, построенной в Pass 1 - используется Pass 2
+ * (relocation fixup) для перевода r_offset (оригинальный, link-time vaddr
+ * из ELF) в физический адрес, и Pass 3 для повторного нахождения того же
+ * сегмента при маппинге. Внутри одного сегмента физические страницы
+ * гарантированно смежны (см. alloc_pages_raw - bump-аллокатор, без
+ * чужих alloc_page() между страницами одного сегмента), так что перевод
+ * offset->phys - обычная линейная арифметика, без постраничной таблицы. */
+typedef struct {
+    unsigned long orig_start; /* p_vaddr как в файле, ДО code_slide */
+    unsigned long orig_end;   /* orig_start + p_memsz */
+    unsigned long phys_base;
+} seg_rec_t;
 
 static void put_hex32(unsigned long v) {
     for (int s = 28; s >= 0; s -= 4)
@@ -139,34 +238,73 @@ int elf_load(const char *cmdline) {
     put_udec(hdr->e_phnum);
     uart_puts("\r\n");
 
-    /* Map PT_LOAD segments into the new page table.
-     * heap_end tracks the highest byte used by any segment — the heap
-     * starts on the next page boundary above it. */
-    unsigned long heap_end = 0;
+    /* Pass 0: scan PT_LOAD Phdrs (no allocation yet) to find the code's
+     * total original footprint, needed to size the code-ASLR budget
+     * before we pick a slide - see USER_HEAP_CEILING comment for why
+     * the window is shared with the heap. */
+    unsigned long footprint_end = USER_VA_BASE;
+    for (int i = 0; i < hdr->e_phnum; i++) {
+        elf64_phdr_t *ph = (elf64_phdr_t *)(buf + hdr->e_phoff
+                           + (unsigned long)i * hdr->e_phentsize);
+        if (ph->p_type != PT_LOAD || !ph->p_memsz) continue;
+        unsigned long end = ph->p_vaddr + ph->p_memsz;
+        if (end > footprint_end) footprint_end = end;
+    }
+    unsigned long footprint_size = footprint_end - USER_VA_BASE;
+
+    /* Code-ASLR: случайный page-aligned сдвиг всех PT_LOAD-сегментов и
+     * entry (ASLR для КОДА - см. project_riscv_code_aslr в памяти).
+     * Бюджет = окно [USER_VA_BASE, USER_HEAP_CEILING) минус реальный
+     * footprint минус тот же 64МБ heap-reserve, что и у сдвига кучи
+     * ниже (heap растёт от footprint_end, а не от USER_VA_BASE, так что
+     * heap-слайд сам адаптируется к сдвинутому коду без правок). */
+    unsigned long code_slide = 0;
+    {
+        unsigned long t0;
+        __asm__ volatile("csrr %0, time" : "=r"(t0));
+        unsigned long total_window = USER_HEAP_CEILING - USER_VA_BASE;
+        unsigned long heap_reserve = 64UL * 1024 * 1024;
+        unsigned long budget = 0;
+        if (total_window > footprint_size + heap_reserve)
+            budget = total_window - footprint_size - heap_reserve;
+        unsigned long slide_pages = budget / PAGE_SIZE;
+        if (slide_pages > 0) {
+            unsigned long seed = t0 ^ 0xD1B54A32D192ED03UL;
+            code_slide = (seed % slide_pages) * PAGE_SIZE;
+        }
+    }
+
+    /* Pass 1: allocate + copy every PT_LOAD segment at (original vaddr +
+     * code_slide), building segs[] so Pass 2 can translate a
+     * relocation's r_offset (an ORIGINAL, unslid vaddr - link-time
+     * addresses baked into the ELF) to the physical page that now holds
+     * it. No map_page_4k_pt yet - relocation fixups must land before
+     * any of this becomes user-visible (though in practice the kernel
+     * could write to it either way, since RAM is identity-mapped). */
+    seg_rec_t segs[MAX_LOAD_SEGS];
+    int nsegs = 0;
     for (int i = 0; i < hdr->e_phnum; i++) {
         elf64_phdr_t *ph = (elf64_phdr_t *)(buf + hdr->e_phoff
                            + (unsigned long)i * hdr->e_phentsize);
         if (ph->p_type != PT_LOAD || !ph->p_memsz) continue;
 
-        unsigned long vaddr  = ph->p_vaddr;
-        unsigned long filesz = ph->p_filesz;
-        unsigned long memsz  = ph->p_memsz;
-        unsigned long foff   = ph->p_offset;
-        unsigned int  pflags = ph->p_flags;
+        unsigned long orig_vaddr = ph->p_vaddr;
+        unsigned long vaddr      = orig_vaddr + code_slide;
+        unsigned long filesz     = ph->p_filesz;
+        unsigned long memsz      = ph->p_memsz;
+        unsigned long foff       = ph->p_offset;
 
-        unsigned long pte_flags = PTE_V | PTE_U | PTE_A | PTE_D;
-        if (pflags & 4) pte_flags |= PTE_R;
-        if (pflags & 2) pte_flags |= PTE_W;
-        if (pflags & 1) pte_flags |= PTE_X;
-
-        /* Reject any segment outside the user VA window. Without this,
-         * a crafted ELF (planted via SYS_WRITEFILE and exec()'d) could
-         * point a PT_LOAD segment at kernel RAM or MMIO — map_page_4k_pt
+        /* Reject any segment outside the user code/heap window. Without
+         * this, a crafted ELF (planted via SYS_WRITEFILE and exec()'d)
+         * could point a PT_LOAD segment at kernel RAM, MMIO, or the
+         * stack/argv/heap region above USER_HEAP_CEILING - map_page_4k_pt
          * would walk into the LIVE page-table sub-tree that
          * paging_create_user_pt() shares (by value) across every
          * process, letting a user-writable+executable mapping get
-         * planted into the kernel's own, other processes' page tables. */
-        if (vaddr < USER_VA_BASE || vaddr >= USER_VA_TOP || memsz > USER_VA_TOP - vaddr) {
+         * planted into the kernel's own, other processes' page tables.
+         * Bounded by USER_HEAP_CEILING (not USER_VA_TOP) now that code
+         * can slide - it must never reach the heap/stack/argv region. */
+        if (vaddr < USER_VA_BASE || vaddr >= USER_HEAP_CEILING || memsz > USER_HEAP_CEILING - vaddr) {
             uart_puts("[elf] segment vaddr outside user VA range, rejected\r\n");
             return -1;
         }
@@ -178,27 +316,125 @@ int elf_load(const char *cmdline) {
         uart_puts(" memsz=");
         put_udec(memsz);
         uart_puts(" flags=");
-        if (pflags & 4) uart_putc('R');
-        if (pflags & 2) uart_putc('W');
-        if (pflags & 1) uart_putc('X');
+        if (ph->p_flags & 4) uart_putc('R');
+        if (ph->p_flags & 2) uart_putc('W');
+        if (ph->p_flags & 1) uart_putc('X');
         uart_puts("\r\n");
 
-        for (unsigned long p = 0; p < npages; p++) {
-            void *phys = alloc_page();
-            if (!phys) { uart_puts("[elf] OOM for segment\r\n"); return -1; }
+        void *phys = alloc_pages_raw((unsigned int)npages);
+        if (!phys) { uart_puts("[elf] OOM for segment\r\n"); return -1; }
+        if (filesz) memcpy_s((unsigned char *)phys, buf + foff, filesz);
+        /* bytes beyond filesz (.bss) are already zero - alloc_page() zeroes */
 
-            unsigned long off = p * PAGE_SIZE;
-            if (off < filesz) {
-                unsigned long copy_sz = filesz - off;
-                if (copy_sz > PAGE_SIZE) copy_sz = PAGE_SIZE;
-                memcpy_s((unsigned char *)phys, buf + foff + off, copy_sz);
+        if (nsegs < MAX_LOAD_SEGS) {
+            segs[nsegs].orig_start = orig_vaddr;
+            segs[nsegs].orig_end   = orig_vaddr + memsz;
+            segs[nsegs].phys_base  = (unsigned long)phys;
+            nsegs++;
+        } else {
+            uart_puts("[elf] too many PT_LOAD segments for reloc table\r\n");
+            return -1;
+        }
+    }
+
+    /* Pass 2: parse the section header table (not needed by Pass 1/3,
+     * only for relocation fixup) - find SHT_RELA sections targeting an
+     * SHF_ALLOC section (excludes debug-info/symtab-relative entries),
+     * and dispatch each entry. Two sub-passes: first VALIDATE that every
+     * type is either the one fixup type (R_RISCV_64) or on the
+     * skip-safe whitelist; only if that holds do we APPLY the R_RISCV_64
+     * fixups. This avoids ever having to unwind a partially-patched
+     * program - if validation finds anything unexpected, code_slide is
+     * zeroed below and Pass 3 simply maps the (still pristine, since
+     * nothing was patched) segments at their original addresses -
+     * fail-closed: this ONE program loses code-ASLR, boot doesn't. */
+    int unsupported_reloc = 0;
+    if (hdr->e_shoff && hdr->e_shnum &&
+        hdr->e_shoff + (unsigned long)hdr->e_shnum * hdr->e_shentsize <= sz) {
+        elf64_shdr_t *shdrs = (elf64_shdr_t *)(buf + hdr->e_shoff);
+
+        for (int s = 0; s < hdr->e_shnum && !unsupported_reloc; s++) {
+            if (shdrs[s].sh_type != SHT_RELA) continue;
+            if (shdrs[s].sh_info >= hdr->e_shnum) continue;
+            if (!(shdrs[shdrs[s].sh_info].sh_flags & SHF_ALLOC)) continue;
+
+            unsigned long nrela = shdrs[s].sh_size / sizeof(elf64_rela_t);
+            elf64_rela_t *relas = (elf64_rela_t *)(buf + shdrs[s].sh_offset);
+            for (unsigned long r = 0; r < nrela; r++) {
+                unsigned int rtype = ELF64_R_TYPE(relas[r].r_info);
+                if (rtype == R_RISCV_64 || reloc_is_skip_safe(rtype)) continue;
+                uart_puts("[elf] unrecognized relocation type ");
+                put_udec(rtype);
+                uart_puts(", disabling code-ASLR for this program\r\n");
+                unsupported_reloc = 1;
+                break;
             }
+        }
 
-            map_page_4k_pt(pt, vaddr + off, (unsigned long)phys, pte_flags);
+        if (!unsupported_reloc && code_slide) {
+            for (int s = 0; s < hdr->e_shnum; s++) {
+                if (shdrs[s].sh_type != SHT_RELA) continue;
+                if (shdrs[s].sh_info >= hdr->e_shnum) continue;
+                if (!(shdrs[shdrs[s].sh_info].sh_flags & SHF_ALLOC)) continue;
+
+                unsigned long nrela = shdrs[s].sh_size / sizeof(elf64_rela_t);
+                elf64_rela_t *relas = (elf64_rela_t *)(buf + shdrs[s].sh_offset);
+                for (unsigned long r = 0; r < nrela; r++) {
+                    if (ELF64_R_TYPE(relas[r].r_info) != R_RISCV_64) continue;
+
+                    unsigned long off = relas[r].r_offset;
+                    for (int i = 0; i < nsegs; i++) {
+                        if (off >= segs[i].orig_start && off < segs[i].orig_end) {
+                            unsigned long phys = segs[i].phys_base + (off - segs[i].orig_start);
+                            *(unsigned long *)phys += code_slide;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    unsigned long final_slide = unsupported_reloc ? 0 : code_slide;
+
+    /* Pass 3: map every PT_LOAD segment's already-allocated physical
+     * pages at its final (possibly slid) virtual address. heap_end
+     * tracks the highest byte used by any segment - the heap starts on
+     * the next page boundary above it. */
+    unsigned long heap_end = 0;
+    for (int i = 0; i < hdr->e_phnum; i++) {
+        elf64_phdr_t *ph = (elf64_phdr_t *)(buf + hdr->e_phoff
+                           + (unsigned long)i * hdr->e_phentsize);
+        if (ph->p_type != PT_LOAD || !ph->p_memsz) continue;
+
+        unsigned long vaddr = ph->p_vaddr + final_slide;
+        unsigned long memsz = ph->p_memsz;
+        unsigned int  pflags = ph->p_flags;
+
+        unsigned long pte_flags = PTE_V | PTE_U | PTE_A | PTE_D;
+        if (pflags & 4) pte_flags |= PTE_R;
+        if (pflags & 2) pte_flags |= PTE_W;
+        if (pflags & 1) pte_flags |= PTE_X;
+
+        unsigned long phys_base = 0;
+        for (int j = 0; j < nsegs; j++) {
+            if (segs[j].orig_start == ph->p_vaddr) { phys_base = segs[j].phys_base; break; }
+        }
+
+        unsigned long npages = (memsz + PAGE_SIZE - 1) / PAGE_SIZE;
+        for (unsigned long p = 0; p < npages; p++) {
+            unsigned long off = p * PAGE_SIZE;
+            map_page_4k_pt(pt, vaddr + off, phys_base + off, pte_flags);
         }
 
         unsigned long seg_end = vaddr + memsz;
         if (seg_end > heap_end) heap_end = seg_end;
+    }
+
+    if (final_slide) {
+        uart_puts("[elf] code_slide=0x");
+        put_hex32(final_slide);
+        uart_puts("\r\n");
     }
 
     /* User stack: one page, случайный адрес (ASLR) внутри
@@ -209,7 +445,7 @@ int elf_load(const char *cmdline) {
     map_page_4k_pt(pt, stack_va, (unsigned long)stack_phys,
                    PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D);
 
-    unsigned long entry = hdr->e_entry;
+    unsigned long entry = hdr->e_entry + final_slide;
     unsigned long usp   = stack_va + PAGE_SIZE - 16;
 
     /* Derive a short process name from the filename (strip extension). */
@@ -222,7 +458,8 @@ int elf_load(const char *cmdline) {
     int pid = proc_create(name, entry, pt, usp);
     if (pid < 0) { uart_puts("[elf] no free process slot\r\n"); return -1; }
 
-    procs[pid].stack_va = stack_va;
+    procs[pid].stack_va   = stack_va;
+    procs[pid].code_slide = final_slide;
 
     /* argv: одна страница на USER_ARGS_VA - массив указателей (argv[]),
      * NULL-terminated, в начале страницы, сами строки следом. argv[0] =

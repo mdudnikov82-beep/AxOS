@@ -7,16 +7,30 @@
 """
 import os, struct, sys
 
+# Было 2048 сект./1МБ, 512Б/кластер - вплотную к пределу (DATA_SECTORS=2037
+# из максимум 2046 адресуемых 6-секторным FAT'ом кластеров). --emit-relocs
+# (см. project_riscv_code_aslr) увеличил каждый скомпилированный .elf на
+# размер сохранённых таблиц релокаций, и общий рост ~50 программ впервые
+# переполнил образ ("No space for MTEOVER.ELF"). Вместо того чтобы просто
+# раздуть TOTAL_SECTORS (это НЕ помогло бы само по себе - FAT остался бы
+# тем же 6-секторным, 2046 записей - тем же жёстким потолком адресуемых
+# данных независимо от TOTAL_SECTORS), кластер увеличен до 4 секторов/2КБ:
+# тот же 6-секторный FAT из ~2046 записей теперь адресует ~4МБ данных
+# вместо ~1МБ - тот же SECTORS_PER_FAT, впятеро больше полезного места.
+# fat12.c читает sectors_per_cluster/root_entries из самого BPB в рантайме
+# (bpb->sectors_per_cluster и т.д.) - править нужно только его собственный
+# FAT12_TOTAL_SECTORS (см. комментарий там), держать в синхроне с TOTAL_SECTORS.
 SECTOR_SIZE        = 512
-TOTAL_SECTORS      = 2048        # 1 МБ — должно совпадать с fat12.c
+TOTAL_SECTORS      = 8192        # 4 МБ — должно совпадать с fat12.c
 RESERVED_SECTORS   = 1
 NUM_FATS           = 1
-ROOT_ENTRIES       = 64
+ROOT_ENTRIES       = 128
 SECTORS_PER_FAT    = 6
-SECTORS_PER_CLUSTER= 1
+SECTORS_PER_CLUSTER= 4
 CLUSTER_SIZE       = SECTOR_SIZE * SECTORS_PER_CLUSTER
 ROOT_DIR_SECTORS   = (ROOT_ENTRIES * 32) // SECTOR_SIZE
 DATA_SECTORS       = TOTAL_SECTORS - RESERVED_SECTORS - NUM_FATS * SECTORS_PER_FAT - ROOT_DIR_SECTORS
+DATA_CLUSTERS      = DATA_SECTORS // SECTORS_PER_CLUSTER
 
 def set_fat(fat, idx, val):
     off = (idx * 3) // 2
@@ -111,7 +125,15 @@ def main():
     next_cluster = 2
     for idx, (fname, data) in enumerate(files):
         nc = max(1, (len(data) + CLUSTER_SIZE - 1) // CLUSTER_SIZE)
-        if next_cluster - 2 + nc > DATA_SECTORS:
+        # Было "> DATA_SECTORS" - сравнивало число КЛАСТЕРОВ с числом
+        # СЕКТОРОВ, оставалось незамеченным только пока SECTORS_PER_CLUSTER=1
+        # (тогда кластеры==секторам). При SECTORS_PER_CLUSTER=4 эта проверка
+        # пропустила бы кластеры далеко за реальным DATA_CLUSTERS - Python
+        # slice-assignment в data_area[base:...] МОЛЧА растягивает bytearray
+        # за пределы задуманного размера вместо ошибки, что незаметно
+        # испортило бы раскладку всего образа. Найдено при пересмотре кода
+        # ради этой самой правки, не поймано бы никаким текущим тестом.
+        if next_cluster - 2 + nc > DATA_CLUSTERS:
             sys.exit(f'No space for {fname}')
         start = next_cluster
         for c in range(nc):
