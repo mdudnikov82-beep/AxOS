@@ -128,6 +128,15 @@ static struct pipe_buf pipe_bufs[PIPE_MAX];
 // USER_PROGRAM_SLOTS == 4 - см. #define выше в этом файле.
 static int slot_redir_pipe[USER_PROGRAM_SLOTS] = {-1, -1, -1, -1};
 
+// 1, если ЭТОТ слот - настоящий владелец своего slot_redir_pipe (создан
+// через sys_exec_redir), а не унаследовал его от родителя через fork()
+// (см. SYS_FORK). Пайп рассчитан РОВНО на одного писателя (см. коммент
+// у struct pipe_buf) - если потомок, ПРОСТО унаследовавший доступ,
+// выйдет раньше родителя, он не должен сигналить writer_done=1 и
+// обрывать поток читателю, пока настоящий владелец (родитель) ещё
+// пишет. on_task_exit сигналит EOF только когда is_own==1.
+static int slot_redir_pipe_is_own[USER_PROGRAM_SLOTS] = {0, 0, 0, 0};
+
 // Разбирает "PIPE:N" (N - одна цифра, 0..PIPE_MAX-1). Возвращает id или
 // -1, если s не соответствует этому шаблону.
 static int pipe_id_from_name(const char* s) {
@@ -173,8 +182,13 @@ void on_task_exit(int user_slot_index, int exit_code) {
     if (slot_redir_pipe[user_slot_index] >= 0) {
         // Писатель pipe'а завершился - читателю (если он сейчас
         // заблокирован в SYS_FREAD) нужно увидеть EOF, а не ждать вечно.
-        pipe_bufs[slot_redir_pipe[user_slot_index]].writer_done = 1;
-        slot_redir_pipe[user_slot_index] = -1;
+        // Только НАСТОЯЩИЙ владелец сигналит EOF - потомок, унаследовавший
+        // доступ через fork() (slot_redir_pipe_is_own==0), мог выйти раньше
+        // родителя, который ещё пишет (см. комментарий у is_own выше).
+        if (slot_redir_pipe_is_own[user_slot_index])
+            pipe_bufs[slot_redir_pipe[user_slot_index]].writer_done = 1;
+        slot_redir_pipe[user_slot_index]     = -1;
+        slot_redir_pipe_is_own[user_slot_index] = 0;
     } else if (slot_redir_buf[user_slot_index]) {
         vfs_write(slot_redir_file[user_slot_index],
                   slot_redir_buf[user_slot_index],
@@ -1091,6 +1105,7 @@ void sys_exec_redir(char* arg) {
         int pipe_id = pipe_id_from_name((char*)a->redir_out);
         if (pipe_id >= 0) {
             slot_redir_pipe[slot] = pipe_id;
+            slot_redir_pipe_is_own[slot] = 1;
             pipe_bufs[pipe_id].len = 0;
             pipe_bufs[pipe_id].read_pos = 0;
             pipe_bufs[pipe_id].writer_done = 0;
@@ -1156,10 +1171,50 @@ void sys_fork_impl(unsigned long long parent_rsp) {
     slot_heap_brk[child_slot]  = slot_heap_brk[parent_slot];
     slot_wx_delta[child_slot]    = slot_wx_delta[parent_slot];
     slot_wx_data_off[child_slot] = slot_wx_data_off[parent_slot];
-    // Явно НЕ наследуется в этой версии (см. план/README): открытые fd
-    // (fd_table остаётся привязан к слоту родителя) и активный редирект
-    // вывода - потомок стартует с чистого листа по обоим пунктам.
-    slot_redir_pipe[child_slot] = -1;
+    // Открытые через SYS_OPEN файлы/PIPE:N по-прежнему НЕ наследуются
+    // (fd_table остаётся привязан к слоту родителя - см. план/README) -
+    // это отдельная, более рискованная переделка (pipe_bufs.in_use не
+    // ref-counted, close() любого владельца рвёт pipe независимо от
+    // остальных - трогать без отдельного design review не стали).
+    //
+    // Активный РЕДИРЕКТ ВЫВОДА (то, что реально выделил родитель этому
+    // потомку) теперь наследуется - раньше форкнутый потомок писателя
+    // конвейера/файлового редиректа молча терял целевой пайп/файл и
+    // писал в никуда:
+    //   - pipe: копируем сам pipe_id (pipe_bufs - статический массив,
+    //     не malloc'нутый указатель с одним владельцем - копировать
+    //     значение безопасно), но potomok НЕ становится "владельцем"
+    //     (slot_redir_pipe_is_own оставляем 0) - иначе его более ранний
+    //     exit() послал бы читателю EOF, пока родитель ещё пишет (см.
+    //     комментарий у slot_redir_pipe_is_own выше).
+    //   - файловый батч-редирект: слот_redir_buf - malloc'нутый указатель
+    //     с ЕДИНСТВЕННЫМ владельцем (on_task_exit его free()'ит) -
+    //     скопировать СЫРОЙ указатель означало бы double-free/use-after-
+    //     free при выходе первого из двух процессов, поэтому потомок
+    //     получает СОБСТВЕННУЮ копию буфера (независимый malloc).
+    slot_redir_pipe[child_slot]         = slot_redir_pipe[parent_slot];
+    slot_redir_pipe_is_own[child_slot]  = 0;
+    if (slot_redir_buf[parent_slot]) {
+        unsigned char* child_buf = (unsigned char*)malloc(REDIR_BUF_SIZE);
+        if (child_buf) {
+            for (unsigned int i = 0; i < slot_redir_len[parent_slot]; i++)
+                child_buf[i] = slot_redir_buf[parent_slot][i];
+            slot_redir_buf[child_slot] = child_buf;
+            slot_redir_len[child_slot] = slot_redir_len[parent_slot];
+            int fi = 0;
+            while (slot_redir_file[parent_slot][fi] && fi < 12) {
+                slot_redir_file[child_slot][fi] = slot_redir_file[parent_slot][fi];
+                fi++;
+            }
+            slot_redir_file[child_slot][fi] = '\0';
+        } else {
+            slot_redir_buf[child_slot] = 0;
+            slot_redir_len[child_slot] = 0;
+        }
+    } else {
+        slot_redir_buf[child_slot] = 0;
+        slot_redir_len[child_slot] = 0;
+    }
     slot_tty[child_slot] = slot_tty[parent_slot];
 
     frame[0] = (unsigned long long)child_pid; // родителю: pid потомка

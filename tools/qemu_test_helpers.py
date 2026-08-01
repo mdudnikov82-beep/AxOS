@@ -40,6 +40,7 @@ KEY_NAMES = {
     " ": "spc",
     ".": "dot",
     "-": "minus",
+    "|": "shift-backslash",  # confirmed empirically - QEMU has no "pipe"/"bar" key name
 }
 
 
