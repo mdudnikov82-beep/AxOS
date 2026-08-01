@@ -9,6 +9,7 @@ void proc_init(void) {
     for (int i = 0; i < MAX_PROCS; i++) {
         procs[i].state          = PROC_UNUSED;
         procs[i].pid            = i;
+        procs[i].parent_pid     = -1;
         procs[i].wait_pid       = -1;
         procs[i].wake_tick      = 0;
         procs[i].stdout_pipe_id = -1;
@@ -28,6 +29,7 @@ int proc_create(const char *name, unsigned long entry,
         if (procs[i].state != PROC_UNUSED) continue;
 
         procs[i].state          = PROC_RUNNABLE;
+        procs[i].parent_pid     = current_pid;  /* -1 at cold boot (no caller yet) */
         procs[i].exit_code      = 0;
         procs[i].wait_pid       = -1;
         procs[i].wake_tick      = 0;
@@ -141,6 +143,23 @@ void proc_set_priority(int pid, int priority) {
     if (priority < PRIORITY_MIN) priority = PRIORITY_MIN;
     if (priority > PRIORITY_MAX) priority = PRIORITY_MAX;
     procs[pid].priority = priority;
+}
+
+/* См. proc.h - часть фикса zombie-DoS. */
+int proc_count_zombie_children(int parent_pid) {
+    int n = 0;
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (procs[i].state == PROC_ZOMBIE && procs[i].parent_pid == parent_pid) n++;
+    }
+    return n;
+}
+
+void proc_reap_children(int parent_pid) {
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (procs[i].state == PROC_ZOMBIE && procs[i].parent_pid == parent_pid) {
+            procs[i].state = PROC_UNUSED;
+        }
+    }
 }
 
 extern int pipe_ready(int pipe_id); // syscall.c - 1 если у pipe'а есть данные или писатель закрылся

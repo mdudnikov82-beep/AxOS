@@ -134,6 +134,7 @@ void trap_handler(unsigned long cause, unsigned long epc,
                     procs[epid].state  = PROC_UNUSED;  /* collected synchronously */
                 }
             }
+            proc_reap_children(epid);  /* zombie-DoS fix, see proc.h */
             schedule((unsigned long *)sp, epc);
             return;
         }

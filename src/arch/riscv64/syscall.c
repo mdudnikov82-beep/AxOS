@@ -446,6 +446,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
                 procs[kpid].state     = PROC_UNUSED;
             }
         }
+        proc_reap_children(kpid);  /* zombie-DoS fix, see proc.h */
         schedule(frame, sepc);
         user_access_disable();
         return;
@@ -533,6 +534,10 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
                 procs[epid].state     = PROC_UNUSED;
             }
         }
+        /* Zombie-DoS fix (see proc.h): sweep our OWN un-wait()'d zombie
+         * children now - once we're gone, nobody else will ever know to
+         * collect them. */
+        proc_reap_children(epid);
         /* schedule() switches to the next RUNNABLE process (or idles via its
          * own wfi if none exist) and updates frame/sepc/satp in place. */
         schedule(frame, sepc);
@@ -628,6 +633,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
             procs[waiter].state        = PROC_RUNNABLE;
             procs[waiter].regs[REG_A0] = arg0;
             procs[epid].state          = PROC_UNUSED;  /* collected synchronously */
+            proc_reap_children(epid);  /* zombie-DoS fix, see proc.h */
             schedule(frame, sepc);
             user_access_disable();
             return;
@@ -942,6 +948,17 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
          * sepc, как у любого другого syscall'а. Потомок же не "return"'ит
          * отсюда вообще - строим ему ОТДЕЛЬНЫЙ proc_t ниже, с СОБСТВЕННОЙ
          * копией текущего кадра (a0=0 - fork() возвращает 0 потомку). */
+        /* Zombie-DoS fix (see proc.h): refuse another fork() while the
+         * caller already has too many of its own children sitting
+         * un-wait()'d as zombies - forces it to reap (wait()) before it
+         * can keep spawning, instead of being able to exhaust all
+         * MAX_PROCS slots for the whole system with e.g. "fork() then
+         * immediately exit() in the child, forever, never wait()". */
+        #define MAX_UNREAPED_ZOMBIES_PER_PARENT 2
+        if (proc_count_zombie_children(current_pid) >= MAX_UNREAPED_ZOMBIES_PER_PARENT) {
+            ret = -1; break;
+        }
+
         int child_pid = -1;
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_UNUSED) { child_pid = i; break; }
@@ -957,6 +974,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[child_pid].sepc           = sepc + 4;  /* резюмировать ПОСЛЕ этого ecall'а, как и родитель */
         procs[child_pid].state          = PROC_RUNNABLE;
         procs[child_pid].pid            = child_pid;
+        procs[child_pid].parent_pid     = current_pid;
         procs[child_pid].wait_pid       = -1;
         procs[child_pid].exit_code      = 0;
         procs[child_pid].wake_tick      = 0;
@@ -1060,6 +1078,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
                 procs[kpid].state     = PROC_UNUSED;  /* collected synchronously */
             }
         }
+        proc_reap_children(kpid);  /* zombie-DoS fix, see proc.h */
         ret = 0;
         break;
     }

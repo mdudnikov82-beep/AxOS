@@ -28,6 +28,11 @@
 typedef struct {
     int           state;
     int           pid;
+    int           parent_pid;   /* who created us (fork() or exec()'d us); -1 for the
+                                  * very first boot process. See proc_reap_children() -
+                                  * a terminating process sweeps its OWN un-wait()'d
+                                  * zombie children, since nothing else in this system
+                                  * (no init/reparenting) will ever collect them. */
     int           wait_pid;     /* target pid when PROC_WAITING */
     int           exit_code;
     unsigned long wake_tick;    /* CSR `time` value to wake at, when PROC_SLEEPING */
@@ -101,3 +106,21 @@ void  proc_set_priority(int pid, int priority);
  * interrupted, since it must run even while the CPU is idling with
  * nothing current. */
 void  proc_wake_sleepers(void);
+
+/* Zombie-DoS fix: without any init-style reparenting, a process that
+ * fork()s children and never wait()s for them leaves permanent zombies
+ * (nothing else will ever know to collect a pid it was never told
+ * about) - MAX_PROCS is only 8, so a handful of unreaped forks can wedge
+ * the entire system ("No free process slots" for everyone, not just the
+ * offender). Two-part fix:
+ *   - proc_count_zombie_children(): SYS_FORK (syscall.c) refuses to
+ *     create another child once the caller already has too many
+ *     un-wait()'d zombies sitting around, forcing it to reap before
+ *     spawning more (same idea as a real OS's RLIMIT_NPROC).
+ *   - proc_reap_children(): called at EVERY site that fully terminates a
+ *     process (SYS_EXIT/SYS_KILL/seccomp-kill/SYS_POWER's nested-shell
+ *     exit, all in syscall.c, plus kernel_main.c's page-fault kill) -
+ *     sweeps that process's own zombies immediately, since once its
+ *     creator is gone nobody else ever will. */
+int   proc_count_zombie_children(int parent_pid);
+void  proc_reap_children(int parent_pid);

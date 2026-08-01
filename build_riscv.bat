@@ -703,6 +703,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\aslrtest_rv64.elf) do echo   aslrtest_rv64.elf: %%~zF bytes
 
+echo [U109] zombietest.c...
+"%CC%" %UFLAGS% -c %USRC%\zombietest.c -o %OUT%\uzombietest.o
+if %errorlevel% neq 0 goto :error
+
+echo [U110] Linking zombietest...
+"%LD%" -m elf64lriscv --emit-relocs -T %USRC%\user_rv64.ld -o %OUT%\zombietest_rv64.elf %OUT%\ucrt0.o %OUT%\uzombietest.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\zombietest_rv64.elf) do echo   zombietest_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -761,6 +771,7 @@ copy /b %OUT%\mlstest_rv64.elf     rv64build\fs\rv64\MLSTEST.ELF
 copy /b %OUT%\sectest_rv64.elf     rv64build\fs\rv64\SECTEST.ELF
 copy /b %OUT%\cfisectest_rv64.elf  rv64build\fs\rv64\CFISECTS.ELF
 copy /b %OUT%\aslrtest_rv64.elf    rv64build\fs\rv64\ASLRTEST.ELF
+copy /b %OUT%\zombietest_rv64.elf  rv64build\fs\rv64\ZOMBIETS.ELF
 copy /b %USRC%\index.htm           rv64build\fs\rv64\INDEX.HTM
 copy /b %USRC%\term.bmp            rv64build\fs\rv64\TERM.BMP
 copy /b %USRC%\about.bmp           rv64build\fs\rv64\ABOUT.BMP
