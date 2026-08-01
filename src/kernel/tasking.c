@@ -544,13 +544,43 @@ unsigned int task_current_mls_level() {
     return current_task ? current_task->mls_level : 0;
 }
 
-// Устанавливает MLS-уровень ТЕКУЩЕЙ задачи (она поднимает себе уровень
-// сама - см. SYS_SET_LEVEL, kernel.c). Зажимаем в [0, MLS_LEVEL_MAX] -
-// не self-DoS через переполнение при дальнейших сравнениях уровней.
+// Устанавливает MLS-уровень ТЕКУЩЕЙ задачи - см. SYS_SET_LEVEL, kernel.c.
+// Зажимаем в [0, MLS_LEVEL_MAX] - не self-DoS через переполнение при
+// дальнейших сравнениях уровней. Изолированная (confined) задача может
+// этим только ПОНИЗИТЬ свой уровень - раньше проверки направления не
+// было вообще, и любая confined-задача могла сама поднять себя до s15 и
+// обойти "no read up" (ax_mls_dominates, kernel.c) целиком. Единственный
+// легитимный способ подняться выше 0 теперь - task_set_mls_level_for_slot()
+// ниже, вызываемый доверенным kernel-shell'ом ДО первого запуска задачи;
+// неизолированные (kernel_t) задачи никогда не вызывают эту функцию через
+// syscall (см. task_current_is_isolated), поэтому им ограничение не нужно.
 void task_set_current_mls_level(unsigned int level) {
     if (!current_task) return;
     if (level > MLS_LEVEL_MAX) level = MLS_LEVEL_MAX;
+    if (task_current_is_isolated() && level > current_task->mls_level) {
+        // Тот же формат audit-строки, что и ax_mls_dominates (kernel.c) -
+        // отказ должен быть настолько же видимым, как "no read up".
+        print_string("\033[31mavc:  denied  { setlevel }  for comm=\"");
+        print_string(current_task->name);
+        print_string("\"  scontext=axos:user_t:s");
+        print_uint(current_task->mls_level);
+        print_string("  tcontext=axos:user_t:s");
+        print_uint(level);
+        print_string("  (MLS: self-raise forbidden - use kernel-shell \"runlevel\")\033[0m\n");
+        return;
+    }
     current_task->mls_level = level;
+}
+
+// См. tasking.h - доверенная операция, только для kernel-shell'а.
+void task_set_mls_level_for_slot(int slot, unsigned int level) {
+    if (!current_task) return;
+    if (level > MLS_LEVEL_MAX) level = MLS_LEVEL_MAX;
+    task_t* t = current_task;
+    do {
+        if (t->user_slot_index == slot) { t->mls_level = level; return; }
+        t = t->next;
+    } while (t != current_task);
 }
 
 // Заполняет информацию о задаче с порядковым номером index (см. tasking.h).

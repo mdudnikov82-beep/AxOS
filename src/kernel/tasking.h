@@ -136,11 +136,23 @@ int task_get_info(unsigned int index, int* pid_out, char* name_out,
 
 // MLS (Multi-Level Security) уровень чувствительности текущей задачи -
 // s0..s15, как в "level" компоненте контекста SELinux (user:role:type:level).
-// Новые задачи стартуют на s0 (task_current_mls_level() == 0); задача
-// поднимает СЕБЕ уровень через SYS_SET_LEVEL (kernel.c) - самодекларация,
-// не аутентификация (см. предупреждение в kernel.c про "не криптография").
+// Новые задачи стартуют на s0 (task_current_mls_level() == 0).
+// task_set_current_mls_level (SYS_SET_LEVEL, kernel.c) - изолированная
+// задача может через него только ПОНИЗИТЬ себе уровень, никогда поднять
+// (раньше самоподъём был вообще ничем не ограничен - любая confined-задача
+// могла поднять себя до s15 и обойти "no read up" целиком). Единственный
+// способ поднять уровень ВЫШЕ 0 - task_set_mls_level_for_slot() ниже,
+// которым доверенный (unconfined) kernel-shell назначает НАЧАЛЬНЫЙ
+// уровень новой задаче ДО того, как она получит CPU в первый раз - см.
+// execute_command()'s "runlevel <N> <file>" в kernel.c.
 unsigned int task_current_mls_level();
 void task_set_current_mls_level(unsigned int level);
+
+// Устанавливает НАЧАЛЬНЫЙ MLS-уровень задачи по её user_slot_index -
+// доверенная (unconfined) операция, вызывать ТОЛЬКО из kernel-shell'а
+// сразу после task_create_user_isolated(), до первого переключения на
+// эту задачу. No-op, если слот не найден.
+void task_set_mls_level_for_slot(int slot, unsigned int level);
 
 // xorshift32 ГПСЧ, общий для ASLR стека и кучи. Сид = timer_ticks,
 // обновляется при каждом вызове.

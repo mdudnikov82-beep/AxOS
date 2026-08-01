@@ -1825,6 +1825,8 @@ void execute_command(char* cmd) {
         print_string("  lock        - write-protect the FAT12 disk (default)\n");
         print_string("  unlock      - allow writes to the FAT12 disk\n");
         print_string("  run <file>  - load and run a program from FAT12 (ring3)\n");
+        print_string("  runlevel <0-15> <file> [args...] - run at an initial MLS level\n");
+        print_string("                (trusted kernel-shell only - see clip.bin)\n");
         print_string("  usermode    - demo: jump to ring3, call syscall via int 0x80\n");
         print_string("  memtest     - test heap allocator (malloc/free)\n");
         print_string("  uftest      - DESTRUCTIVE: heap underflow test (expects halt)\n");
@@ -1854,6 +1856,34 @@ void execute_command(char* cmd) {
     } else if (str_eq(cmd, "unlock")) {
         vfs_set_locked(0);
         print_string("FAT12 disk unlocked (read-write).\n");
+    } else if (str_starts_with(cmd, "runlevel ")) {
+        // Доверенная (unconfined kernel-shell) версия "run": назначает
+        // задаче НАЧАЛЬНЫЙ MLS-уровень ДО того, как она получит CPU -
+        // единственный легитимный способ подняться выше s0 теперь, раз
+        // SYS_SET_LEVEL (task_set_current_mls_level) для изолированных
+        // задач разрешает только понижение (см. tasking.c/tasking.h).
+        // clip.bin по-прежнему сам вызывает ax_set_level(level) при
+        // старте - это не ломается: если уровень УЖЕ назначен здесь тем
+        // же значением, "поднятие" до собственного текущего уровня не
+        // является поднятием и проходит.
+        char* p = cmd + 9;
+        while (*p == ' ') p++;
+        unsigned int level = 0;
+        int any_digit = 0;
+        while (*p >= '0' && *p <= '9') { level = level * 10 + (unsigned int)(*p - '0'); p++; any_digit = 1; }
+        while (*p == ' ') p++;
+        if (!any_digit || !*p) {
+            print_string("Usage: runlevel <0-15> <file> [args...]\n");
+        } else {
+            int slot = do_exec(p);
+            if (slot == -1) print_string("File not found.\n");
+            else if (slot == -2) print_string("No free program slots, try again later.\n");
+            else if (slot == -3) print_string("Not a valid AxOS ELF executable.\n");
+            else {
+                task_set_mls_level_for_slot(slot, level);
+                print_string("Started.\n");
+            }
+        }
     } else if (str_starts_with(cmd, "run ")) {
         // Разбиваем "FILENAME [ARG1 ARG2 ...]"
         char* rest = cmd + 4;
