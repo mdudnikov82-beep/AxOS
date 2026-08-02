@@ -126,8 +126,8 @@ void trap_handler(unsigned long cause, unsigned long epc,
             procs[epid].win_is_base    = 0;
             procs[epid].win_is_topmost = 0;
             gfx_wm_mark_dirty();
-            pipe_mark_writer_done(procs[epid].stdout_pipe_id);
-            pipe_release_reader(procs[epid].stdin_pipe_id);
+            pipe_mark_writer_done(procs[epid].stdout_pipe_id, epid);
+            pipe_release_reader(procs[epid].stdin_pipe_id, epid);
             for (int i = 0; i < MAX_PROCS; i++) {
                 if (procs[i].state == PROC_WAITING && procs[i].wait_pid == epid) {
                     procs[i].state     = PROC_RUNNABLE;

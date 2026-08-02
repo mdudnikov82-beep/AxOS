@@ -84,19 +84,42 @@ int pipe_ready(int id) {
     return pipe_bufs[id].read_pos < pipe_bufs[id].len || pipe_bufs[id].writer_done;
 }
 
-/* См. proc.h. Вызывается при выходе ЛЮБОГО процесса (SYS_EXIT, SYS_KILL,
- * page-fault kill в kernel_main.c) - там, где известен pipe_id
- * завершающегося процесса. */
-/* См. proc.h - освобождает reader_owner (стороннего процесса больше
- * НЕ пускает эксклюзивность к чужому мёртвому владельцу навсегда) при
- * выходе процесса, чей stdin_pipe_id указывал на этот пайп. Вызывать
- * везде, где уже вызывается pipe_mark_writer_done() для того же pid. */
-void pipe_release_reader(int pipe_id) {
-    if (pipe_id >= 0 && pipe_id < PIPE_MAX) pipe_bufs[pipe_id].reader_owner = -1;
+/* fork() теперь наследует stdout_pipe_id/stdin_pipe_id (см. SYS_FORK) -
+ * значит НЕСКОЛЬКО живых процессов могут разделять один и тот же
+ * pipe_id одновременно (родитель + потомки). "Кто-то ещё жив с этим же
+ * pipe_id" проверяет обе функции ниже перед тем, как реально закрыть
+ * пайп читателю/освободить владение - без этого потомок, вышедший
+ * РАНЬШЕ родителя (обычное дело), обрывал бы поток или крал
+ * эксклюзивность читателя, пока родитель ещё жив и активно пишет/читает. */
+static int pipe_has_other_writer(int pipe_id, int dying_pid) {
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (i == dying_pid) continue;
+        if (procs[i].state != PROC_UNUSED && procs[i].stdout_pipe_id == pipe_id) return 1;
+    }
+    return 0;
 }
 
-void pipe_mark_writer_done(int pipe_id) {
-    if (pipe_id >= 0 && pipe_id < PIPE_MAX) pipe_bufs[pipe_id].writer_done = 1;
+static int pipe_has_other_reader(int pipe_id, int dying_pid) {
+    for (int i = 0; i < MAX_PROCS; i++) {
+        if (i == dying_pid) continue;
+        if (procs[i].state != PROC_UNUSED && procs[i].stdin_pipe_id == pipe_id) return 1;
+    }
+    return 0;
+}
+
+/* См. proc.h. Вызывается при выходе ЛЮБОГО процесса (SYS_EXIT, SYS_KILL,
+ * page-fault kill в kernel_main.c) - там, где известен pipe_id и pid
+ * завершающегося процесса. */
+void pipe_release_reader(int pipe_id, int dying_pid) {
+    if (pipe_id < 0 || pipe_id >= PIPE_MAX) return;
+    if (pipe_has_other_reader(pipe_id, dying_pid)) return; /* ещё кто-то читает - рано освобождать */
+    pipe_bufs[pipe_id].reader_owner = -1;
+}
+
+void pipe_mark_writer_done(int pipe_id, int dying_pid) {
+    if (pipe_id < 0 || pipe_id >= PIPE_MAX) return;
+    if (pipe_has_other_writer(pipe_id, dying_pid)) return; /* ещё кто-то пишет - рано слать EOF */
+    pipe_bufs[pipe_id].writer_done = 1;
 }
 
 /* ---- Syscall implementations ---- */
@@ -453,8 +476,8 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[kpid].win_is_topmost = 0;
         g_win_dirty = 1;
         if (g_click_owner_pid == kpid) g_click_owner_pid = -1;
-        pipe_mark_writer_done(procs[kpid].stdout_pipe_id);
-        pipe_release_reader(procs[kpid].stdin_pipe_id);
+        pipe_mark_writer_done(procs[kpid].stdout_pipe_id, kpid);
+        pipe_release_reader(procs[kpid].stdin_pipe_id, kpid);
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_WAITING && procs[i].wait_pid == kpid) {
                 procs[i].state        = PROC_RUNNABLE;
@@ -539,8 +562,8 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[epid].win_is_topmost = 0;
         g_win_dirty = 1;
         if (g_click_owner_pid == epid) g_click_owner_pid = -1;
-        pipe_mark_writer_done(procs[epid].stdout_pipe_id);
-        pipe_release_reader(procs[epid].stdin_pipe_id);
+        pipe_mark_writer_done(procs[epid].stdout_pipe_id, epid);
+        pipe_release_reader(procs[epid].stdin_pipe_id, epid);
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_WAITING && procs[i].wait_pid == epid) {
                 procs[i].state        = PROC_RUNNABLE;
@@ -1012,8 +1035,21 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[child_pid].wait_pid       = -1;
         procs[child_pid].exit_code      = 0;
         procs[child_pid].wake_tick      = 0;
-        procs[child_pid].stdout_pipe_id = -1;  /* НЕ наследуется - как и на x86 */
-        procs[child_pid].stdin_pipe_id  = -1;
+        // Теперь наследуется (раньше - "НЕ наследуется - как и на x86",
+        // до фикса project_x86_fork_redirect_inherit) - форкнутый потомок
+        // писателя/читателя конвейера больше не молча теряет редирект.
+        // Безопасно ровно потому, что pipe_mark_writer_done()/
+        // pipe_release_reader() выше теперь проверяют "жив ли ЕЩЁ КТО-ТО
+        // с тем же pipe_id" перед тем, как реально закрыть пайп -
+        // родитель и потомок могут разделять один pipe_id одновременно,
+        // и ранний выход одного из них (обычное дело) не рвёт поток
+        // другому. Конкурентное чтение НЕСКОЛЬКИМИ процессами с общим
+        // stdin_pipe_id - штатное поведение (as real POSIX fork() дублирует
+        // fd, оба видят один и тот же поток), sys_read() не проверяет
+        // reader_owner на каждый вызов - только SYS_EXEC_PIPE при новом
+        // подключении.
+        procs[child_pid].stdout_pipe_id = procs[current_pid].stdout_pipe_id;
+        procs[child_pid].stdin_pipe_id  = procs[current_pid].stdin_pipe_id;
         procs[child_pid].pagetable      = child_pt;
         procs[child_pid].heap_brk       = procs[current_pid].heap_brk;
         procs[child_pid].stack_va       = procs[current_pid].stack_va; /* тот же VA, отдельная физстраница (уже скопирована выше) */
@@ -1104,8 +1140,8 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         procs[kpid].win_is_topmost = 0;
         g_win_dirty = 1;
         if (g_click_owner_pid == kpid) g_click_owner_pid = -1;
-        pipe_mark_writer_done(procs[kpid].stdout_pipe_id);
-        pipe_release_reader(procs[kpid].stdin_pipe_id);
+        pipe_mark_writer_done(procs[kpid].stdout_pipe_id, kpid);
+        pipe_release_reader(procs[kpid].stdin_pipe_id, kpid);
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_WAITING && procs[i].wait_pid == kpid) {
                 procs[i].state        = PROC_RUNNABLE;

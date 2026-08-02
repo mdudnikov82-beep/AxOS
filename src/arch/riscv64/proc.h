@@ -80,15 +80,19 @@ extern int    current_pid;      /* -1 = kernel idle */
 
 /* Помечает pipe_bufs[pipe_id].writer_done = 1 (см. syscall.c) - вызывать
  * при завершении любого процесса, у которого stdout_pipe_id >= 0, чтобы
- * блокированный читатель увидел EOF, а не ждал вечно. No-op для
- * pipe_id < 0 (обычный процесс, не писатель pipe'а). */
-void pipe_mark_writer_done(int pipe_id);
+ * блокированный читатель увидел EOF, а не ждал вечно. dying_pid - pid
+ * ИМЕННО этого завершающегося процесса: с тех пор как fork() наследует
+ * stdout_pipe_id, несколько живых процессов могут разделять один
+ * pipe_id - функция сначала проверяет, не пишет ли туда ЕЩЁ КТО-ТО
+ * живой, и реально шлёт EOF только когда действительно ПОСЛЕДНИЙ
+ * писатель вышел. No-op для pipe_id < 0. */
+void pipe_mark_writer_done(int pipe_id, int dying_pid);
 
 /* Сбрасывает pipe_bufs[pipe_id].reader_owner (см. syscall.c) - вызывать
  * везде, где уже вызывается pipe_mark_writer_done(), для процесса, у
- * которого stdin_pipe_id >= 0. Без этого мёртвый читатель навсегда
- * "занимал" бы эксклюзивность к пайпу, не пуская никого следующего. */
-void pipe_release_reader(int pipe_id);
+ * которого stdin_pipe_id >= 0. dying_pid - та же логика "последний из
+ * разделяющих один pipe_id" после fork(), что и у pipe_mark_writer_done. */
+void pipe_release_reader(int pipe_id, int dying_pid);
 
 void  proc_init(void);
 

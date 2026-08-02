@@ -743,6 +743,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\pipehog_rv64.elf) do echo   pipehog_rv64.elf: %%~zF bytes
 
+echo [U117] forkredir.c...
+"%CC%" %UFLAGS% -c %USRC%\forkredir.c -o %OUT%\uforkredir.o
+if %errorlevel% neq 0 goto :error
+
+echo [U118] Linking forkredir...
+"%LD%" -m elf64lriscv --emit-relocs -T %USRC%\user_rv64.ld -o %OUT%\forkredir_rv64.elf %OUT%\ucrt0.o %OUT%\uforkredir.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\forkredir_rv64.elf) do echo   forkredir_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -805,6 +815,7 @@ copy /b %OUT%\zombietest_rv64.elf  rv64build\fs\rv64\ZOMBIETS.ELF
 copy /b %OUT%\pipew_rv64.elf       rv64build\fs\rv64\PIPEW.ELF
 copy /b %OUT%\piper_rv64.elf       rv64build\fs\rv64\PIPER.ELF
 copy /b %OUT%\pipehog_rv64.elf     rv64build\fs\rv64\PIPEHOG.ELF
+copy /b %OUT%\forkredir_rv64.elf   rv64build\fs\rv64\FORKREDR.ELF
 copy /b %USRC%\index.htm           rv64build\fs\rv64\INDEX.HTM
 copy /b %USRC%\term.bmp            rv64build\fs\rv64\TERM.BMP
 copy /b %USRC%\about.bmp           rv64build\fs\rv64\ABOUT.BMP
