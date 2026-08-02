@@ -24,9 +24,8 @@
 // USER_PROGRAM_SLOT_SIZE байт каждый (0x100000-0x120000), каждый со своим
 // приватным Page Directory (paging.c) - несколько программ могут работать
 // одновременно в изоляции друг от друга.
-#define USER_PROGRAM_SLOTS     4
-#define USER_PROGRAM_SLOT_SIZE 0x10000
-#define USER_PROGRAM_BASE      0x200000  // физ. слоты в PD[1] (supervisor huge page, без SMAP-конфликта)
+// USER_PROGRAM_SLOTS/SLOT_SIZE/BASE - см. memmap.h (через paging.h выше) -
+// централизованная карта адресов + _Static_assert на непересечение.
 
 // Аргументы командной строки для run-программ.
 // Блок sizeof(char*)*8 + строки живёт в конце каждого слота:
@@ -34,7 +33,7 @@
 //   виртуальный: USER_ARGS_VADDR (одинаков для всех задач — разные PD)
 // Ядро пишет char*[] указатели и строки по физическому адресу (identity-map),
 // задача видит их по USER_ARGS_VADDR через свой приватный PD.
-#define USER_ARGS_OFFSET   0xF800
+// USER_ARGS_OFFSET - см. memmap.h.
 #define USER_ARGS_VADDR    (USER_WINDOW_BASE + USER_ARGS_OFFSET)
 #define USER_ARGS_MAX_ARGC 7       // максимум 7 аргументов (argv[0]..argv[6] + NULL)
 #define USER_ARGS_STR_OFF  32      // строки после 8 указателей (8 * sizeof(char*) = 32)
@@ -63,10 +62,9 @@
 // использовался ПОЛНОСТЬЮ (vfs_read грузит файл вплоть до этого размера).
 // TTYS_BASE (screen.c) когда-то лежал внутри этого диапазона (0x158000) -
 // см. комментарий там про найденный этим и исправленный баг с порчей
-// консоли. Любой новый фиксированный физический адрес рядом должен либо
-// начинаться от 0x160000, либо быть публично проверен на пересечение.
-#define ELF_STAGING_SIZE (USER_ARGS_OFFSET + 0x200)
-#define ELF_STAGING_BASE 0x150000
+// консоли. ELF_STAGING_BASE/SIZE теперь в memmap.h вместе с
+// _Static_assert(ELF_STAGING_BASE + ELF_STAGING_SIZE <= TTYS_BASE) -
+// компилятор, а не человек, ловит следующий такой сдвиг.
 #define elf_staging_buf ((unsigned char*)ELF_STAGING_BASE)
 
 // slot_free[i] == 1, если слот i свободен. "run" занимает первый свободный

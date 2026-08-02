@@ -85,11 +85,10 @@ extern unsigned long long g_pool_base;
 #define POOL_PD_OFF   0x8000ULL
 #define POOL_PT_OFF   0xC000ULL
 
-// Виртуальное окно пользователя [USER_WINDOW_BASE, +SIZE).
+// Виртуальное окно пользователя [USER_WINDOW_BASE, +SIZE) - см. memmap.h
+// (централизованная карта адресов + _Static_assert на непересечение).
+#include "memmap.h"
 // USER_SPIN_ADDR — последние 2 байта окна: "jmp $" (EB FE) для spin.
-#define USER_WINDOW_BASE  0x100000
-#define USER_WINDOW_PAGES 16
-#define USER_WINDOW_SIZE  (USER_WINDOW_PAGES * 0x1000)
 #define USER_SPIN_ADDR    (USER_WINDOW_BASE + USER_WINDOW_SIZE - 2)
 
 // Включает 4-уровневую страничную адресацию.

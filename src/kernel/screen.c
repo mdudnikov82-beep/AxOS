@@ -1,3 +1,5 @@
+#include "memmap.h" // TTYS_BASE/FAT12_BASE - централизованная карта адресов + _Static_assert
+
 // ANSI SGR использует цвета 0-7 в порядке black,red,green,yellow,blue,magenta,cyan,white;
 // в VGA-атрибуте те же восемь цветов лежат в другом порядке - таблица переводит один в другой.
 static const unsigned char ansi_to_vga[8] = {0, 4, 2, 6, 1, 5, 3, 7};
@@ -49,8 +51,17 @@ struct tty_state {
 // первых ~5 строках экрана (868 испорченных байт / 160Б на строку).
 // Исправлено переносом TTYS_BASE за пределы ELF_STAGING (который
 // заканчивается на 0x15FA00) - до следующего свободного диапазона,
-// с запасом.
-#define TTYS_BASE 0x160000
+// с запасом. TTYS_BASE теперь в memmap.h вместе с
+// _Static_assert(ELF_STAGING_BASE + ELF_STAGING_SIZE <= TTYS_BASE) -
+// компилятор ловит следующий такой сдвиг сам.
+//
+// Проверка ЗДЕСЬ (а не в memmap.h) - реальный footprint ttys[] зависит
+// от sizeof(struct tty_state), который memmap.h не может увидеть (это
+// просто заголовок с числами, без определения структуры). Раньше
+// именно НЕЗНАНИЕ реального размера (только "адрес не пересекается",
+// не "адрес+размер не пересекается") и привело к настоящему багу выше.
+_Static_assert(sizeof(struct tty_state) * TTY_COUNT <= (FAT12_BASE - TTYS_BASE),
+               "memmap: ttys[] наезжает на FAT12_BASE - см. project_ttys_elf_staging_overlap");
 static struct tty_state* const ttys = (struct tty_state*) TTYS_BASE;
 static int active_tty = 0;
 

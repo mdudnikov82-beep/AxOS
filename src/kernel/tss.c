@@ -7,7 +7,7 @@
 // TSS.RSP0. IOPM-смещение по offset 102 (=104 → нет IOPM).
 // TSS-дескриптор в GDT теперь 16 байт (см. gdt.asm, gdt_tss).
 
-#define TSS_BASE 0x9B000
+#include "memmap.h" // TSS_BASE - централизованная карта адресов + _Static_assert
 #define TSS_SEG  0x30       // gdt_tss - gdt_start (6-й слот GDT, 64-бит дескриптор)
 
 #define KERNEL_STACK 0x90000
