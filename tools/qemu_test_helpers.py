@@ -31,6 +31,15 @@ QEMU_CANDIDATES = [
 ]
 QEMU_CPU = "Broadwell"
 
+# Было QEMU-default 128МБ (без явного -m) - см. src/kernel/paging.c
+# kheap_pick_pd_index()/kpool_pick_pd_index(): их диапазон кандидатов
+# зависит от РЕАЛЬНОГО объёма RAM (identity-mapping - выбранный индекс
+# должен указывать на существующую физическую память). Подняли RAM,
+# чтобы дать KASLR-lite больше вариантов БЕЗ разводки VA/PA (см.
+# подробный комментарий в paging.c про уже пробованную и откаченную
+# развязку) - держать здесь в СИНХРОНЕ с диапазонами в paging.c.
+RAM_SIZE = "512M"
+
 # Имена клавиш QEMU monitor "sendkey" для символов, у которых имя клавиши
 # не совпадает с самим символом. Всё остальное - send_text() переводит в
 # нижний регистр и шлёт как есть (QEMU не знает имён клавиш в верхнем
@@ -85,6 +94,7 @@ def launch_qemu(image, disk_image, monitor_port):
     args = [
         qemu,
         "-cpu", QEMU_CPU,
+        "-m", RAM_SIZE,
         "-drive", f"format=raw,file={image},if=floppy",
     ]
     if os.path.isfile(disk_image):

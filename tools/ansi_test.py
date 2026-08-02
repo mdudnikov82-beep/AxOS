@@ -86,6 +86,7 @@ def main():
     args = [
         qemu,
         "-cpu", QEMU_CPU,
+        "-m", "512M",  # see paging.c kheap_pick_pd_index() - must match run.bat/qemu_test_helpers.py
         "-drive", f"format=raw,file={IMAGE},if=floppy",
         "-drive", f"format=raw,file={DISK_IMAGE},if=ide,index=0,media=disk",
         "-boot", "a",
