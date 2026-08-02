@@ -230,6 +230,44 @@ if %errorlevel% neq 0 goto :error
 
 echo Copying user program into fs/ for FAT12 image...
 copy /b build\forksec.elf fs\FORKSEC.BIN
+
+echo Compiling user program (pipew.c)...
+gcc -m32 -ffreestanding -fstack-protector -finstrument-functions -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\pipew.c -o build\pipew.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\pipew.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o build\libaxiom\stack_chk.o build\libaxiom\cfi.o -o build\pipew.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\pipew.exe build\pipew.bin
+if %errorlevel% neq 0 goto :error
+
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\pipew.bin build\pipew.elf
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\pipew.elf fs\PIPEW.BIN
+
+echo Compiling user program (pipehog.c)...
+gcc -m32 -ffreestanding -fstack-protector -finstrument-functions -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\pipehog.c -o build\pipehog.o
+if %errorlevel% neq 0 goto :error
+
+echo Linking user program...
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\pipehog.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o build\libaxiom\stack_chk.o build\libaxiom\cfi.o -o build\pipehog.exe
+if %errorlevel% neq 0 goto :error
+
+echo Stripping user program to flat binary...
+objcopy -O binary build\pipehog.exe build\pipehog.bin
+if %errorlevel% neq 0 goto :error
+
+echo Wrapping flat binary in minimal ELF32...
+python tools\make_elf.py build\pipehog.bin build\pipehog.elf
+if %errorlevel% neq 0 goto :error
+
+echo Copying user program into fs/ for FAT12 image...
+copy /b build\pipehog.elf fs\PIPEHOG.BIN
 if %errorlevel% neq 0 goto :error
 
 echo Compiling user program (crashdemo.c)...

@@ -67,6 +67,13 @@ typedef struct {
     unsigned int  read_pos;
     int           writer_done;
     int           in_use;
+    // -1 - ни один читатель ещё не привязан к ЭТОЙ сессии пайпа; иначе
+    // pid ЕДИНСТВЕННОГО процесса, чей stdin_pipe_id разрешено указывать
+    // на этот id. Без этого ЛЮБОЙ SYS_EXEC_PIPE с произвольным in_id мог
+    // подключить СВОЕГО потомка к чужому уже активному "cmd1 | cmd2"
+    // (PIPE_MAX=2, легитимный шелл всегда использует id 0 - угадывать
+    // нечего) и подслушать/переманить байты. См. pipe_release_reader().
+    int           reader_owner;
 } pipe_buf_t;
 static pipe_buf_t pipe_bufs[PIPE_MAX];
 
@@ -80,6 +87,14 @@ int pipe_ready(int id) {
 /* См. proc.h. Вызывается при выходе ЛЮБОГО процесса (SYS_EXIT, SYS_KILL,
  * page-fault kill в kernel_main.c) - там, где известен pipe_id
  * завершающегося процесса. */
+/* См. proc.h - освобождает reader_owner (стороннего процесса больше
+ * НЕ пускает эксклюзивность к чужому мёртвому владельцу навсегда) при
+ * выходе процесса, чей stdin_pipe_id указывал на этот пайп. Вызывать
+ * везде, где уже вызывается pipe_mark_writer_done() для того же pid. */
+void pipe_release_reader(int pipe_id) {
+    if (pipe_id >= 0 && pipe_id < PIPE_MAX) pipe_bufs[pipe_id].reader_owner = -1;
+}
+
 void pipe_mark_writer_done(int pipe_id) {
     if (pipe_id >= 0 && pipe_id < PIPE_MAX) pipe_bufs[pipe_id].writer_done = 1;
 }
@@ -439,6 +454,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         g_win_dirty = 1;
         if (g_click_owner_pid == kpid) g_click_owner_pid = -1;
         pipe_mark_writer_done(procs[kpid].stdout_pipe_id);
+        pipe_release_reader(procs[kpid].stdin_pipe_id);
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_WAITING && procs[i].wait_pid == kpid) {
                 procs[i].state        = PROC_RUNNABLE;
@@ -524,6 +540,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         g_win_dirty = 1;
         if (g_click_owner_pid == epid) g_click_owner_pid = -1;
         pipe_mark_writer_done(procs[epid].stdout_pipe_id);
+        pipe_release_reader(procs[epid].stdin_pipe_id);
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_WAITING && procs[i].wait_pid == epid) {
                 procs[i].state        = PROC_RUNNABLE;
@@ -923,17 +940,34 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         if (!user_string_ok(arg0)) { ret = -1; break; }
         int out_id = (int)arg1;
         int in_id  = (int)arg2;
-        if (in_id >= 0 && !pipe_bufs[in_id].in_use) { ret = -1; break; }
+        if (in_id >= 0) {
+            if (!pipe_bufs[in_id].in_use) { ret = -1; break; }
+            /* Эксклюзивный читатель (см. reader_owner comment у
+             * pipe_buf_t) - отказ, если у пайпа уже есть ДРУГОЙ живой
+             * читатель. Раньше произвольный процесс мог сам вызвать
+             * exec_pipe с чужим активным in_id и подслушать чужой
+             * "cmd1 | cmd2" (PIPE_MAX=2, легитимный шелл всегда
+             * использует id 0 - угадывать нечего). */
+            int ro = pipe_bufs[in_id].reader_owner;
+            if (ro != -1 && procs[ro].state != PROC_UNUSED) { ret = -1; break; }
+        }
+        /* Отказ писать в чужую УЖЕ АКТИВНУЮ сессию пайпа - раньше
+         * безусловно перезаписывал/переиспользовал буфер, что рвало/
+         * портило чей-то ещё живой конвейер. */
+        if (out_id >= 0 && pipe_bufs[out_id].in_use) { ret = -1; break; }
+
         int pid = elf_load((const char *)arg0);
         if (pid < 0) { ret = -1; break; }
         if (out_id >= 0) {
             /* Только писатель сбрасывает буфер - читатель НЕ должен
              * затирать то, что писатель уже мог успеть произвести. */
-            pipe_bufs[out_id].len         = 0;
-            pipe_bufs[out_id].read_pos    = 0;
-            pipe_bufs[out_id].writer_done = 0;
-            pipe_bufs[out_id].in_use      = 1;
+            pipe_bufs[out_id].len          = 0;
+            pipe_bufs[out_id].read_pos     = 0;
+            pipe_bufs[out_id].writer_done  = 0;
+            pipe_bufs[out_id].reader_owner = -1;
+            pipe_bufs[out_id].in_use       = 1;
         }
+        if (in_id >= 0) pipe_bufs[in_id].reader_owner = pid;
         procs[pid].stdout_pipe_id = out_id;
         procs[pid].stdin_pipe_id  = in_id;
         ret = (long)pid;
@@ -1071,6 +1105,7 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         g_win_dirty = 1;
         if (g_click_owner_pid == kpid) g_click_owner_pid = -1;
         pipe_mark_writer_done(procs[kpid].stdout_pipe_id);
+        pipe_release_reader(procs[kpid].stdin_pipe_id);
         for (int i = 0; i < MAX_PROCS; i++) {
             if (procs[i].state == PROC_WAITING && procs[i].wait_pid == kpid) {
                 procs[i].state        = PROC_RUNNABLE;

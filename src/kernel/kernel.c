@@ -120,6 +120,16 @@ struct pipe_buf {
     unsigned int  read_pos;     // байт прочитано всего
     int           writer_done;  // 1 - задача-писатель завершилась (EOF для читателя)
     int           in_use;
+    // -1 - ни один читатель ещё не подключился к ЭТОЙ сессии пайпа; иначе
+    // slot ЕДИНСТВЕННОГО читателя, которому разрешено открыть "PIPE:N".
+    // Без этого ЛЮБОЙ процесс мог открыть "PIPE:0" и подслушать/украсть
+    // байты у чужого "cmd1 | cmd2" (PIPE_MAX=2, легитимный шелл всегда
+    // использует "PIPE:0" - угадывать нечего). "Первый открывший
+    // владеет" не убирает гонку полностью (шелл запускает читателя сразу
+    // после писателя, но не мгновенно), зато превращает "всегда работает
+    // без каких-либо условий" в "нужно реально выиграть гонку" - см.
+    // sys_open()/fd_release_owner()/sys_close() за сбросом на -1.
+    int           reader_owner;
 };
 static struct pipe_buf pipe_bufs[PIPE_MAX];
 
@@ -819,6 +829,7 @@ static void fd_release_owner(int owner_slot) {
         if (!fd_table[fd].valid || fd_table[fd].owner != owner_slot) continue;
         if (fd_table[fd].type == FD_TYPE_PIPE) {
             pipe_bufs[fd_table[fd].pipe_id].in_use = 0;
+            pipe_bufs[fd_table[fd].pipe_id].reader_owner = -1;
             fd_table[fd].valid = 0;
             continue;
         }
@@ -860,10 +871,17 @@ void sys_open(char* arg) {
     int pipe_id = pipe_id_from_name(name);
     if (pipe_id >= 0) {
         if (!pipe_bufs[pipe_id].in_use) return; // писатель ещё не запущен/уже закрыт
+        int caller = task_current_slot_index();
+        // Эксклюзивный читатель (см. reader_owner comment у struct
+        // pipe_buf) - отказ постороннему процессу, который пытается
+        // подслушать чужую активную сессию пайпа.
+        if (pipe_bufs[pipe_id].reader_owner != -1 &&
+            pipe_bufs[pipe_id].reader_owner != caller) return;
+        pipe_bufs[pipe_id].reader_owner = caller;
         fd_table[slot].type    = FD_TYPE_PIPE;
         fd_table[slot].pipe_id = pipe_id;
         fd_table[slot].flags   = O_RDONLY;
-        fd_table[slot].owner   = task_current_slot_index();
+        fd_table[slot].owner   = caller;
         fd_table[slot].buf     = 0;
         fd_table[slot].valid   = 1;
         a->result = slot;
@@ -969,6 +987,7 @@ void sys_close(char* arg) {
     if (fd_table[fd].type == FD_TYPE_PIPE) {
         // Нет буфера файла - освобождаем слот pipe'а для следующей команды.
         pipe_bufs[fd_table[fd].pipe_id].in_use = 0;
+        pipe_bufs[fd_table[fd].pipe_id].reader_owner = -1;
         fd_table[fd].valid = 0;
         return;
     }
@@ -1103,14 +1122,21 @@ void sys_exec_redir(char* arg) {
     if (a->result >= 0 && a->redir_out && ((char*)a->redir_out)[0]) {
         int slot = a->result;
         int pipe_id = pipe_id_from_name((char*)a->redir_out);
-        if (pipe_id >= 0) {
+        // Отказ, если пайп УЖЕ занят чужой активной сессией - раньше
+        // безусловно перезаписывал len/read_pos, что рвало/портило
+        // чей-то ЕЩЁ ЖИВОЙ "cmd1 | cmd2" (см. reader_owner comment
+        // выше). cmd1 уже exec'нут (do_exec выше) - просто не получает
+        // редирект и пишет на экран, как без "|" вообще - безопасный,
+        // видимый fallback, а не тихая порча чужого пайпа.
+        if (pipe_id >= 0 && !pipe_bufs[pipe_id].in_use) {
             slot_redir_pipe[slot] = pipe_id;
             slot_redir_pipe_is_own[slot] = 1;
             pipe_bufs[pipe_id].len = 0;
             pipe_bufs[pipe_id].read_pos = 0;
             pipe_bufs[pipe_id].writer_done = 0;
+            pipe_bufs[pipe_id].reader_owner = -1;
             pipe_bufs[pipe_id].in_use = 1;
-        } else {
+        } else if (pipe_id < 0) {
             unsigned char* buf = (unsigned char*)malloc(REDIR_BUF_SIZE);
             if (buf) {
                 slot_redir_buf[slot] = buf;

@@ -713,6 +713,36 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\zombietest_rv64.elf) do echo   zombietest_rv64.elf: %%~zF bytes
 
+echo [U111] pipew.c...
+"%CC%" %UFLAGS% -c %USRC%\pipew.c -o %OUT%\upipew.o
+if %errorlevel% neq 0 goto :error
+
+echo [U112] Linking pipew...
+"%LD%" -m elf64lriscv --emit-relocs -T %USRC%\user_rv64.ld -o %OUT%\pipew_rv64.elf %OUT%\ucrt0.o %OUT%\upipew.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\pipew_rv64.elf) do echo   pipew_rv64.elf: %%~zF bytes
+
+echo [U113] piper.c...
+"%CC%" %UFLAGS% -c %USRC%\piper.c -o %OUT%\upiper.o
+if %errorlevel% neq 0 goto :error
+
+echo [U114] Linking piper...
+"%LD%" -m elf64lriscv --emit-relocs -T %USRC%\user_rv64.ld -o %OUT%\piper_rv64.elf %OUT%\ucrt0.o %OUT%\upiper.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\piper_rv64.elf) do echo   piper_rv64.elf: %%~zF bytes
+
+echo [U115] pipehog.c...
+"%CC%" %UFLAGS% -c %USRC%\pipehog.c -o %OUT%\upipehog.o
+if %errorlevel% neq 0 goto :error
+
+echo [U116] Linking pipehog...
+"%LD%" -m elf64lriscv --emit-relocs -T %USRC%\user_rv64.ld -o %OUT%\pipehog_rv64.elf %OUT%\ucrt0.o %OUT%\upipehog.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\pipehog_rv64.elf) do echo   pipehog_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -772,6 +802,9 @@ copy /b %OUT%\sectest_rv64.elf     rv64build\fs\rv64\SECTEST.ELF
 copy /b %OUT%\cfisectest_rv64.elf  rv64build\fs\rv64\CFISECTS.ELF
 copy /b %OUT%\aslrtest_rv64.elf    rv64build\fs\rv64\ASLRTEST.ELF
 copy /b %OUT%\zombietest_rv64.elf  rv64build\fs\rv64\ZOMBIETS.ELF
+copy /b %OUT%\pipew_rv64.elf       rv64build\fs\rv64\PIPEW.ELF
+copy /b %OUT%\piper_rv64.elf       rv64build\fs\rv64\PIPER.ELF
+copy /b %OUT%\pipehog_rv64.elf     rv64build\fs\rv64\PIPEHOG.ELF
 copy /b %USRC%\index.htm           rv64build\fs\rv64\INDEX.HTM
 copy /b %USRC%\term.bmp            rv64build\fs\rv64\TERM.BMP
 copy /b %USRC%\about.bmp           rv64build\fs\rv64\ABOUT.BMP

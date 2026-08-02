@@ -84,6 +84,12 @@ extern int    current_pid;      /* -1 = kernel idle */
  * pipe_id < 0 (обычный процесс, не писатель pipe'а). */
 void pipe_mark_writer_done(int pipe_id);
 
+/* Сбрасывает pipe_bufs[pipe_id].reader_owner (см. syscall.c) - вызывать
+ * везде, где уже вызывается pipe_mark_writer_done(), для процесса, у
+ * которого stdin_pipe_id >= 0. Без этого мёртвый читатель навсегда
+ * "занимал" бы эксклюзивность к пайпу, не пуская никого следующего. */
+void pipe_release_reader(int pipe_id);
+
 void  proc_init(void);
 
 /* Allocate a process slot, fill PCB, return pid (>=0) or -1 */
