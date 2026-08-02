@@ -1165,6 +1165,25 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
     case SYS_SET_LEVEL: {
         unsigned int level = (unsigned int)arg0;
         if (level > 15) level = 15;
+        // Изолированная задача может этим только ПОНИЗИТЬ свой уровень -
+        // раньше проверки направления не было вообще, и любая задача
+        // могла сама поднять себя до s15 и обойти mls_dominates()'s
+        // "no read up" (см. ps/ps_info ниже) целиком. В отличие от x86
+        // (см. project_x86_mls_selfraise_fix - там понадобился trusted-
+        // launcher "runlevel" из-за clip.c) на RISC-V нет НИ ОДНОЙ
+        // программы, которая когда-либо легитимно повышает себе
+        // уровень - достаточно простого запрета, без замены механизма.
+        if (level > procs[current_pid].mls_level) {
+            uart_puts("\r\n\033[31mavc: denied { setlevel } scontext=axos:user_t:s");
+            put_udec(procs[current_pid].mls_level);
+            uart_puts(" tcontext=axos:user_t:s");
+            put_udec(level);
+            uart_puts(" (MLS: self-raise forbidden) comm='");
+            uart_puts(procs[current_pid].name);
+            uart_puts("'\033[0m\r\n");
+            ret = -1;
+            break;
+        }
         procs[current_pid].mls_level = level;
         ret = 0;
         break;
