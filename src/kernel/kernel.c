@@ -1140,6 +1140,27 @@ void sys_exec_redir(char* arg) {
 void sys_fork_impl(unsigned long long parent_rsp) {
     unsigned long long* frame = (unsigned long long*)parent_rsp;
 
+    // Та же "задача уже помечена на смерть" защита, что в начале
+    // syscall_dispatch - SYS_FORK её тоже обходил, так что задача,
+    // убитая ЭТИМ ЖЕ тиком (seccomp/иначе) чуть раньше, но ещё не
+    // реапнутая планировщиком, могла успеть fork()'нуться ещё раз.
+    if (task_current_is_exiting()) return;
+
+    // Seccomp gate: раз SYS_FORK обходит syscall_dispatch (см. коммент
+    // выше), он до сих пор ПОЛНОСТЬЮ обходил и его проверку маски -
+    // задача, сузившая себя БЕЗ бита SYS_FORK (AX_SC_FORK), всё равно
+    // могла fork()'нуться. Бит был декоративным. Тот же приём отказа,
+    // что и в syscall_dispatch: убить вызывающего, не выполняя fork.
+    if (!task_syscall_allowed(0x2A) /* SYS_FORK */) {
+        if (task_current_is_isolated()) {
+            print_string("\n\033[33m[seccomp] forbidden syscall 0x2A in '");
+            print_string(task_current_name());
+            print_string("' - killed\033[0m\n");
+            task_mark_current_exiting();
+        }
+        return;
+    }
+
     int parent_slot = task_current_slot_index();
     if (parent_slot < 0) { frame[0] = (unsigned long long)-1LL; return; }
 
