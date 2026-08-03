@@ -35,6 +35,16 @@ static char uart_getc_poll(void) {
     return (char)u[0];
 }
 
+/* proc_t.name is derived straight from the loaded filename (extension
+ * stripped, see elf_loader.c) - "AXDESK.ELF"/"AXTASKB.ELF" on disk become
+ * exactly "AXDESK"/"AXTASKB" here. Used to gate SYS_WIN_SET_BASE/
+ * SYS_WIN_SET_TOPMOST below to their one legitimate caller each. */
+static int name_is(const char *name, const char *expect) {
+    int i = 0;
+    for (; expect[i]; i++) if (name[i] != expect[i]) return 0;
+    return name[i] == '\0';
+}
+
 /* ---- File descriptor table ----
  * fd 0 = stdin  (UART RX)
  * fd 1 = stdout (UART TX)
@@ -884,7 +894,20 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
         /* Marks the calling process as the compositor's backdrop layer -
          * AxDesk only. Meaningful only once win_registered is also set
          * (AxDesk calls win_set_rect() first) - see composite_screen()
-         * and the click/keyboard-arbitration exemptions above. */
+         * and the click/keyboard-arbitration exemptions above.
+         *
+         * "AxDesk only" used to be just this comment - any process could
+         * call SYS_WIN_SET_BASE and, combined with SYS_WIN_SET_TOPMOST
+         * below, seize the whole display. Now enforced by process name
+         * (see name_is() above), the same "no unconfined tier to delegate
+         * to" constraint as the MLS fix (project_riscv_mls_selfraise_fix). */
+        if (!name_is(procs[current_pid].name, "AXDESK")) {
+            uart_puts("\r\n\033[31mavc: denied { win_set_base } scontext=axos:user_t comm='");
+            uart_puts(procs[current_pid].name);
+            uart_puts("' (AxDesk only)\033[0m\r\n");
+            ret = -1;
+            break;
+        }
         procs[current_pid].win_is_base = 1;
         g_win_dirty = 1;
         ret = 0;
@@ -895,7 +918,21 @@ void syscall_dispatch(unsigned long *frame, unsigned long sepc) {
          * layer - AxTaskbar only. Meaningful only once win_registered is
          * also set (win_set_rect() first, same ordering as win_set_base())
          * - see composite_screen()'s final pass and the click/keyboard-
-         * arbitration exemptions above. */
+         * arbitration exemptions above.
+         *
+         * Same gap and fix as SYS_WIN_SET_BASE just above: without this
+         * check any process could register a fullscreen rect and claim
+         * topmost, permanently covering the display and winning every
+         * click ahead of the real taskbar (Pass 1 in the mouse-state
+         * handler above matches the first win_is_topmost window found,
+         * unconditionally). */
+        if (!name_is(procs[current_pid].name, "AXTASKB")) {
+            uart_puts("\r\n\033[31mavc: denied { win_set_topmost } scontext=axos:user_t comm='");
+            uart_puts(procs[current_pid].name);
+            uart_puts("' (AxTaskbar only)\033[0m\r\n");
+            ret = -1;
+            break;
+        }
         procs[current_pid].win_is_topmost = 1;
         g_win_dirty = 1;
         ret = 0;
