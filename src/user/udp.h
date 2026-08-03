@@ -89,11 +89,21 @@ static unsigned int udp_recv(unsigned int *src_ip_out, unsigned short *src_port_
     unsigned char *ip = udp_rx + 14;
     if (ip[9] != IP_PROTO_UDP) return 0;
     unsigned int ihl = (unsigned int)(ip[0] & 0x0F) * 4;   // обычно 20, но не хардкодим
+    // РЕАЛЬНЫЙ БАГ (найден при аудите, есть на обеих платформах - tcp.h/
+    // icmp.h уже делают эту же проверку). ihl может быть больше 20
+    // (IP-опции) - без этой проверки udp[4]/udp[5] читались бы за
+    // пределами того, что n подтверждает, если пакет короче, чем
+    // заявляет свой же IHL.
+    if (n < 14 + ihl + 8) return 0;
     unsigned char *udp = ip + ihl;
 
     unsigned int udp_len = ((unsigned int)udp[4] << 8) | udp[5];
     unsigned int data_len = (udp_len > 8) ? (udp_len - 8) : 0;
     if (data_len > max_len) data_len = max_len;
+    // Не доверяем udp_len сверх того, что n реально подтверждает - та же
+    // защита, что уже есть в tcp_parse_segment()/icmp_maybe_respond().
+    unsigned int avail = (n > 14 + ihl + 8) ? (n - (14 + ihl + 8)) : 0;
+    if (data_len > avail) data_len = avail;
 
     unsigned char *data = udp + 8;
     unsigned char *dst = (unsigned char *)buf;
