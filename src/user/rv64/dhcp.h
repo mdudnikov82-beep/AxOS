@@ -163,18 +163,25 @@ static int dhcp_wait_for(unsigned char want_type, unsigned int xid, unsigned int
             unsigned char *ip = dhcp_rx + 14;
             if (ip[9] == IP_PROTO_UDP) {
                 unsigned int ihl = (unsigned int)(ip[0] & 0x0F) * 4;
-                unsigned char *udp = ip + ihl;
-                unsigned int dport = ((unsigned int)udp[2] << 8) | udp[3];
-                if (dport == DHCP_CLIENT_PORT && n > 14 + ihl + 8) {
-                    unsigned char *dhcp = udp + 8;
-                    unsigned int dhcp_len = n - (14 + ihl + 8);
-                    unsigned char mtype = 0;
-                    unsigned int yiaddr = 0, server_id = 0;
-                    if (dhcp_parse(dhcp, dhcp_len, xid, &mtype, &yiaddr, &server_id) &&
-                        mtype == want_type) {
-                        if (yiaddr_out) *yiaddr_out = yiaddr;
-                        if (server_id_out) *server_id_out = server_id;
-                        return 1;
+                // Тот же баг, что был в udp_recv() (см. project_udp_ihl_bounds_fix) -
+                // независимая копия того же разбора: раньше udp[2]/udp[3]
+                // читались ДО проверки n > 14+ihl+8, а не после - при
+                // коротком, но заявляющем большой IHL пакете это читало
+                // "чужие" байты от предыдущего net_recv() как порт назначения.
+                if (n > 14 + ihl + 8) {
+                    unsigned char *udp = ip + ihl;
+                    unsigned int dport = ((unsigned int)udp[2] << 8) | udp[3];
+                    if (dport == DHCP_CLIENT_PORT) {
+                        unsigned char *dhcp = udp + 8;
+                        unsigned int dhcp_len = n - (14 + ihl + 8);
+                        unsigned char mtype = 0;
+                        unsigned int yiaddr = 0, server_id = 0;
+                        if (dhcp_parse(dhcp, dhcp_len, xid, &mtype, &yiaddr, &server_id) &&
+                            mtype == want_type) {
+                            if (yiaddr_out) *yiaddr_out = yiaddr;
+                            if (server_id_out) *server_id_out = server_id;
+                            return 1;
+                        }
                     }
                 }
             }
