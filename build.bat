@@ -1034,6 +1034,22 @@ if %errorlevel% neq 0 goto :error
 copy /b build\rv32i_full.elf fs\RVMTE.BIN
 if %errorlevel% neq 0 goto :error
 
+echo Compiling user program (elfslot.c)...
+gcc -m32 -ffreestanding -fstack-protector -finstrument-functions -mno-sse -mno-sse2 -mno-mmx -I src/libaxiom/include -c src\user\elfslot.c -o build\elfslot.o
+if %errorlevel% neq 0 goto :error
+
+ld -T src\user\user.ld -m i386pe --file-alignment 0x200 --section-alignment 0x200 build\libaxiom\crt0.o build\elfslot.o build\libaxiom\syscalls.o build\libaxiom\stdio.o build\libaxiom\malloc.o build\libaxiom\stack_chk.o build\libaxiom\cfi.o -o build\elfslot.exe
+if %errorlevel% neq 0 goto :error
+
+objcopy -O binary build\elfslot.exe build\elfslot.bin
+if %errorlevel% neq 0 goto :error
+
+python tools\make_elf.py build\elfslot.bin build\elfslot.elf
+if %errorlevel% neq 0 goto :error
+
+copy /b build\elfslot.elf fs\ELFSLOT.BIN
+if %errorlevel% neq 0 goto :error
+
 echo Building FAT12 RAM-disk image from fs/...
 python tools\make_fat12.py
 if %errorlevel% neq 0 goto :error

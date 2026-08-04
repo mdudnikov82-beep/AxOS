@@ -1027,6 +1027,20 @@ static int do_exec(char* cmdline) {
     if (slot < 0) return -2;
 
     unsigned int addr = USER_PROGRAM_BASE + slot * USER_PROGRAM_SLOT_SIZE;
+
+    // Slots are physically reused across successive run/exec invocations
+    // (on_task_exit only clears bookkeeping flags, never memory) - without
+    // this, bytes left over from whatever program last occupied this slot
+    // stay live and (per paging.c's byte-offset-based, not segment-
+    // membership-based W^X split) often still executable. A crafted
+    // e_entry landing in a gap the new program's own segments never wrote
+    // could execute that stale content as if it were the new program's
+    // own code - a real cross-invocation code-injection/disclosure
+    // primitive, not just a hygiene nicety. Zeroing before every load
+    // closes the root cause regardless of how tightly the entry-point
+    // check (see elf.c) happens to be scoped.
+    for (unsigned int i = 0; i < USER_PROGRAM_SLOT_SIZE; i++) ((unsigned char*)addr)[i] = 0;
+
     unsigned int file_size = vfs_read(filename, elf_staging_buf, ELF_STAGING_SIZE);
     if (file_size == 0) return -1;
 
@@ -2001,6 +2015,9 @@ void execute_command(char* cmd) {
             print_string("No free program slots, try again later.\n");
         } else {
             unsigned int addr = USER_PROGRAM_BASE + slot * USER_PROGRAM_SLOT_SIZE;
+            // Slot reuse hygiene - see do_exec()'s matching comment.
+            // Same duplicated slot-pick pattern, same fix needed here.
+            for (unsigned int i = 0; i < USER_PROGRAM_SLOT_SIZE; i++) ((unsigned char*)addr)[i] = 0;
             // Читаем файл целиком во временный буфер - elf_load() сам
             // разберёт заголовки и скопирует нужный кусок по нужному
             // адресу (vfs_read/fat12_load не умеют читать "со смещения",

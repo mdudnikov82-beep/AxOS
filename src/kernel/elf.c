@@ -207,9 +207,21 @@ int elf_load(unsigned char* staging_buf, unsigned int staging_size,
         }
     }
 
+    // Bounded against max_end (the real union of copied PT_LOAD byte
+    // ranges, tracked above) rather than max_segment_end_offset (the
+    // whole per-slot window constant) - the old check let e_entry land
+    // anywhere in the window, including gaps the program's OWN segments
+    // never actually wrote. Combined with slots being physically reused
+    // across successive run/exec invocations with no zeroing (see the
+    // callers in kernel.c) and this codebase's W^X split being byte-
+    // offset-based rather than segment-membership-based (paging.c), a
+    // crafted e_entry there could execute stale, attacker/previous-
+    // program-controlled bytes left over from whatever last occupied
+    // this same physical slot - the slot-zeroing fix closes the root
+    // cause, this tightens the specific check that made it reachable.
     unsigned int entry_d = e_entry + delta;
     if (entry_d < load_base_vaddr ||
-        entry_d - load_base_vaddr >= max_segment_end_offset)
+        entry_d - load_base_vaddr >= max_end)
         return ELF_ERR_BOUNDS;
 
     out->entry          = entry_d;
