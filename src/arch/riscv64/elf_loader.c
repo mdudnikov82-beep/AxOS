@@ -224,6 +224,26 @@ int elf_load(const char *cmdline) {
         uart_puts("[elf] not ET_EXEC\r\n"); return -1;
     }
 
+    /* Program-header table itself must be fully inside the bytes
+     * actually read - e_phoff/e_phnum/e_phentsize are attacker-
+     * controlled file fields dereferenced by every pass below (Pass 0,
+     * 1, 3). Without this check, a crafted ~64-byte file (planted via
+     * SYS_WRITEFILE, then exec()'d) could point e_phoff anywhere in the
+     * 64-bit space - `buf + e_phoff` would be dereferenced immediately,
+     * almost certainly landing in unmapped memory (Sv39 only has 2 of
+     * 512 possible L2 windows populated). That fault happens while
+     * S-mode is already inside the SYS_EXEC syscall on this process's
+     * behalf, which kernel_main.c's trap handler treats as fatal
+     * (while(1) wfi) - the same bug class as user_string_ok()'s missing
+     * NUL check, just one level deeper. Mirrors the e_shoff/e_shnum/
+     * e_shentsize check already done below for the section header
+     * table - that exact pattern just wasn't applied here too. */
+    if (hdr->e_phnum == 0 || hdr->e_phentsize < sizeof(elf64_phdr_t) ||
+        hdr->e_phoff > sz ||
+        (unsigned long)hdr->e_phnum * hdr->e_phentsize > sz - hdr->e_phoff) {
+        uart_puts("[elf] bad program header table\r\n"); return -1;
+    }
+
     /* Create a fresh page table for this process.
      * Kernel entries (MMIO L2[0], RAM L2[2]) are pre-filled;
      * user space L2[1] starts empty. */
@@ -309,6 +329,21 @@ int elf_load(const char *cmdline) {
             return -1;
         }
 
+        /* filesz must not exceed memsz (the copy below is sized from
+         * filesz but the allocation from memsz - a larger filesz would
+         * memcpy_s() past the allocated pages), and [foff, foff+filesz)
+         * must lie entirely inside the bytes actually read from disk
+         * (else the copy reads whatever physical memory happens to sit
+         * past this loader's own 256KB staging buffer - kernel memory
+         * disclosure into the new process at best, a straight OOB-read
+         * crash at worst). Mirrors x86's elf.c (p_memsz<p_filesz and
+         * p_offset+p_filesz>staging_size checks), which already gets
+         * both of these right. */
+        if (filesz > memsz || foff > sz || filesz > sz - foff) {
+            uart_puts("[elf] segment filesz/offset out of bounds, rejected\r\n");
+            return -1;
+        }
+
         unsigned long npages = (memsz + PAGE_SIZE - 1) / PAGE_SIZE;
 
         uart_puts("[elf]  seg vaddr=0x");
@@ -357,6 +392,15 @@ int elf_load(const char *cmdline) {
             if (shdrs[s].sh_type != SHT_RELA) continue;
             if (shdrs[s].sh_info >= hdr->e_shnum) continue;
             if (!(shdrs[shdrs[s].sh_info].sh_flags & SHF_ALLOC)) continue;
+            /* sh_offset/sh_size are attacker-controlled too - the outer
+             * check above only bounds the SECTION HEADER TABLE itself,
+             * not what an individual entry's fields point at. Without
+             * this, a well-formed shdr table (passes the outer check)
+             * could still name an SHT_RELA payload anywhere in the 64-
+             * bit space - the exact same class of bug as e_phoff above,
+             * reachable through a completely different field. Skip just
+             * this section rather than aborting the whole load. */
+            if (shdrs[s].sh_offset > sz || shdrs[s].sh_size > sz - shdrs[s].sh_offset) continue;
 
             unsigned long nrela = shdrs[s].sh_size / sizeof(elf64_rela_t);
             elf64_rela_t *relas = (elf64_rela_t *)(buf + shdrs[s].sh_offset);
@@ -376,6 +420,7 @@ int elf_load(const char *cmdline) {
                 if (shdrs[s].sh_type != SHT_RELA) continue;
                 if (shdrs[s].sh_info >= hdr->e_shnum) continue;
                 if (!(shdrs[shdrs[s].sh_info].sh_flags & SHF_ALLOC)) continue;
+                if (shdrs[s].sh_offset > sz || shdrs[s].sh_size > sz - shdrs[s].sh_offset) continue;
 
                 unsigned long nrela = shdrs[s].sh_size / sizeof(elf64_rela_t);
                 elf64_rela_t *relas = (elf64_rela_t *)(buf + shdrs[s].sh_offset);
