@@ -10,12 +10,25 @@ module cpu_core #(
     parameter INSTR_INIT_FILE = "",
     parameter DATA_MEM_BYTES  = 4096,
     parameter SHARED_MEM_BASE  = 32'h0000_2000,
-    parameter SHARED_MEM_BYTES = 256
+    parameter SHARED_MEM_BYTES = 256,
+    // Virtual memory (mmu.v) - see [[project_mmu]]. MMU_ENABLE=0 (the
+    // default) makes mmu.v a pure wire-through, so every existing
+    // program/testbench that never set up a page table keeps working
+    // with ZERO behavior change - this is a strictly additive, opt-in
+    // feature, not a replacement for direct physical addressing.
+    parameter MMU_ENABLE      = 0,
+    parameter MMU_TLB_ENTRIES = 4,
+    parameter PAGE_TABLE_BASE = 32'h0000_0000
 ) (
     input  wire        clk,
     input  wire        reset,
     output wire         halted,       // latched true the cycle after ECALL fires - see below
     output wire [31:0]  tohost_value, // x10/a0 at the moment ECALL fired; valid once halted==1
+    // Distinct from `halted` deliberately (see mmu.v's header comment) -
+    // a page fault also sets halted_r (so anything just polling `halted`
+    // to end simulation still works), but a testbench must check
+    // `!page_fault` before trusting tohost_value means anything.
+    output wire         page_fault,
 
     // Shared-bus master port (see shared_bus.v) - a memory op whose
     // address falls in [SHARED_MEM_BASE, SHARED_MEM_BASE+SHARED_MEM_BYTES)
@@ -99,6 +112,56 @@ module cpu_core #(
     // state a single-cycle core ever needs.
     wire mem_stall = is_shared_access && !bus_grant;
 
+    // Virtual memory (mmu.v): translates NON-shared data accesses only
+    // - the shared-bus window above is decoded on the raw (virtual)
+    // address first, exactly as before the MMU existed, and is treated
+    // as a permanently-unpaged reserved VA range (like a fixed MMIO
+    // hole), never looked up in the TLB or walked. This makes
+    // mem_stall (shared-bus arbitration) and mmu_stall (page-table
+    // walk) mutually exclusive by construction - no instruction is
+    // ever both - confirmed sound by design review before this was
+    // built (see [[project_mmu]]).
+    wire mmu_is_access = (mem_read || mem_write) && !is_shared_access;
+    wire [31:0] mmu_paddr;
+    wire        mmu_stall;
+    wire        mmu_walk_active;
+    wire [31:0] mmu_walk_addr;
+
+    // The walker issues its own PTE reads through this SAME data_mem
+    // instance the LSU already uses (data_mem's read is combinational,
+    // so mem_read_data below reflects EITHER the LSU's own translated
+    // read OR the walker's current PTE fetch, depending on which
+    // address dmem_addr is currently presenting - never both at once,
+    // since the core is fully frozen for the walk's whole duration).
+    // Forcing dmem_write to 0 during a walk is required, not
+    // defensive: without it, a stalled pending STORE's mem_write
+    // staying asserted would silently write that store's data into
+    // whatever physical address the walker happens to be reading that
+    // cycle - corrupting the live page table. A design review caught
+    // this exact hazard before any RTL was written.
+    wire [31:0] dmem_addr  = mmu_walk_active ? mmu_walk_addr : mmu_paddr;
+    wire        dmem_write = mem_write && !is_shared_access && !mmu_walk_active;
+    // A PTE is always a full 32-bit word regardless of what the stalled
+    // instruction's own access width happens to be (e.g. a byte load
+    // hitting a TLB miss) - data_mem.v's read mux depends on mem_size,
+    // so leaving it as the LSU's own mem_size during a walk would hand
+    // the walker a sign/zero-extended BYTE or HALF of the PTE instead
+    // of the real 32-bit value. Found live: an `lb` triggering a walk
+    // produced a garbage translation instead of a fault or the correct
+    // result, because the byte-narrowed "PTE" still had its valid bit
+    // sometimes set by chance.
+    wire [1:0]  dmem_mem_size = mmu_walk_active ? 2'b10 : mem_size;
+
+    mmu #(
+        .MMU_ENABLE(MMU_ENABLE), .TLB_ENTRIES(MMU_TLB_ENTRIES), .DATA_MEM_BYTES(DATA_MEM_BYTES)
+    ) mmu_inst (
+        .clk(clk), .reset(reset),
+        .vaddr(alu_result), .is_access(mmu_is_access), .is_write(mem_write),
+        .page_table_base(PAGE_TABLE_BASE),
+        .paddr(mmu_paddr), .mmu_stall(mmu_stall), .page_fault(page_fault), .fault_vaddr(),
+        .walk_active(mmu_walk_active), .walk_addr(mmu_walk_addr), .walk_read_data(mem_read_data)
+    );
+
     wire [31:0] effective_mem_read_data = is_shared_access ? bus_read_data : mem_read_data;
 
     instr_mem #(.MEM_WORDS(INSTR_MEM_WORDS), .INIT_FILE(INSTR_INIT_FILE)) imem (
@@ -107,7 +170,7 @@ module cpu_core #(
 
     // A losing cycle must not commit a register write - the same
     // instruction (same rd/rd_data inputs) simply retries next cycle.
-    wire regfile_write_en = reg_write && !mem_stall;
+    wire regfile_write_en = reg_write && !mem_stall && !mmu_stall;
 
     regfile rf (
         .clk(clk), .rs1_addr(rs1), .rs2_addr(rs2),
@@ -133,9 +196,11 @@ module cpu_core #(
     // A shared-range write must never hit the private memory (it's out
     // of that address's own valid range anyway, but the decode belongs
     // here at the bus level, not left to the memory to silently no-op).
+    // addr/mem_write are muxed above to give the MMU's walker exclusive
+    // control of this port while it's active.
     data_mem #(.MEM_BYTES(DATA_MEM_BYTES)) dmem (
-        .clk(clk), .addr(alu_result), .write_data(store_data),
-        .mem_write(mem_write && !is_shared_access), .mem_size(mem_size), .mem_unsigned(mem_unsigned),
+        .clk(clk), .addr(dmem_addr), .write_data(store_data),
+        .mem_write(dmem_write), .mem_size(dmem_mem_size), .mem_unsigned(mem_unsigned),
         .read_data(mem_read_data)
     );
 
@@ -166,7 +231,7 @@ module cpu_core #(
     // bug class mem_stall already exists to prevent on the integer side.
     // fpu_div_stall gets the identical treatment: a division result
     // only commits on the one cycle it's actually done.
-    wire fp_regfile_write_en = fp_reg_write && !mem_stall && !fpu_div_stall;
+    wire fp_regfile_write_en = fp_reg_write && !mem_stall && !fpu_div_stall && !mmu_stall;
 
     fp_regfile fprf (
         .clk(clk), .rs1_addr(rs1), .rs2_addr(rs2),
@@ -247,9 +312,15 @@ module cpu_core #(
         if (reset) begin
             pc       <= 32'b0;
             halted_r <= 1'b0;
-        end else if (!halted_r && !mem_stall && !fpu_div_stall) begin
+        end else if (!halted_r && !mem_stall && !fpu_div_stall && !mmu_stall) begin
             pc <= next_pc;
             if (opcode == OP_SYSTEM) halted_r <= 1'b1;
+        end else if (!halted_r && page_fault) begin
+            // Sticky mmu.v fault state never clears on its own (by
+            // design - see mmu.v) - freeze this core's own halted_r too
+            // so anything just polling `halted` to end simulation
+            // still works, per the module-header contract.
+            halted_r <= 1'b1;
         end
     end
 
