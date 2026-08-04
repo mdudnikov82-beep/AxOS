@@ -34,7 +34,17 @@ module tb_mmu;
     // Fake byte-addressable memory (behavioral, word-aligned reads only
     // - all the walker ever does).
     reg [7:0] mem [0:DMB-1];
-    always @(*) begin
+    // Explicit sensitivity list, NOT always @(*) - found live: Icarus
+    // Verilog's implicit-sensitivity inference for a block that reads a
+    // memory array through a wide (32-bit) computed index hits a severe
+    // elaboration performance cliff (compiles that should take well
+    // under a second instead never finished, even after 90+ real
+    // seconds) - a genuine simulator quirk, not anything wrong with the
+    // logic itself. Explicit sensitivity on just the actual dependencies
+    // (walk_active, walk_addr) sidesteps it entirely and is also more
+    // precise than @(*) would have been anyway (this block was never
+    // meant to re-evaluate on every byte of `mem` changing).
+    always @(walk_active or walk_addr) begin
         if (walk_active)
             walk_read_data = {mem[walk_addr+3], mem[walk_addr+2], mem[walk_addr+1], mem[walk_addr]};
         else

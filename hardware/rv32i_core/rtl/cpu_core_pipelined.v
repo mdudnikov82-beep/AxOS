@@ -87,6 +87,12 @@ module cpu_core_pipelined #(
     wire       id_fp_reg_write, id_is_fp_mem;
     wire [2:0] id_fp_op;
 
+    // TLB invalidation (see mmu.v / control_unit.v's is_sfence comment):
+    // SFENCE.VMA shares OP_SYSTEM with ECALL, so id_is_system below must
+    // exclude it - otherwise it would incorrectly halt the core the same
+    // way ECALL does.
+    wire       id_is_sfence;
+
     control_unit cu (
         .opcode(if_id_opcode), .funct3(id_funct3), .funct7(id_funct7),
         .reg_write(id_reg_write), .mem_read(id_mem_read), .mem_write(id_mem_write),
@@ -94,11 +100,12 @@ module cpu_core_pipelined #(
         .jump(id_jump), .jalr(id_jalr), .auipc(id_auipc), .lui(id_lui),
         .alu_op(id_alu_op), .mem_size(id_mem_size), .mem_unsigned(id_mem_unsigned),
         .illegal(id_illegal),
-        .fp_reg_write(id_fp_reg_write), .is_fp_mem(id_is_fp_mem), .fp_op(id_fp_op)
+        .fp_reg_write(id_fp_reg_write), .is_fp_mem(id_is_fp_mem), .fp_op(id_fp_op),
+        .is_sfence(id_is_sfence)
     );
 
     wire [1:0] id_wb_sel = (id_jump || id_jalr) ? WB_PC4 : (id_mem_to_reg ? WB_MEM : WB_ALU);
-    wire       id_is_system = (if_id_opcode == OP_SYSTEM);
+    wire       id_is_system = (if_id_opcode == OP_SYSTEM) && !id_is_sfence;
 
     wire [31:0] x10_debug;
 
@@ -418,7 +425,13 @@ module cpu_core_pipelined #(
     // duration (EX/MEM's fields don't change while mmu_stall holds it),
     // silently corrupting the live page table.
     wire [31:0] dmem_addr  = mmu_walk_active ? mmu_walk_addr : mmu_paddr;
-    wire        dmem_write = ex_mem_mem_write && !ex_mem_is_shared_access && !mmu_walk_active;
+    // !mmu_walk_active alone is NOT enough - see cpu_core.v's matching
+    // fix, found live there first. walk_active only covers S_L1/S_L0;
+    // a store also presents dmem_write=1 on the S_IDLE miss-detection
+    // cycle and the S_FILL cycle, both of which resolve mmu_paddr to a
+    // bogus physical address (page 0, at the faulting vaddr's own page
+    // offset) since hit_ppn is still 0. !mmu_stall closes both gaps.
+    wire        dmem_write = ex_mem_mem_write && !ex_mem_is_shared_access && !mmu_walk_active && !mmu_stall;
     // A PTE is always a full 32-bit word regardless of the stalled
     // instruction's own access width (e.g. a byte load hitting a TLB
     // miss) - see cpu_core.v's matching fix, found live there via a
@@ -426,12 +439,34 @@ module cpu_core_pipelined #(
     // the same bug.
     wire [1:0]  dmem_mem_size = mmu_walk_active ? 2'b10 : ex_mem_mem_size;
 
+    // TLB invalidation (see mmu.v): must be a genuine ONE-SHOT pulse,
+    // not a raw/held id_is_sfence - a design review traced through the
+    // alternative (holding tlb_flush for every cycle SFENCE merely SITS
+    // in ID/EX waiting its turn, e.g. stuck behind an older instruction's
+    // own in-flight page-table walk) and found a real livelock: the held
+    // flush would repeatedly wipe that OLDER walk's S_FILL result the
+    // instant it lands, which keeps mmu_stall asserted, which keeps
+    // holding ID/EX (and therefore SFENCE, and therefore the flush)
+    // forever - self-sustaining, not a one-off collision. The fix: pulse
+    // tlb_flush for exactly the one cycle id_is_sfence is true AND the
+    // SAME condition that gates the ID/EX register's own "real latch"
+    // branch below also holds (i.e. SFENCE is genuinely advancing into
+    // ID/EX this cycle, not held or bubbled) - that transition is
+    // inherently single-shot, since if_id_instr itself advances past
+    // SFENCE on this exact edge, so id_is_sfence can't be true again for
+    // the same instruction next cycle. This also structurally guarantees
+    // the pulse can only ever coincide with an OLDER instruction's walk
+    // the one incidental time (SFENCE reaching ID/EX at all requires
+    // nothing ahead of it to currently be stalling) - never a sustained
+    // collision.
+    wire tlb_flush = id_is_sfence && !(mem_stall || fpu_div_stall || mmu_stall) && !(ex_taken || stall);
+
     mmu #(
         .MMU_ENABLE(MMU_ENABLE), .TLB_ENTRIES(MMU_TLB_ENTRIES), .DATA_MEM_BYTES(DATA_MEM_BYTES)
     ) mmu_inst (
         .clk(clk), .reset(reset),
         .vaddr(ex_mem_alu_result), .is_access(mmu_is_access), .is_write(ex_mem_mem_write),
-        .page_table_base(PAGE_TABLE_BASE),
+        .page_table_base(PAGE_TABLE_BASE), .tlb_flush(tlb_flush),
         .paddr(mmu_paddr), .mmu_stall(mmu_stall), .page_fault(page_fault), .fault_vaddr(),
         .walk_active(mmu_walk_active), .walk_addr(mmu_walk_addr), .walk_read_data(mem_read_data)
     );

@@ -15,7 +15,7 @@ module data_mem #(
     input  wire        mem_write,
     input  wire [1:0]  mem_size,      // 00=byte 01=half 10=word
     input  wire        mem_unsigned,  // zero- vs sign-extend on read
-    output reg  [31:0] read_data
+    output wire [31:0] read_data
 );
     reg [7:0] mem [0:MEM_BYTES-1];
     integer   i;
@@ -24,15 +24,30 @@ module data_mem #(
         for (i = 0; i < MEM_BYTES; i = i + 1) mem[i] = 8'b0;
     end
 
-    always @(*) begin
-        case (mem_size)
-            2'b00: read_data = mem_unsigned ? {24'b0, mem[addr]}
-                                             : {{24{mem[addr][7]}}, mem[addr]};
-            2'b01: read_data = mem_unsigned ? {16'b0, mem[addr+1], mem[addr]}
-                                             : {{16{mem[addr+1][7]}}, mem[addr+1], mem[addr]};
-            default: read_data = {mem[addr+3], mem[addr+2], mem[addr+1], mem[addr]};
-        endcase
-    end
+    // Continuous assignment, NOT always @(*) - found live: Icarus
+    // Verilog's implicit-sensitivity inference for a PROCEDURAL block
+    // reading a memory array through a wide (32-bit) computed index hits
+    // a severe elaboration performance cliff that scales steeply with
+    // MEM_BYTES - every existing test stayed at/under 16384 bytes and
+    // happened to compile in well under a second, but simply doubling to
+    // 32768 (the first thing in this project to need more headroom) made
+    // elaboration effectively never finish. An explicit sensitivity list
+    // (addr/mem_size/mem_unsigned only) sidesteps the cliff but silently
+    // breaks correctness instead: it stops reacting when a WRITE lands at
+    // the currently-read address without addr itself changing, which a
+    // write-then-immediately-read-same-address testbench pattern (see
+    // tb_data_mem.v) legitimately relies on - caught live as two
+    // regression failures the moment that "fix" was tried. Continuous
+    // assignment has no such tradeoff: it has no explicit sensitivity
+    // list to get wrong, correctly reacts to the memory array changing
+    // same as always @(*) did, and empirically does NOT hit the same
+    // elaboration cliff (confirmed at MEM_BYTES=32768).
+    wire [31:0] byte_read = mem_unsigned ? {24'b0, mem[addr]} : {{24{mem[addr][7]}}, mem[addr]};
+    wire [31:0] half_read = mem_unsigned ? {16'b0, mem[addr+1], mem[addr]}
+                                          : {{16{mem[addr+1][7]}}, mem[addr+1], mem[addr]};
+    wire [31:0] word_read = {mem[addr+3], mem[addr+2], mem[addr+1], mem[addr]};
+    assign read_data = (mem_size == 2'b00) ? byte_read :
+                        (mem_size == 2'b01) ? half_read : word_read;
 
     always @(posedge clk) begin
         if (mem_write) begin

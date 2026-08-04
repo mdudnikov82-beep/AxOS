@@ -40,7 +40,16 @@ module control_unit (
     // FADD.S/FSUB.S/FMUL.S instruction writes back.
     output reg        fp_reg_write,
     output reg        is_fp_mem,
-    output reg [2:0]  fp_op        // 000=add 001=sub 010=mul 011=div
+    output reg [2:0]  fp_op,       // 000=add 001=sub 010=mul 011=div
+
+    // TLB invalidation (see mmu.v): SFENCE.VMA's REAL RISC-V encoding is
+    // opcode=OP_SYSTEM, funct7=0000001, funct3=000 (rs1/rs2 ignored here -
+    // full flush only, no selective ASID/vaddr flush, matching this
+    // project's already-simplified MMU). ECALL/EBREAK are funct7=0000000
+    // - is_sfence deliberately does NOT overlap them, so cpu_core.v/
+    // cpu_core_pipelined.v can tell "halt for tohost" apart from "flush
+    // the TLB" even though both share OP_SYSTEM.
+    output reg        is_sfence
 );
     localparam OP_LOAD    = 7'b0000011;
     localparam OP_IMM     = 7'b0010011;
@@ -116,6 +125,7 @@ module control_unit (
         fp_reg_write = 1'b0;
         is_fp_mem    = 1'b0;
         fp_op        = FP_ADD;
+        is_sfence    = 1'b0;
 
         case (opcode)
             OP_REG: begin
@@ -241,10 +251,15 @@ module control_unit (
             end
 
             OP_SYSTEM: begin
-                // ECALL/EBREAK - repurposed as the testbench tohost
-                // convention (see cpu_core.v/tb_cpu.v), not real trap
-                // handling. No datapath signals needed here; cpu_core.v
-                // watches (opcode==OP_SYSTEM) directly to latch a0.
+                // ECALL/EBREAK (funct7=0000000) - repurposed as the
+                // testbench tohost convention (see cpu_core.v/tb_cpu.v),
+                // not real trap handling; no datapath signals needed
+                // here, cpu_core.v watches (opcode==OP_SYSTEM) directly
+                // to latch a0. SFENCE.VMA (funct7=0000001, funct3=000)
+                // is the one OP_SYSTEM encoding that means something
+                // else entirely (flush the TLB) - see is_sfence's own
+                // comment above.
+                is_sfence = (funct7 == 7'b0000001) && (funct3 == 3'b000);
             end
 
             default: begin

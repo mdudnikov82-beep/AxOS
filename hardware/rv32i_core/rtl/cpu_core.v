@@ -62,7 +62,7 @@ module cpu_core #(
     wire [31:0] x10_debug;
     reg  [31:0] rd_data;
 
-    wire reg_write, mem_read, mem_write, mem_to_reg, alu_src, branch, jump, jalr, auipc, lui, mem_unsigned, illegal;
+    wire reg_write, mem_read, mem_write, mem_to_reg, alu_src, branch, jump, jalr, auipc, lui, mem_unsigned, illegal, is_sfence;
     wire [3:0]  alu_op;
     wire [1:0]  mem_size;
 
@@ -140,7 +140,21 @@ module cpu_core #(
     // cycle - corrupting the live page table. A design review caught
     // this exact hazard before any RTL was written.
     wire [31:0] dmem_addr  = mmu_walk_active ? mmu_walk_addr : mmu_paddr;
-    wire        dmem_write = mem_write && !is_shared_access && !mmu_walk_active;
+    // !mmu_walk_active alone is NOT enough - walk_active is only true
+    // during S_L1/S_L0 (see mmu.v), but a store can also present
+    // dmem_write=1 on the S_IDLE miss-detection cycle and the S_FILL
+    // cycle, neither of which is walk_active. On both of those cycles
+    // hit_ppn is still 0 (no valid TLB entry yet), so mmu_paddr resolves
+    // to a bogus physical address (page 0, at the faulting vaddr's own
+    // page offset) - without also gating on !mmu_stall, a first-touch
+    // store hitting a TLB miss silently corrupts whatever real data
+    // lives at that bogus address (physical page 0, dangerously close to
+    // where PAGE_TABLE_BASE defaults) in addition to eventually landing
+    // correctly at the real translated address once the walk finishes.
+    // Found live: a `sw` to a fresh VA reliably clobbered physical
+    // 0x0000 even though the SAME instruction's final translated write
+    // still (coincidentally) succeeded at the real destination.
+    wire        dmem_write = mem_write && !is_shared_access && !mmu_walk_active && !mmu_stall;
     // A PTE is always a full 32-bit word regardless of what the stalled
     // instruction's own access width happens to be (e.g. a byte load
     // hitting a TLB miss) - data_mem.v's read mux depends on mem_size,
@@ -152,12 +166,19 @@ module cpu_core #(
     // sometimes set by chance.
     wire [1:0]  dmem_mem_size = mmu_walk_active ? 2'b10 : mem_size;
 
+    // SFENCE.VMA never itself triggers mem_stall/mmu_stall (it does no
+    // memory access), so in this single-cycle core it always executes
+    // in exactly the one cycle it's fetched - a plain combinational
+    // pulse is correct and sufficient (no held/redundant-pulse hazard
+    // exists here the way it does in the pipelined core).
+    wire tlb_flush = is_sfence;
+
     mmu #(
         .MMU_ENABLE(MMU_ENABLE), .TLB_ENTRIES(MMU_TLB_ENTRIES), .DATA_MEM_BYTES(DATA_MEM_BYTES)
     ) mmu_inst (
         .clk(clk), .reset(reset),
         .vaddr(alu_result), .is_access(mmu_is_access), .is_write(mem_write),
-        .page_table_base(PAGE_TABLE_BASE),
+        .page_table_base(PAGE_TABLE_BASE), .tlb_flush(tlb_flush),
         .paddr(mmu_paddr), .mmu_stall(mmu_stall), .page_fault(page_fault), .fault_vaddr(),
         .walk_active(mmu_walk_active), .walk_addr(mmu_walk_addr), .walk_read_data(mem_read_data)
     );
@@ -188,7 +209,8 @@ module cpu_core #(
         .jump(jump), .jalr(jalr), .auipc(auipc), .lui(lui),
         .alu_op(alu_op), .mem_size(mem_size), .mem_unsigned(mem_unsigned),
         .illegal(illegal),
-        .fp_reg_write(fp_reg_write), .is_fp_mem(is_fp_mem), .fp_op(fp_op)
+        .fp_reg_write(fp_reg_write), .is_fp_mem(is_fp_mem), .fp_op(fp_op),
+        .is_sfence(is_sfence)
     );
 
     alu ax (.a(alu_a), .b(alu_b), .alu_op(alu_op), .result(alu_result), .zero(alu_zero));
@@ -314,7 +336,10 @@ module cpu_core #(
             halted_r <= 1'b0;
         end else if (!halted_r && !mem_stall && !fpu_div_stall && !mmu_stall) begin
             pc <= next_pc;
-            if (opcode == OP_SYSTEM) halted_r <= 1'b1;
+            // SFENCE.VMA also decodes as OP_SYSTEM but must NOT halt the
+            // core - is_sfence excludes it here (mmu_inst below is what
+            // actually consumes it, via tlb_flush).
+            if (opcode == OP_SYSTEM && !is_sfence) halted_r <= 1'b1;
         end else if (!halted_r && page_fault) begin
             // Sticky mmu.v fault state never clears on its own (by
             // design - see mmu.v) - freeze this core's own halted_r too

@@ -269,6 +269,59 @@ if %errorlevel% neq 0 goto :error
 if %errorlevel% neq 0 (echo FAILED: pipelined FDIV.S mmu_stall/fpu_div_done race & "%VVP%" out_tb_pipe_mmu_race.vvp & goto :error)
 echo   OK (tohost=1080033280 = 0x40600000 = 3.5, survives the forced mmu_stall/done race)
 
+echo Regression: a STORE that misses the TLB on first touch used to also corrupt physical page 0 (dmem_write wasn't gated by !mmu_stall) - both cores
+python sw\asm_mmu_store_miss_test.py sw\mmu_store_miss_test.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_tb_cpu_mmu_sm.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\mmu.v rtl\cpu_core.v tb\tb_cpu_mmu_store_miss.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_cpu_mmu_sm.vvp | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: E-core store/TLB-miss corruption regression & "%VVP%" out_tb_cpu_mmu_sm.vvp & goto :error)
+echo   OK (E-core: page 0 unchanged, tohost=0xabcde000)
+"%IVERILOG%" -o out_tb_pipe_mmu_sm.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\mmu.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined_mmu_store_miss.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_pipe_mmu_sm.vvp | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: P-core store/TLB-miss corruption regression & "%VVP%" out_tb_pipe_mmu_sm.vvp & goto :error)
+echo   OK (P-core: page 0 unchanged, matches E-core)
+
+echo.
+echo ===== TLB invalidation (SFENCE.VMA) =====
+python sw\asm_sfence_test.py sw\sfence_test.hex
+if %errorlevel% neq 0 goto :error
+python sw\asm_sfence_test.py sw\sfence_test_neg.hex --no-sfence
+if %errorlevel% neq 0 goto :error
+
+echo E-core: legitimately self-modifies its own page table then SFENCE.VMA + re-reads - proves the stale TLB entry is genuinely discarded
+"%IVERILOG%" -o out_tb_cpu_sfence.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\mmu.v rtl\cpu_core.v tb\tb_cpu_sfence.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_cpu_sfence.vvp | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: E-core SFENCE.VMA & "%VVP%" out_tb_cpu_sfence.vvp & goto :error)
+echo   OK (tohost=2222, invalidation worked)
+echo Negative control: same program with SFENCE.VMA physically removed - MUST incorrectly return the stale sentinel, proving the positive result above wasn't a coincidence
+"%IVERILOG%" -DINSTR_HEX=\"sw/sfence_test_neg.hex\" -o out_tb_cpu_sfence_neg.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\mmu.v rtl\cpu_core.v tb\tb_cpu_sfence.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_cpu_sfence_neg.vvp +EXPECT_TOHOST=1111 | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: E-core SFENCE.VMA negative control & "%VVP%" out_tb_cpu_sfence_neg.vvp +EXPECT_TOHOST=1111 & goto :error)
+echo   OK (tohost=1111, stale entry served without SFENCE - confirms the test genuinely discriminates)
+
+echo P-core: same program, must match the E-core exactly
+"%IVERILOG%" -o out_tb_pipe_sfence.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\mmu.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined_sfence.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_pipe_sfence.vvp | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: P-core SFENCE.VMA & "%VVP%" out_tb_pipe_sfence.vvp & goto :error)
+echo   OK (tohost=2222, matches E-core)
+"%IVERILOG%" -DINSTR_HEX=\"sw/sfence_test_neg.hex\" -o out_tb_pipe_sfence_neg.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\mmu.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined_sfence.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_pipe_sfence_neg.vvp +EXPECT_TOHOST=1111 | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: P-core SFENCE.VMA negative control & "%VVP%" out_tb_pipe_sfence_neg.vvp +EXPECT_TOHOST=1111 & goto :error)
+echo   OK (tohost=1111, matches E-core negative control)
+
+echo Adversarial race: SFENCE.VMA held at IF/ID behind an older instruction's in-flight TLB walk (mmu_stall) must NOT livelock - a naive raw/held tlb_flush pulse repeatedly wipes the walk's own freshly-filled entry and never lets the core halt
+"%IVERILOG%" -o out_tb_pipe_sfence_race.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\mmu.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined_sfence_race.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_pipe_sfence_race.vvp | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: pipelined SFENCE.VMA held-during-walk race & "%VVP%" out_tb_pipe_sfence_race.vvp & goto :error)
+echo   OK (tohost=4242, no livelock)
+
 echo.
 echo ===== ALL SIMULATIONS PASSED =====
 exit /b 0

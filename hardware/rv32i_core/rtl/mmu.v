@@ -51,14 +51,32 @@
 // TLB: TLB_ENTRIES-way fully-associative (the same "N-way parallel
 // compare + priority-select mux" idiom shared_bus.v/router.v already
 // use for arbitration), round-robin replacement (no LRU, matching this
-// project's established "rotate, don't rank" preference). NO
-// invalidation exists - page tables are a write-once-before-first-
-// access invariant here (this project has no OS to mutate them live),
-// and a PTE's PPN must never alias the physical range the page tables
-// themselves occupy (nothing stops a badly-built test page table from
-// making the walker read/write its own live table, since the walker
-// uses the same physical data_mem as everything else - a documented
-// invariant for whoever builds a page table, not a hardware guarantee).
+// project's established "rotate, don't rank" preference). A PTE's PPN
+// must never alias the physical range the page tables themselves occupy
+// (nothing stops a badly-built test page table from making the walker
+// read/write its own live table, since the walker uses the same
+// physical data_mem as everything else - a documented invariant for
+// whoever builds a page table, not a hardware guarantee).
+//
+// TLB invalidation: `tlb_flush` (pulsed by SFENCE.VMA in both cores)
+// clears every tlb_valid bit. Critical property, found by a design
+// review BEFORE this was built: the flush must NEVER be able to block
+// the walker FSM's own state transitions, or a flush held asserted for
+// multiple cycles (which genuinely happens in the pipelined core - see
+// cpu_core_pipelined.v's one-shot tlb_flush comment for why it's
+// one-shot specifically to avoid this) could permanently prevent an
+// unrelated in-flight walk from ever reaching S_IDLE, since mmu_stall
+// (mmu_busy) would never clear - a real deadlock the review traced
+// through in detail before any RTL existed. The fix: every `case(state)`
+// branch below transitions purely on its own terms, and the flush's
+// TLB-clearing loop is a SEPARATE, unconditional statement placed AFTER
+// the case block in the same always block - relying on the standard,
+// deterministic Verilog rule that multiple non-blocking assignments to
+// the same variable in one time step resolve to whichever is scheduled
+// LAST in program order. A same-cycle collision with S_FILL just means
+// that walk's freshly-written entry is immediately wiped again -
+// harmless (forces one extra walk on retry, nothing consumes a TLB fill
+// beyond the cycle it's produced), never a correctness bug.
 `timescale 1ns/1ps
 
 module mmu #(
@@ -73,6 +91,9 @@ module mmu #(
     input  wire        is_access, // a real load or store this cycle (shared-bus accesses excluded by the caller already)
     input  wire        is_write,
     input  wire [31:0] page_table_base,
+    input  wire        tlb_flush, // SFENCE.VMA - see the TLB invalidation comment above
+
+
 
     output wire [31:0] paddr,      // valid combinationally whenever !mmu_stall
     output wire        mmu_stall,
@@ -251,6 +272,21 @@ module mmu #(
 
                     default: state <= S_FAULT;
                 endcase
+
+                // Deliberately OUTSIDE and AFTER the case statement above,
+                // and NOT gated on `state` - see the TLB invalidation
+                // header comment for why: this must never be able to
+                // prevent the case statement's own transitions (that's
+                // what avoids the deadlock a design review found), and a
+                // same-cycle collision with S_FILL's write to
+                // tlb_valid[rr_ptr] is resolved in this statement's favor
+                // purely because it's scheduled after it, per Verilog's
+                // last-non-blocking-write-wins rule for the same variable
+                // in one time step - not because of any explicit priority
+                // logic here.
+                if (tlb_flush) begin
+                    for (k = 0; k < TLB_ENTRIES; k = k + 1) tlb_valid[k] <= 1'b0;
+                end
             end
         end
     end
