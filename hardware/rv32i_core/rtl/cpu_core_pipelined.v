@@ -243,12 +243,72 @@ module cpu_core_pipelined #(
         .result(fpu_mul_result)
     );
 
-    // Only add/sub/mul are wired on this core (FDIV.S is E-core only
-    // for now - see fp_div.v's own project notes) - an FDIV.S that
-    // somehow reached this pipeline would silently fall through to
-    // the addsub result rather than actually dividing, a known,
-    // documented gap rather than real support.
-    wire [31:0] ex_fpu_result = (id_ex_fp_op == 3'b010) ? fpu_mul_result : fpu_addsub_result;
+    localparam FP_MUL = 3'b010;
+    localparam FP_DIV = 3'b011;
+
+    // FDIV.S is a genuine multi-cycle op (see fp_div.v) - unlike
+    // fp_addsub/fp_mul above (single-cycle combinational, always
+    // computed-but-maybe-unused), it needs a real functional-unit-
+    // latency stall that freezes PC/IF-ID/ID-EX for however long the
+    // division takes, while EX/MEM and MEM/WB (which may be holding a
+    // completely unrelated OLDER instruction) keep draining normally -
+    // see the EX/MEM register below for the bubble-not-hold split this
+    // requires, and the design review this feature got before any RTL
+    // was written for why a naive port of the E-core's (cpu_core.v)
+    // simpler start/stall wiring is NOT safe here.
+    wire is_fdiv_instr = id_ex_fp_reg_write && !id_ex_is_fp_mem && (id_ex_fp_op == FP_DIV);
+    wire fpu_div_busy, fpu_div_done;
+    wire [31:0] fpu_div_result;
+
+    // fp_div's ST_DONE->ST_IDLE transition is unconditional and does
+    // NOT wait for a consumer. mem_stall (EX/MEM stuck retrying an
+    // unrelated OLDER instruction's shared-bus access) and FDIV's own
+    // completion are independent signals that CAN coincide on the
+    // exact done cycle - if EX/MEM can't accept the result that cycle
+    // (mem_stall must take priority there, to avoid corrupting the
+    // older instruction's own in-flight access - see the EX/MEM
+    // register below), fp_div would silently return to IDLE and,
+    // since is_fdiv_instr is still 1, immediately restart - discarding
+    // a completed division and repeating ~49 cycles of work (worst
+    // case, under adversarial bus-grant timing: a livelock). This
+    // one-entry buffer latches the result the instant it's produced,
+    // independent of whether EX/MEM happens to be free that same cycle.
+    reg        fpu_div_result_ready_r;
+    reg [31:0] fpu_div_result_r;
+
+    wire fdiv_capture   = is_fdiv_instr && (fpu_div_done || fpu_div_result_ready_r) && !mem_stall;
+    // halted_r gate: once the pipeline halts, every OTHER register
+    // freezes (see the sequential blocks below, all gated by
+    // !halted_r), but fp_div.v itself only has clk/reset - left
+    // ungated, a division still in flight at halt would finish,
+    // return to IDLE, and (since the frozen id_ex_* keeps
+    // is_fdiv_instr true forever) restart indefinitely. Not an
+    // architectural correctness bug (nothing downstream ever unfreezes
+    // to consume it), but there's no reason to let it spin forever.
+    wire fpu_div_start  = is_fdiv_instr && !fpu_div_busy && !fpu_div_result_ready_r && !halted_r;
+    wire fpu_div_stall  = is_fdiv_instr && !fdiv_capture;
+    wire [31:0] fpu_div_result_out = fpu_div_result_ready_r ? fpu_div_result_r : fpu_div_result;
+
+    fp_div fpdiv (
+        .clk(clk), .reset(reset), .start(fpu_div_start),
+        .a(fp_fwd_rs1), .b(fp_fwd_rs2),
+        .busy(fpu_div_busy), .done(fpu_div_done), .result(fpu_div_result)
+    );
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            fpu_div_result_ready_r <= 1'b0;
+            fpu_div_result_r       <= 32'b0;
+        end else if (fpu_div_done && !fdiv_capture) begin
+            fpu_div_result_ready_r <= 1'b1;
+            fpu_div_result_r       <= fpu_div_result;
+        end else if (fdiv_capture) begin
+            fpu_div_result_ready_r <= 1'b0;
+        end
+    end
+
+    wire [31:0] ex_fpu_result = (id_ex_fp_op == FP_MUL) ? fpu_mul_result :
+                                (id_ex_fp_op == FP_DIV) ? fpu_div_result_out : fpu_addsub_result;
 
     wire [31:0] ex_alu_a = id_ex_auipc ? id_ex_pc : (id_ex_lui ? 32'b0 : fwd_rs1);
     wire [31:0] ex_alu_b = id_ex_alu_src ? id_ex_imm : fwd_rs2;
@@ -380,7 +440,7 @@ module cpu_core_pipelined #(
             pc       <= 32'b0;
             halted_r <= 1'b0;
         end else if (!halted_r) begin
-            if (!(stall || mem_stall)) pc <= next_pc;
+            if (!(stall || mem_stall || fpu_div_stall)) pc <= next_pc;
             if (mem_wb_is_system) halted_r <= 1'b1;
         end
     end
@@ -390,13 +450,13 @@ module cpu_core_pipelined #(
             if_id_pc    <= 32'b0;
             if_id_instr <= 32'b0;
         end else if (!halted_r) begin
-            if (mem_stall) begin
+            if (mem_stall || fpu_div_stall) begin
                 // Hold unconditionally - PC is frozen too (above), so
                 // if_instr/pc wouldn't have changed anyway. A pending
-                // ex_taken flush is simply deferred until mem_stall
-                // clears (see the ID/EX block: whatever's driving
-                // ex_taken is ALSO held frozen every cycle mem_stall
-                // lasts, so nothing is lost by waiting).
+                // ex_taken flush is simply deferred until mem_stall/
+                // fpu_div_stall clears (see the ID/EX block: whatever's
+                // driving ex_taken is ALSO held frozen every cycle
+                // either stall lasts, so nothing is lost by waiting).
             end else if (ex_taken) begin
                 if_id_pc    <= 32'b0;
                 if_id_instr <= 32'b0;
@@ -423,13 +483,17 @@ module cpu_core_pipelined #(
             id_ex_fp_rs1_data <= 32'b0; id_ex_fp_rs2_data <= 32'b0;
             id_ex_fp_reg_write_r <= 1'b0;
         end else if (!halted_r) begin
-            if (mem_stall) begin
-                // Hold entirely (not a bubble) - the instruction here is
-                // itself waiting on the older memory op stuck in EX/MEM
-                // (a structural resource conflict: EX/MEM physically
-                // can't accept a new value this cycle), so it must stay
-                // put rather than be silently discarded like a normal
-                // hazard bubble would discard it.
+            if (mem_stall || fpu_div_stall) begin
+                // Hold entirely (not a bubble) - either the instruction
+                // here is itself waiting on the older memory op stuck in
+                // EX/MEM (a structural resource conflict: EX/MEM
+                // physically can't accept a new value this cycle), or
+                // it's the FDIV.S instruction still being divided (must
+                // keep holding its own decoded fields stable for
+                // fp_fwd_rs1/rs2 and id_ex_fp_op, which fpu_div_start
+                // above still needs each cycle) - either way it must
+                // stay put rather than be silently discarded like a
+                // normal hazard bubble would discard it.
             end else if (ex_taken || stall) begin
                 // Bubble: either flushing a wrong-path instruction, or
                 // holding back a load-use-hazardous one for one cycle.
@@ -469,10 +533,17 @@ module cpu_core_pipelined #(
             end
             // Hazard unit needs THIS cycle's about-to-be-latched values
             // available for NEXT cycle's stall check - mirror what's
-            // being written above (hold under mem_stall since ID/EX
-            // itself isn't changing; 0 for a bubble; real values
-            // otherwise).
-            if (mem_stall) begin
+            // being written above (hold under mem_stall/fpu_div_stall
+            // since ID/EX itself isn't changing; 0 for a bubble; real
+            // values otherwise). Must mirror the main block's hold
+            // condition exactly - leaving fpu_div_stall out here would
+            // let hazard_unit's own `stall` output see id_ex_fp_reg_write_r
+            // spuriously zeroed (via the ex_taken||stall bubble branch,
+            // triggered by the ALREADY-frozen if_id waiting instruction's
+            // own genuine hazard need) one cycle after the main id_ex_*
+            // register correctly stays frozen at 1 - a drift between the
+            // two mirrors that this identical gating avoids entirely.
+            if (mem_stall || fpu_div_stall) begin
                 // hold (no assignment)
             end else if (ex_taken || stall) begin
                 id_ex_mem_read_r <= 1'b0;
@@ -494,7 +565,29 @@ module cpu_core_pipelined #(
             ex_mem_mem_size <= 2'b0; ex_mem_wb_sel <= 2'b0;
             ex_mem_fp_reg_write <= 1'b0; ex_mem_is_fp_mem <= 1'b0; ex_mem_fpu_result <= 32'b0;
         end else if (!halted_r) begin
-            if (!mem_stall) begin
+            if (mem_stall) begin
+                // Hold - the stuck access retries with the SAME
+                // ex_mem_* values (address, size, etc.) next cycle.
+            end else if (fpu_div_stall) begin
+                // Bubble, NOT hold - unlike mem_stall (where EX/MEM's
+                // OWN content is genuinely stuck), fpu_div_stall means
+                // id_ex_* (one stage EARLIER) is still dividing. EX/MEM
+                // isn't blocked: whatever instruction was already here
+                // when FDIV entered ID/EX already drained to MEM/WB on
+                // its own next cycle via the unconditional (mem_stall-
+                // only-gated) MEM/WB register below - so EX/MEM must
+                // not keep re-presenting stale content to it. Zeroing
+                // just the write/enable signals is enough (matches the
+                // ID/EX bubble branch's own style above) - everything
+                // downstream that matters (is_shared_access, dmem
+                // write, WB register writes, halted_r) keys off these.
+                ex_mem_reg_write    <= 1'b0;
+                ex_mem_mem_read     <= 1'b0;
+                ex_mem_mem_write    <= 1'b0;
+                ex_mem_is_system    <= 1'b0;
+                ex_mem_fp_reg_write <= 1'b0;
+                ex_mem_rd           <= 5'b0;
+            end else begin
                 ex_mem_pc_plus4     <= id_ex_pc_plus4;
                 ex_mem_alu_result   <= ex_alu_result;
                 // FSW's actual store data is FP (fp_fwd_rs2), not the
@@ -516,8 +609,6 @@ module cpu_core_pipelined #(
                 ex_mem_is_fp_mem    <= id_ex_is_fp_mem;
                 ex_mem_fpu_result   <= ex_fpu_result;
             end
-            // mem_stall: hold - the stuck access retries with the SAME
-            // ex_mem_* values (address, size, etc.) next cycle.
         end
     end
 

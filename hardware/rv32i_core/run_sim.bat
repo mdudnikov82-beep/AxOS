@@ -124,14 +124,14 @@ echo.
 echo ===== Pipelined core (cpu_core_pipelined.v) =====
 
 echo Cross-check 1: hand-assembled program (must match single-cycle: 42)
-"%IVERILOG%" -o out_tb_pipe1.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined.v
+"%IVERILOG%" -o out_tb_pipe1.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_pipe1.vvp +EXPECT_TOHOST=42 | findstr /C:"PASS: tohost matches" >nul
 if %errorlevel% neq 0 (echo FAILED: pipelined, hand-assembled program & "%VVP%" out_tb_pipe1.vvp +EXPECT_TOHOST=42 & goto :error)
 echo   OK (tohost=42, matches single-cycle)
 
 echo Cross-check 2: real compiled C program (must match single-cycle: 110)
-"%IVERILOG%" -DINSTR_HEX=\"sw/test_basic.hex\" -o out_tb_pipe2.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined.v
+"%IVERILOG%" -DINSTR_HEX=\"sw/test_basic.hex\" -o out_tb_pipe2.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_pipe2.vvp +EXPECT_TOHOST=110 | findstr /C:"PASS: tohost matches" >nul
 if %errorlevel% neq 0 (echo FAILED: pipelined, compiled C program & "%VVP%" out_tb_pipe2.vvp +EXPECT_TOHOST=110 & goto :error)
@@ -140,7 +140,7 @@ echo   OK (tohost=110, matches single-cycle)
 echo Hazard stress test (forwarding + load-use stall + branch flush together)
 python sw\asm_hazard_test.py sw\hazard_test.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -DINSTR_HEX=\"sw/hazard_test.hex\" -o out_tb_pipe3.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined.v
+"%IVERILOG%" -DINSTR_HEX=\"sw/hazard_test.hex\" -o out_tb_pipe3.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_pipelined.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_pipe3.vvp +EXPECT_TOHOST=119 | findstr /C:"PASS: tohost matches" >nul
 if %errorlevel% neq 0 (echo FAILED: pipelined, hazard stress test & "%VVP%" out_tb_pipe3.vvp +EXPECT_TOHOST=119 & goto :error)
@@ -181,7 +181,7 @@ echo   OK (tohost=1082130432 = 0x40800000 = 4.0)
 echo.
 echo ===== Minimal RV32F on the pipelined P-core (cpu_core_pipelined.v) =====
 echo Cross-check: same program as the E-core, must match its result exactly
-"%IVERILOG%" -o out_tb_cpufppipe1.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_fp_pipe.v
+"%IVERILOG%" -o out_tb_cpufppipe1.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_fp_pipe.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_cpufppipe1.vvp | findstr /C:"PASS: tohost matches" >nul
 if %errorlevel% neq 0 (echo FAILED: pipelined RV32F cross-check & "%VVP%" out_tb_cpufppipe1.vvp & goto :error)
@@ -190,7 +190,7 @@ echo   OK (tohost=1082130432 = 0x40800000 = 4.0, matches single-cycle)
 echo FP hazard stress test (load-use stall + EX/MEM forward + store-data forward together)
 python sw\asm_fp_pipe_test.py sw\fp_pipe_test.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -DINSTR_HEX=\"sw/fp_pipe_test.hex\" -o out_tb_cpufppipe2.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_fp_pipe.v
+"%IVERILOG%" -DINSTR_HEX=\"sw/fp_pipe_test.hex\" -o out_tb_cpufppipe2.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_fp_pipe.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_cpufppipe2.vvp +EXPECT_TOHOST=1094713344 | findstr /C:"PASS: tohost matches" >nul
 if %errorlevel% neq 0 (echo FAILED: pipelined RV32F hazard stress test & "%VVP%" out_tb_cpufppipe2.vvp +EXPECT_TOHOST=1094713344 & goto :error)
@@ -205,6 +205,24 @@ if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_cpufpdiv.vvp | findstr /C:"PASS: tohost matches" >nul
 if %errorlevel% neq 0 (echo FAILED: FDIV.S integration test & "%VVP%" out_tb_cpufpdiv.vvp & goto :error)
 echo   OK (tohost=1080033280 = 0x40600000 = 3.5)
+
+echo.
+echo ===== FDIV.S ported to the pipelined P-core (cpu_core_pipelined.v) =====
+echo Cross-check: same program as the E-core, no bus contention (GRANT_DENY_CYCLES=0), must match its result exactly
+"%IVERILOG%" -DINSTR_HEX=\"sw/fp_div_test.hex\" -o out_tb_cpufpdivpipe1.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_fp_div_pipe.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_cpufpdivpipe1.vvp +GRANT_DENY_CYCLES=0 | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: pipelined FDIV.S cross-check & "%VVP%" out_tb_cpufpdivpipe1.vvp +GRANT_DENY_CYCLES=0 & goto :error)
+echo   OK (tohost=1080033280 = 0x40600000 = 3.5, matches single-cycle)
+
+echo Adversarial race: an unrelated OLDER shared-memory store stuck in EX/MEM (bus_grant denied) spans FDIV.S's entire computation, forcing its DONE cycle to land mid-mem_stall
+python sw\asm_fp_div_pipe_race_test.py sw\fp_div_pipe_race_test.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_tb_cpufpdivpipe2.vvp rtl\alu.v rtl\regfile.v rtl\fp_regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core_pipelined.v tb\tb_cpu_fp_div_pipe.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_cpufpdivpipe2.vvp | findstr /C:"PASS: tohost matches" >nul
+if %errorlevel% neq 0 (echo FAILED: pipelined FDIV.S mem_stall/fpu_div_stall race & "%VVP%" out_tb_cpufpdivpipe2.vvp & goto :error)
+echo   OK (tohost=1080033280 = 0x40600000 = 3.5, survives the race)
 
 echo.
 echo ===== ALL SIMULATIONS PASSED =====
