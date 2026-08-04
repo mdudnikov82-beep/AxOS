@@ -94,6 +94,20 @@ if %errorlevel% neq 0 goto :error
 if %errorlevel% neq 0 (echo FAILED: tb_fp_div & "%VVP%" out_tb_fpdiv.vvp & goto :error)
 echo   OK
 
+echo [13] router (NoC mesh building block)...
+"%IVERILOG%" -o out_tb_router.vvp rtl\router.v tb\tb_router.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_router.vvp | findstr /C:"ALL ROUTER TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_router & "%VVP%" out_tb_router.vvp & goto :error)
+echo   OK
+
+echo [14] NoC link (core adapter + router + router + memory adapter, single hop)...
+"%IVERILOG%" -o out_tb_noclink.vvp rtl\router.v rtl\data_mem.v rtl\noc_core_adapter.v rtl\noc_mem_adapter.v tb\tb_noc_link.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_tb_noclink.vvp | findstr /C:"ALL NOC LINK TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_noc_link & "%VVP%" out_tb_noclink.vvp & goto :error)
+echo   OK
+
 echo.
 echo ===== Full core: hand-assembled program (asm_test1.py) =====
 python sw\asm_test1.py sw\test1.hex
@@ -147,25 +161,25 @@ if %errorlevel% neq 0 (echo FAILED: pipelined, hazard stress test & "%VVP%" out_
 echo   OK (tohost=119)
 
 echo.
-echo ===== Mini-SoC: 6 P-cores + 6 E-cores (soc_top.v, N-way shared_bus) =====
+echo ===== Mini-SoC: 6 P-cores + 6 E-cores (soc_top.v, 4x4 NoC mesh) =====
 echo p0=hazard_test.hex(119) p1-p5=test1.hex(42) e0=test_basic.hex(110) e1-e5=test1.hex(42), all concurrent
-"%IVERILOG%" -o out_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\shared_bus.v rtl\soc_top.v tb\tb_soc.v
+"%IVERILOG%" -o out_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\router.v rtl\noc_core_adapter.v rtl\noc_mem_adapter.v rtl\soc_top.v tb\tb_soc.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_soc.vvp | findstr /C:"PASS: all 12 cores matched" >nul
 if %errorlevel% neq 0 (echo FAILED: mini-SoC & "%VVP%" out_soc.vvp & goto :error)
 echo   OK (p0=119, p1-p5=42, e0=110, e1-e5=42, all 12 concurrent)
 
 echo.
-echo ===== Shared bus: cross-core communication (soc_top.v + shared_bus.v) =====
-echo e0 (producer) writes a payload+flag to shared mem, p0 (consumer) polls and reads it back; p1-p5/e1-e5 run independently alongside
+echo ===== NoC: cross-core communication through the mesh (soc_top.v) =====
+echo e0 (producer) writes a payload+flag to shared mem, p0 (consumer) polls and reads it back - through several real router hops each way, not one central arbiter; p1-p5/e1-e5 run independently alongside
 python sw\asm_shared_producer.py sw\shared_producer.hex
 if %errorlevel% neq 0 goto :error
 python sw\asm_shared_consumer.py sw\shared_consumer.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -o out_shared_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\shared_bus.v rtl\soc_top.v tb\tb_shared_soc.v
+"%IVERILOG%" -o out_shared_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\router.v rtl\noc_core_adapter.v rtl\noc_mem_adapter.v rtl\soc_top.v tb\tb_shared_soc.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_shared_soc.vvp | findstr /C:"PASS: cross-core communication verified" >nul
-if %errorlevel% neq 0 (echo FAILED: shared-bus cross-core test & "%VVP%" out_shared_soc.vvp & goto :error)
+if %errorlevel% neq 0 (echo FAILED: NoC cross-core test & "%VVP%" out_shared_soc.vvp & goto :error)
 echo   OK (p0=127, e0=77, p1-p5/e1-e5=42, cross-core communication verified)
 
 echo.
