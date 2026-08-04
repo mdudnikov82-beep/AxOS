@@ -763,6 +763,16 @@ if %errorlevel% neq 0 goto :error
 
 for %%F in (%OUT%\wintest_rv64.elf) do echo   wintest_rv64.elf: %%~zF bytes
 
+echo [U121] execstr.c...
+"%CC%" %UFLAGS% -c %USRC%\execstr.c -o %OUT%\uexecstr.o
+if %errorlevel% neq 0 goto :error
+
+echo [U122] Linking execstr...
+"%LD%" -m elf64lriscv --emit-relocs -T %USRC%\user_rv64.ld -o %OUT%\execstr_rv64.elf %OUT%\ucrt0.o %OUT%\uexecstr.o
+if %errorlevel% neq 0 goto :error
+
+for %%F in (%OUT%\execstr_rv64.elf) do echo   execstr_rv64.elf: %%~zF bytes
+
 echo.
 echo ===== Disk image =====
 
@@ -782,6 +792,7 @@ copy /b %OUT%\malloctest_rv64.elf rv64build\fs\rv64\MALLOCTS.ELF
 copy /b %OUT%\mallocdf_rv64.elf   rv64build\fs\rv64\MALLOCDF.ELF
 copy /b %OUT%\mtetest_rv64.elf    rv64build\fs\rv64\MTETEST.ELF
 copy /b %OUT%\wintest_rv64.elf    rv64build\fs\rv64\WINTEST.ELF
+copy /b %OUT%\execstr_rv64.elf    rv64build\fs\rv64\EXECSTR.ELF
 copy /b %OUT%\mteoverfl_rv64.elf  rv64build\fs\rv64\MTEOVER.ELF
 copy /b %OUT%\gfxdemo_rv64.elf    rv64build\fs\rv64\GFXDEMO.ELF
 copy /b %OUT%\gfxtext_rv64.elf    rv64build\fs\rv64\GFXTEXT.ELF

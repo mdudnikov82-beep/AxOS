@@ -262,12 +262,26 @@ static int user_range_ok(unsigned long ptr, unsigned long len) {
 }
 
 /* Generous fixed bound for a NUL-terminated path/string argument — the
- * real length isn't known before a safe read, so this just proves the
- * worst case (a non-terminated buffer of this size) still fits entirely
- * inside user space. */
+ * real length isn't known before a safe read, so this proves the worst
+ * case (a non-terminated buffer of this size) still fits entirely inside
+ * user space, AND (unlike an earlier version of this check) that a NUL
+ * actually appears somewhere in that window. Without the scan, a caller
+ * whose string had no NUL and no space within the checked range could
+ * walk elf_load()'s cmdline-parsing loops (see elf_loader.c's "while
+ * (*p == ' ') p++;", genuinely unbounded past this window) straight into
+ * an unmapped hole in its own sparse address space - a fault while S-mode
+ * is already mid-syscall on the process's behalf, which kernel_main.c's
+ * trap handler treats as fatal (SPP=1 path: prints and `while(1) wfi`),
+ * crashing the ENTIRE kernel from one confined process's crafted SYS_EXEC/
+ * SYS_EXEC_PIPE argument. Mirrors x86's validate_user_str() exactly. */
 #define USER_MAX_STRING 256UL
 static int user_string_ok(unsigned long ptr) {
-    return user_range_ok(ptr, USER_MAX_STRING);
+    if (!user_range_ok(ptr, USER_MAX_STRING)) return 0;
+    const char *s = (const char *)ptr;
+    for (unsigned long i = 0; i < USER_MAX_STRING; i++) {
+        if (s[i] == '\0') return 1;
+    }
+    return 0; /* no NUL before the end of the checked window */
 }
 
 /* MLS ("no read up", Bell-LaPadula): 1 if the CALLING process may see an
