@@ -30,6 +30,7 @@
 `timescale 1ns/1ps
 
 module noc_core_adapter #(
+    parameter COORD_BITS = 2, // must match the router.v instances this feeds
     parameter MY_X = 0,
     parameter MY_Y = 0,
     parameter MEM_X = 1,
@@ -60,16 +61,16 @@ module noc_core_adapter #(
     input  wire [RESP_FLIT_WIDTH-1:0] resp_in_flit,
     output wire                       resp_in_ready
 );
-    // Request flit layout (top 4 bits are dest_x/dest_y - router.v's
-    // only requirement - everything else below is opaque to it):
-    //   [75:74]=dest_x [73:72]=dest_y [71:70]=src_x [69:68]=src_y
-    //   [67]=is_write [66:35]=addr [34:3]=write_data [2:1]=mem_size [0]=mem_unsigned
+    // Request flit layout (top 2*COORD_BITS bits are dest_x/dest_y -
+    // router.v's only requirement - everything else below is opaque to
+    // it): {dest_x, dest_y, src_x, src_y, is_write, addr[31:0],
+    // write_data[31:0], mem_size[1:0], mem_unsigned}.
     wire [REQ_FLIT_WIDTH-1:0] req_flit_build = {
-        MEM_X[1:0], MEM_Y[1:0], MY_X[1:0], MY_Y[1:0],
+        MEM_X[COORD_BITS-1:0], MEM_Y[COORD_BITS-1:0], MY_X[COORD_BITS-1:0], MY_Y[COORD_BITS-1:0],
         bus_mem_write, bus_addr, bus_write_data, bus_mem_size, bus_mem_unsigned
     };
 
-    // Response flit layout: [35:34]=dest_x [33:32]=dest_y [31:0]=read_data
+    // Response flit layout: {dest_x, dest_y, read_data[31:0]}
     // (no src needed - the only thing that can ever address a response
     // to (MY_X,MY_Y) is the memory node answering THIS core's own
     // request, per the module-header reasoning above).

@@ -7,10 +7,13 @@
 // (an already-buffered-but-not-yet-accepted flit is never silently
 // overwritten by a new arrival on the same input).
 //
-// The flit format is fully opaque to this module except its top 4
-// bits, which MUST be {dest_x[1:0], dest_y[1:0]} - everything below
-// that (address, data, control fields, whatever a specific network
-// carries) is routed through unmodified. This lets ONE module serve
+// The flit format is fully opaque to this module except its top
+// 2*COORD_BITS bits, which MUST be {dest_x[COORD_BITS-1:0],
+// dest_y[COORD_BITS-1:0]} - everything below that (address, data,
+// control fields, whatever a specific network carries) is routed
+// through unmodified. COORD_BITS defaults to 2 (a 4x4 grid, coords
+// 0..3) - widen it for a bigger mesh (e.g. 3 bits for a 5x5..8x8
+// grid). This lets ONE module serve
 // as both the request-network router and the response-network router
 // (different FLIT_WIDTH, same logic) - a design-review recommendation
 // specifically to make "these two networks share no state" a
@@ -35,6 +38,7 @@
 
 module router #(
     parameter FLIT_WIDTH = 76,
+    parameter COORD_BITS = 2, // grid coords are 0..(2**COORD_BITS - 1); default of 2 fits a 4x4 grid
     parameter MY_X = 0,
     parameter MY_Y = 0
 ) (
@@ -106,8 +110,8 @@ module router #(
     genvar gi;
     generate
         for (gi = 0; gi < NDIRS; gi = gi + 1) begin: route_calc
-            wire [1:0] dest_x = in_flit[gi][FLIT_WIDTH-1:FLIT_WIDTH-2];
-            wire [1:0] dest_y = in_flit[gi][FLIT_WIDTH-3:FLIT_WIDTH-4];
+            wire [COORD_BITS-1:0] dest_x = in_flit[gi][FLIT_WIDTH-1 -: COORD_BITS];
+            wire [COORD_BITS-1:0] dest_y = in_flit[gi][FLIT_WIDTH-1-COORD_BITS -: COORD_BITS];
             assign wanted_dir[gi] =
                 (dest_x != MY_X) ? (dest_x > MY_X ? DIR_E : DIR_W) :
                 (dest_y != MY_Y) ? (dest_y > MY_Y ? DIR_S : DIR_N) :

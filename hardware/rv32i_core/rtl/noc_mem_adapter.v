@@ -19,6 +19,7 @@
 `timescale 1ns/1ps
 
 module noc_mem_adapter #(
+    parameter COORD_BITS = 2, // must match the router.v instances this feeds
     parameter MEM_BYTES       = 256,
     parameter REQ_FLIT_WIDTH  = 76,
     parameter RESP_FLIT_WIDTH = 36
@@ -37,17 +38,22 @@ module noc_mem_adapter #(
     input  wire                       resp_out_ready
 );
     // Request flit layout - see noc_core_adapter.v's matching comment.
-    wire [1:0]  req_src_x        = req_in_flit[71:70];
-    wire [1:0]  req_src_y        = req_in_flit[69:68];
+    // The fixed-size payload (is_write..mem_unsigned, 68 bits) always
+    // sits at the bottom regardless of COORD_BITS; only src_x/src_y's
+    // position depends on it (they sit directly above the payload,
+    // below dest_x/dest_y - which this adapter never needs to read,
+    // since routing already happened by the time a flit gets here).
     wire        req_is_write     = req_in_flit[67];
     wire [31:0] req_addr         = req_in_flit[66:35];
     wire [31:0] req_write_data   = req_in_flit[34:3];
     wire [1:0]  req_mem_size     = req_in_flit[2:1];
     wire        req_mem_unsigned = req_in_flit[0];
+    wire [COORD_BITS-1:0] req_src_y = req_in_flit[68 +: COORD_BITS];
+    wire [COORD_BITS-1:0] req_src_x = req_in_flit[68+COORD_BITS +: COORD_BITS];
 
     reg        busy; // holding a not-yet-injected response
     reg [31:0] pending_read_data;
-    reg [1:0]  pending_dest_x, pending_dest_y;
+    reg [COORD_BITS-1:0] pending_dest_x, pending_dest_y;
 
     assign req_in_ready = !busy;
 
@@ -63,7 +69,7 @@ module noc_mem_adapter #(
         .read_data(dm_read_data)
     );
 
-    // Response flit layout: [35:34]=dest_x [33:32]=dest_y [31:0]=read_data.
+    // Response flit layout: {dest_x, dest_y, read_data[31:0]}.
     assign resp_out_valid = busy;
     assign resp_out_flit  = {pending_dest_x, pending_dest_y, pending_read_data};
 
@@ -71,8 +77,8 @@ module noc_mem_adapter #(
         if (reset) begin
             busy <= 1'b0;
             pending_read_data <= 32'b0;
-            pending_dest_x <= 2'b0;
-            pending_dest_y <= 2'b0;
+            pending_dest_x <= {COORD_BITS{1'b0}};
+            pending_dest_y <= {COORD_BITS{1'b0}};
         end else if (!busy) begin
             if (req_in_valid) begin
                 busy <= 1'b1;
