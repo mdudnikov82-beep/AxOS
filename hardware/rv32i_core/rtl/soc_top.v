@@ -1,69 +1,92 @@
-// Network-on-Chip version of the mini-SoC (hardware/rv32i_core) -
-// replaces shared_bus.v's single centralized arbiter with a real
-// 5x5 mesh of XY-routed routers (router.v), each grid
-// position connected to its N/E/S/W neighbors plus a Local port for
-// whatever core or memory endpoint sits there. TWO independent router
-// networks span the whole grid - REQUEST (core -> memory, FLIT_WIDTH=
-// 80) and RESPONSE (memory -> core, FLIT_WIDTH=38) - kept as fully
-// separate router instances with zero shared state, specifically to
-// sidestep request/response protocol deadlock rather than solve it (a
-// design-review recommendation - see [[project_noc_router]] for the
-// full rationale, including a real grant-timing bug the review caught
-// before any RTL was written).
+// Network-on-Chip mini-SoC (hardware/rv32i_core) - a real 3D 3x4x3 mesh
+// of XYZ-routed routers (router.v), each grid position connected to its
+// N/E/S/W/Up/Down neighbors plus a Local port for whatever core or
+// memory endpoint sits there. TWO independent router networks span the
+// whole grid - REQUEST (core -> memory, FLIT_WIDTH=80) and RESPONSE
+// (memory -> core, FLIT_WIDTH=38) - kept as fully separate router
+// instances with zero shared state (see [[project_noc_router]]).
 //
-// Scaled up from the earlier 4x4/12-core mesh purely by widening the
-// grid and COORD_BITS (2->3 - 2 bits can only express coordinates
-// 0-3, but a 5x5 grid needs 0-4) - router.v,
-// noc_core_adapter.v, and noc_mem_adapter.v needed no OTHER changes,
-// since COORD_BITS was designed as a parameter specifically for this.
+// First 3D NoC in this project (prior meshes were 2D NxN) - extended via
+// a real design review before any RTL: router.v gained Up/Down ports and
+// a third XYZ routing tier (dimension-order routing's deadlock-freedom
+// proof generalizes to any dimension count, confirmed rather than
+// assumed), and the flit format gained a third coordinate field
+// end-to-end (noc_core_adapter.v/noc_mem_adapter.v).
 //
-// Memory lives at the CENTER of the grid (2,2), not a
-// corner - the original design review found corner placement costs
-// meaningfully higher average/worst-case latency for a single fixed
-// memory sink that literally every request must reach.
-// 24 of the 24 remaining positions host the 12 P-cores
-// (cpu_core_pipelined) and 12 E-cores (cpu_core); 0 are spare,
+// COORD_BITS=2 is shared across all three axes even though they're
+// different sizes (X,Z have 3 values, Y has 4) - confirmed numerically
+// safe by design review as long as every axis's real range fits, not
+// just the largest one (2 bits covers 0-3, comfortably covering all
+// three axes here).
+//
+// Memory lives at (1,1,1) - the exact center on the two size-3
+// axes (X,Z), and one of the two symmetric center positions on the
+// size-4 Y axis (Y=1 and Y=2 are provably identical by symmetry, per
+// design review) - not a corner. 35 of the 36 remaining positions host
+// 18 P-cores (cpu_core_pipelined) and 17 E-cores (cpu_core); 0 are spare,
 // pass-through-only routers with no local endpoint.
 //
-// External module interface (parameters and ports) is UNCHANGED from
-// the shared-bus soc_top.v - only what's wired INSIDE differs - so
-// tb_soc.v/tb_shared_soc.v needed zero modifications to run against
-// this version.
+// External module interface (parameters and ports) follows the same
+// shape as the prior 2D soc_top.v (per-core INSTR_HEX parameter, per-core
+// halted/tohost outputs, all_halted) - only the grid topology and
+// dimensionality differ.
 //
-// Grid layout (x,y), MEM at center:
-
-//   p0      p1      p2      p3      p4    
-//   p5      p6      p7      p8      p9    
-//   p10     p11     MEM     e0      e1    
-//   e2      e3      e4      e5      e6    
-//   e7      e8      e9      e10     e11   
+// Grid layout (x,y,z), MEM at center - shown as Z-layer slices since one
+// 2D picture can't show a cube:
+//
+//   Z=0:
+//     p0     p12    e5   
+//     p3     p15    e8   
+//     p6     p17    e11  
+//     p9     e2     e14  
+//   Z=1:
+//     p1     p13    e6   
+//     p4     MEM    e9   
+//     p7     e0     e12  
+//     p10    e3     e15  
+//   Z=2:
+//     p2     p14    e7   
+//     p5     p16    e10  
+//     p8     e1     e13  
+//     p11    e4     e16  
 `timescale 1ns/1ps
 
 module soc_top #(
-    parameter P0_INSTR_HEX     = "",
-    parameter P1_INSTR_HEX     = "",
-    parameter P2_INSTR_HEX     = "",
-    parameter P3_INSTR_HEX     = "",
-    parameter P4_INSTR_HEX     = "",
-    parameter P5_INSTR_HEX     = "",
-    parameter P6_INSTR_HEX     = "",
-    parameter P7_INSTR_HEX     = "",
-    parameter P8_INSTR_HEX     = "",
-    parameter P9_INSTR_HEX     = "",
-    parameter P10_INSTR_HEX     = "",
-    parameter P11_INSTR_HEX     = "",
-    parameter E0_INSTR_HEX     = "",
-    parameter E1_INSTR_HEX     = "",
-    parameter E2_INSTR_HEX     = "",
-    parameter E3_INSTR_HEX     = "",
-    parameter E4_INSTR_HEX     = "",
-    parameter E5_INSTR_HEX     = "",
-    parameter E6_INSTR_HEX     = "",
-    parameter E7_INSTR_HEX     = "",
-    parameter E8_INSTR_HEX     = "",
-    parameter E9_INSTR_HEX     = "",
-    parameter E10_INSTR_HEX     = "",
-    parameter E11_INSTR_HEX     = "",
+    parameter P0_INSTR_HEX = "",
+    parameter P1_INSTR_HEX = "",
+    parameter P2_INSTR_HEX = "",
+    parameter P3_INSTR_HEX = "",
+    parameter P4_INSTR_HEX = "",
+    parameter P5_INSTR_HEX = "",
+    parameter P6_INSTR_HEX = "",
+    parameter P7_INSTR_HEX = "",
+    parameter P8_INSTR_HEX = "",
+    parameter P9_INSTR_HEX = "",
+    parameter P10_INSTR_HEX = "",
+    parameter P11_INSTR_HEX = "",
+    parameter P12_INSTR_HEX = "",
+    parameter P13_INSTR_HEX = "",
+    parameter P14_INSTR_HEX = "",
+    parameter P15_INSTR_HEX = "",
+    parameter P16_INSTR_HEX = "",
+    parameter P17_INSTR_HEX = "",
+    parameter E0_INSTR_HEX = "",
+    parameter E1_INSTR_HEX = "",
+    parameter E2_INSTR_HEX = "",
+    parameter E3_INSTR_HEX = "",
+    parameter E4_INSTR_HEX = "",
+    parameter E5_INSTR_HEX = "",
+    parameter E6_INSTR_HEX = "",
+    parameter E7_INSTR_HEX = "",
+    parameter E8_INSTR_HEX = "",
+    parameter E9_INSTR_HEX = "",
+    parameter E10_INSTR_HEX = "",
+    parameter E11_INSTR_HEX = "",
+    parameter E12_INSTR_HEX = "",
+    parameter E13_INSTR_HEX = "",
+    parameter E14_INSTR_HEX = "",
+    parameter E15_INSTR_HEX = "",
+    parameter E16_INSTR_HEX = "",
     parameter INSTR_MEM_WORDS  = 1024,
     parameter DATA_MEM_BYTES   = 8192,
     parameter SHARED_MEM_BASE  = 32'h0000_2000,
@@ -95,6 +118,18 @@ module soc_top #(
     output wire [31:0]  p10_tohost,
     output wire        p11_halted,
     output wire [31:0]  p11_tohost,
+    output wire        p12_halted,
+    output wire [31:0]  p12_tohost,
+    output wire        p13_halted,
+    output wire [31:0]  p13_tohost,
+    output wire        p14_halted,
+    output wire [31:0]  p14_tohost,
+    output wire        p15_halted,
+    output wire [31:0]  p15_tohost,
+    output wire        p16_halted,
+    output wire [31:0]  p16_tohost,
+    output wire        p17_halted,
+    output wire [31:0]  p17_tohost,
     output wire        e0_halted,
     output wire [31:0]  e0_tohost,
     output wire        e1_halted,
@@ -119,177 +154,327 @@ module soc_top #(
     output wire [31:0]  e10_tohost,
     output wire        e11_halted,
     output wire [31:0]  e11_tohost,
+    output wire        e12_halted,
+    output wire [31:0]  e12_tohost,
+    output wire        e13_halted,
+    output wire [31:0]  e13_tohost,
+    output wire        e14_halted,
+    output wire [31:0]  e14_tohost,
+    output wire        e15_halted,
+    output wire [31:0]  e15_tohost,
+    output wire        e16_halted,
+    output wire [31:0]  e16_tohost,
     output wire        all_halted
 );
 
     // ==================== Mesh link wires ====================
     // One {valid,flit,ready} triple per (node, direction) that has a
-    // real neighbor, representing THAT node's own outgoing flow in
-    // that direction - referenced directly (shared wire names, no
-    // extra `assign`s needed) from both this node's *_out_* ports and
-    // the neighbor's opposite-direction *_in_* ports.
-    wire req_00_E_v, req_00_E_r; wire [79:0] req_00_E_f;
-    wire req_00_S_v, req_00_S_r; wire [79:0] req_00_S_f;
-    wire req_10_E_v, req_10_E_r; wire [79:0] req_10_E_f;
-    wire req_10_S_v, req_10_S_r; wire [79:0] req_10_S_f;
-    wire req_10_W_v, req_10_W_r; wire [79:0] req_10_W_f;
-    wire req_20_E_v, req_20_E_r; wire [79:0] req_20_E_f;
-    wire req_20_S_v, req_20_S_r; wire [79:0] req_20_S_f;
-    wire req_20_W_v, req_20_W_r; wire [79:0] req_20_W_f;
-    wire req_30_E_v, req_30_E_r; wire [79:0] req_30_E_f;
-    wire req_30_S_v, req_30_S_r; wire [79:0] req_30_S_f;
-    wire req_30_W_v, req_30_W_r; wire [79:0] req_30_W_f;
-    wire req_40_S_v, req_40_S_r; wire [79:0] req_40_S_f;
-    wire req_40_W_v, req_40_W_r; wire [79:0] req_40_W_f;
-    wire req_01_N_v, req_01_N_r; wire [79:0] req_01_N_f;
-    wire req_01_E_v, req_01_E_r; wire [79:0] req_01_E_f;
-    wire req_01_S_v, req_01_S_r; wire [79:0] req_01_S_f;
-    wire req_11_N_v, req_11_N_r; wire [79:0] req_11_N_f;
-    wire req_11_E_v, req_11_E_r; wire [79:0] req_11_E_f;
-    wire req_11_S_v, req_11_S_r; wire [79:0] req_11_S_f;
-    wire req_11_W_v, req_11_W_r; wire [79:0] req_11_W_f;
-    wire req_21_N_v, req_21_N_r; wire [79:0] req_21_N_f;
-    wire req_21_E_v, req_21_E_r; wire [79:0] req_21_E_f;
-    wire req_21_S_v, req_21_S_r; wire [79:0] req_21_S_f;
-    wire req_21_W_v, req_21_W_r; wire [79:0] req_21_W_f;
-    wire req_31_N_v, req_31_N_r; wire [79:0] req_31_N_f;
-    wire req_31_E_v, req_31_E_r; wire [79:0] req_31_E_f;
-    wire req_31_S_v, req_31_S_r; wire [79:0] req_31_S_f;
-    wire req_31_W_v, req_31_W_r; wire [79:0] req_31_W_f;
-    wire req_41_N_v, req_41_N_r; wire [79:0] req_41_N_f;
-    wire req_41_S_v, req_41_S_r; wire [79:0] req_41_S_f;
-    wire req_41_W_v, req_41_W_r; wire [79:0] req_41_W_f;
-    wire req_02_N_v, req_02_N_r; wire [79:0] req_02_N_f;
-    wire req_02_E_v, req_02_E_r; wire [79:0] req_02_E_f;
-    wire req_02_S_v, req_02_S_r; wire [79:0] req_02_S_f;
-    wire req_12_N_v, req_12_N_r; wire [79:0] req_12_N_f;
-    wire req_12_E_v, req_12_E_r; wire [79:0] req_12_E_f;
-    wire req_12_S_v, req_12_S_r; wire [79:0] req_12_S_f;
-    wire req_12_W_v, req_12_W_r; wire [79:0] req_12_W_f;
-    wire req_22_N_v, req_22_N_r; wire [79:0] req_22_N_f;
-    wire req_22_E_v, req_22_E_r; wire [79:0] req_22_E_f;
-    wire req_22_S_v, req_22_S_r; wire [79:0] req_22_S_f;
-    wire req_22_W_v, req_22_W_r; wire [79:0] req_22_W_f;
-    wire req_32_N_v, req_32_N_r; wire [79:0] req_32_N_f;
-    wire req_32_E_v, req_32_E_r; wire [79:0] req_32_E_f;
-    wire req_32_S_v, req_32_S_r; wire [79:0] req_32_S_f;
-    wire req_32_W_v, req_32_W_r; wire [79:0] req_32_W_f;
-    wire req_42_N_v, req_42_N_r; wire [79:0] req_42_N_f;
-    wire req_42_S_v, req_42_S_r; wire [79:0] req_42_S_f;
-    wire req_42_W_v, req_42_W_r; wire [79:0] req_42_W_f;
-    wire req_03_N_v, req_03_N_r; wire [79:0] req_03_N_f;
-    wire req_03_E_v, req_03_E_r; wire [79:0] req_03_E_f;
-    wire req_03_S_v, req_03_S_r; wire [79:0] req_03_S_f;
-    wire req_13_N_v, req_13_N_r; wire [79:0] req_13_N_f;
-    wire req_13_E_v, req_13_E_r; wire [79:0] req_13_E_f;
-    wire req_13_S_v, req_13_S_r; wire [79:0] req_13_S_f;
-    wire req_13_W_v, req_13_W_r; wire [79:0] req_13_W_f;
-    wire req_23_N_v, req_23_N_r; wire [79:0] req_23_N_f;
-    wire req_23_E_v, req_23_E_r; wire [79:0] req_23_E_f;
-    wire req_23_S_v, req_23_S_r; wire [79:0] req_23_S_f;
-    wire req_23_W_v, req_23_W_r; wire [79:0] req_23_W_f;
-    wire req_33_N_v, req_33_N_r; wire [79:0] req_33_N_f;
-    wire req_33_E_v, req_33_E_r; wire [79:0] req_33_E_f;
-    wire req_33_S_v, req_33_S_r; wire [79:0] req_33_S_f;
-    wire req_33_W_v, req_33_W_r; wire [79:0] req_33_W_f;
-    wire req_43_N_v, req_43_N_r; wire [79:0] req_43_N_f;
-    wire req_43_S_v, req_43_S_r; wire [79:0] req_43_S_f;
-    wire req_43_W_v, req_43_W_r; wire [79:0] req_43_W_f;
-    wire req_04_N_v, req_04_N_r; wire [79:0] req_04_N_f;
-    wire req_04_E_v, req_04_E_r; wire [79:0] req_04_E_f;
-    wire req_14_N_v, req_14_N_r; wire [79:0] req_14_N_f;
-    wire req_14_E_v, req_14_E_r; wire [79:0] req_14_E_f;
-    wire req_14_W_v, req_14_W_r; wire [79:0] req_14_W_f;
-    wire req_24_N_v, req_24_N_r; wire [79:0] req_24_N_f;
-    wire req_24_E_v, req_24_E_r; wire [79:0] req_24_E_f;
-    wire req_24_W_v, req_24_W_r; wire [79:0] req_24_W_f;
-    wire req_34_N_v, req_34_N_r; wire [79:0] req_34_N_f;
-    wire req_34_E_v, req_34_E_r; wire [79:0] req_34_E_f;
-    wire req_34_W_v, req_34_W_r; wire [79:0] req_34_W_f;
-    wire req_44_N_v, req_44_N_r; wire [79:0] req_44_N_f;
-    wire req_44_W_v, req_44_W_r; wire [79:0] req_44_W_f;
-    wire resp_00_E_v, resp_00_E_r; wire [37:0] resp_00_E_f;
-    wire resp_00_S_v, resp_00_S_r; wire [37:0] resp_00_S_f;
-    wire resp_10_E_v, resp_10_E_r; wire [37:0] resp_10_E_f;
-    wire resp_10_S_v, resp_10_S_r; wire [37:0] resp_10_S_f;
-    wire resp_10_W_v, resp_10_W_r; wire [37:0] resp_10_W_f;
-    wire resp_20_E_v, resp_20_E_r; wire [37:0] resp_20_E_f;
-    wire resp_20_S_v, resp_20_S_r; wire [37:0] resp_20_S_f;
-    wire resp_20_W_v, resp_20_W_r; wire [37:0] resp_20_W_f;
-    wire resp_30_E_v, resp_30_E_r; wire [37:0] resp_30_E_f;
-    wire resp_30_S_v, resp_30_S_r; wire [37:0] resp_30_S_f;
-    wire resp_30_W_v, resp_30_W_r; wire [37:0] resp_30_W_f;
-    wire resp_40_S_v, resp_40_S_r; wire [37:0] resp_40_S_f;
-    wire resp_40_W_v, resp_40_W_r; wire [37:0] resp_40_W_f;
-    wire resp_01_N_v, resp_01_N_r; wire [37:0] resp_01_N_f;
-    wire resp_01_E_v, resp_01_E_r; wire [37:0] resp_01_E_f;
-    wire resp_01_S_v, resp_01_S_r; wire [37:0] resp_01_S_f;
-    wire resp_11_N_v, resp_11_N_r; wire [37:0] resp_11_N_f;
-    wire resp_11_E_v, resp_11_E_r; wire [37:0] resp_11_E_f;
-    wire resp_11_S_v, resp_11_S_r; wire [37:0] resp_11_S_f;
-    wire resp_11_W_v, resp_11_W_r; wire [37:0] resp_11_W_f;
-    wire resp_21_N_v, resp_21_N_r; wire [37:0] resp_21_N_f;
-    wire resp_21_E_v, resp_21_E_r; wire [37:0] resp_21_E_f;
-    wire resp_21_S_v, resp_21_S_r; wire [37:0] resp_21_S_f;
-    wire resp_21_W_v, resp_21_W_r; wire [37:0] resp_21_W_f;
-    wire resp_31_N_v, resp_31_N_r; wire [37:0] resp_31_N_f;
-    wire resp_31_E_v, resp_31_E_r; wire [37:0] resp_31_E_f;
-    wire resp_31_S_v, resp_31_S_r; wire [37:0] resp_31_S_f;
-    wire resp_31_W_v, resp_31_W_r; wire [37:0] resp_31_W_f;
-    wire resp_41_N_v, resp_41_N_r; wire [37:0] resp_41_N_f;
-    wire resp_41_S_v, resp_41_S_r; wire [37:0] resp_41_S_f;
-    wire resp_41_W_v, resp_41_W_r; wire [37:0] resp_41_W_f;
-    wire resp_02_N_v, resp_02_N_r; wire [37:0] resp_02_N_f;
-    wire resp_02_E_v, resp_02_E_r; wire [37:0] resp_02_E_f;
-    wire resp_02_S_v, resp_02_S_r; wire [37:0] resp_02_S_f;
-    wire resp_12_N_v, resp_12_N_r; wire [37:0] resp_12_N_f;
-    wire resp_12_E_v, resp_12_E_r; wire [37:0] resp_12_E_f;
-    wire resp_12_S_v, resp_12_S_r; wire [37:0] resp_12_S_f;
-    wire resp_12_W_v, resp_12_W_r; wire [37:0] resp_12_W_f;
-    wire resp_22_N_v, resp_22_N_r; wire [37:0] resp_22_N_f;
-    wire resp_22_E_v, resp_22_E_r; wire [37:0] resp_22_E_f;
-    wire resp_22_S_v, resp_22_S_r; wire [37:0] resp_22_S_f;
-    wire resp_22_W_v, resp_22_W_r; wire [37:0] resp_22_W_f;
-    wire resp_32_N_v, resp_32_N_r; wire [37:0] resp_32_N_f;
-    wire resp_32_E_v, resp_32_E_r; wire [37:0] resp_32_E_f;
-    wire resp_32_S_v, resp_32_S_r; wire [37:0] resp_32_S_f;
-    wire resp_32_W_v, resp_32_W_r; wire [37:0] resp_32_W_f;
-    wire resp_42_N_v, resp_42_N_r; wire [37:0] resp_42_N_f;
-    wire resp_42_S_v, resp_42_S_r; wire [37:0] resp_42_S_f;
-    wire resp_42_W_v, resp_42_W_r; wire [37:0] resp_42_W_f;
-    wire resp_03_N_v, resp_03_N_r; wire [37:0] resp_03_N_f;
-    wire resp_03_E_v, resp_03_E_r; wire [37:0] resp_03_E_f;
-    wire resp_03_S_v, resp_03_S_r; wire [37:0] resp_03_S_f;
-    wire resp_13_N_v, resp_13_N_r; wire [37:0] resp_13_N_f;
-    wire resp_13_E_v, resp_13_E_r; wire [37:0] resp_13_E_f;
-    wire resp_13_S_v, resp_13_S_r; wire [37:0] resp_13_S_f;
-    wire resp_13_W_v, resp_13_W_r; wire [37:0] resp_13_W_f;
-    wire resp_23_N_v, resp_23_N_r; wire [37:0] resp_23_N_f;
-    wire resp_23_E_v, resp_23_E_r; wire [37:0] resp_23_E_f;
-    wire resp_23_S_v, resp_23_S_r; wire [37:0] resp_23_S_f;
-    wire resp_23_W_v, resp_23_W_r; wire [37:0] resp_23_W_f;
-    wire resp_33_N_v, resp_33_N_r; wire [37:0] resp_33_N_f;
-    wire resp_33_E_v, resp_33_E_r; wire [37:0] resp_33_E_f;
-    wire resp_33_S_v, resp_33_S_r; wire [37:0] resp_33_S_f;
-    wire resp_33_W_v, resp_33_W_r; wire [37:0] resp_33_W_f;
-    wire resp_43_N_v, resp_43_N_r; wire [37:0] resp_43_N_f;
-    wire resp_43_S_v, resp_43_S_r; wire [37:0] resp_43_S_f;
-    wire resp_43_W_v, resp_43_W_r; wire [37:0] resp_43_W_f;
-    wire resp_04_N_v, resp_04_N_r; wire [37:0] resp_04_N_f;
-    wire resp_04_E_v, resp_04_E_r; wire [37:0] resp_04_E_f;
-    wire resp_14_N_v, resp_14_N_r; wire [37:0] resp_14_N_f;
-    wire resp_14_E_v, resp_14_E_r; wire [37:0] resp_14_E_f;
-    wire resp_14_W_v, resp_14_W_r; wire [37:0] resp_14_W_f;
-    wire resp_24_N_v, resp_24_N_r; wire [37:0] resp_24_N_f;
-    wire resp_24_E_v, resp_24_E_r; wire [37:0] resp_24_E_f;
-    wire resp_24_W_v, resp_24_W_r; wire [37:0] resp_24_W_f;
-    wire resp_34_N_v, resp_34_N_r; wire [37:0] resp_34_N_f;
-    wire resp_34_E_v, resp_34_E_r; wire [37:0] resp_34_E_f;
-    wire resp_34_W_v, resp_34_W_r; wire [37:0] resp_34_W_f;
-    wire resp_44_N_v, resp_44_N_r; wire [37:0] resp_44_N_f;
-    wire resp_44_W_v, resp_44_W_r; wire [37:0] resp_44_W_f;
+    // real neighbor, representing THAT node's own outgoing flow in that
+    // direction - referenced directly (shared wire names, no extra
+    // `assign`s needed) from both this node's *_out_* ports and the
+    // neighbor's opposite-direction *_in_* ports.
+    wire req_0_0_0_S_v, req_0_0_0_S_r; wire [79:0] req_0_0_0_S_f;
+    wire req_0_0_0_E_v, req_0_0_0_E_r; wire [79:0] req_0_0_0_E_f;
+    wire req_0_0_0_D_v, req_0_0_0_D_r; wire [79:0] req_0_0_0_D_f;
+    wire req_0_0_1_S_v, req_0_0_1_S_r; wire [79:0] req_0_0_1_S_f;
+    wire req_0_0_1_E_v, req_0_0_1_E_r; wire [79:0] req_0_0_1_E_f;
+    wire req_0_0_1_U_v, req_0_0_1_U_r; wire [79:0] req_0_0_1_U_f;
+    wire req_0_0_1_D_v, req_0_0_1_D_r; wire [79:0] req_0_0_1_D_f;
+    wire req_0_0_2_S_v, req_0_0_2_S_r; wire [79:0] req_0_0_2_S_f;
+    wire req_0_0_2_E_v, req_0_0_2_E_r; wire [79:0] req_0_0_2_E_f;
+    wire req_0_0_2_U_v, req_0_0_2_U_r; wire [79:0] req_0_0_2_U_f;
+    wire req_0_1_0_N_v, req_0_1_0_N_r; wire [79:0] req_0_1_0_N_f;
+    wire req_0_1_0_S_v, req_0_1_0_S_r; wire [79:0] req_0_1_0_S_f;
+    wire req_0_1_0_E_v, req_0_1_0_E_r; wire [79:0] req_0_1_0_E_f;
+    wire req_0_1_0_D_v, req_0_1_0_D_r; wire [79:0] req_0_1_0_D_f;
+    wire req_0_1_1_N_v, req_0_1_1_N_r; wire [79:0] req_0_1_1_N_f;
+    wire req_0_1_1_S_v, req_0_1_1_S_r; wire [79:0] req_0_1_1_S_f;
+    wire req_0_1_1_E_v, req_0_1_1_E_r; wire [79:0] req_0_1_1_E_f;
+    wire req_0_1_1_U_v, req_0_1_1_U_r; wire [79:0] req_0_1_1_U_f;
+    wire req_0_1_1_D_v, req_0_1_1_D_r; wire [79:0] req_0_1_1_D_f;
+    wire req_0_1_2_N_v, req_0_1_2_N_r; wire [79:0] req_0_1_2_N_f;
+    wire req_0_1_2_S_v, req_0_1_2_S_r; wire [79:0] req_0_1_2_S_f;
+    wire req_0_1_2_E_v, req_0_1_2_E_r; wire [79:0] req_0_1_2_E_f;
+    wire req_0_1_2_U_v, req_0_1_2_U_r; wire [79:0] req_0_1_2_U_f;
+    wire req_0_2_0_N_v, req_0_2_0_N_r; wire [79:0] req_0_2_0_N_f;
+    wire req_0_2_0_S_v, req_0_2_0_S_r; wire [79:0] req_0_2_0_S_f;
+    wire req_0_2_0_E_v, req_0_2_0_E_r; wire [79:0] req_0_2_0_E_f;
+    wire req_0_2_0_D_v, req_0_2_0_D_r; wire [79:0] req_0_2_0_D_f;
+    wire req_0_2_1_N_v, req_0_2_1_N_r; wire [79:0] req_0_2_1_N_f;
+    wire req_0_2_1_S_v, req_0_2_1_S_r; wire [79:0] req_0_2_1_S_f;
+    wire req_0_2_1_E_v, req_0_2_1_E_r; wire [79:0] req_0_2_1_E_f;
+    wire req_0_2_1_U_v, req_0_2_1_U_r; wire [79:0] req_0_2_1_U_f;
+    wire req_0_2_1_D_v, req_0_2_1_D_r; wire [79:0] req_0_2_1_D_f;
+    wire req_0_2_2_N_v, req_0_2_2_N_r; wire [79:0] req_0_2_2_N_f;
+    wire req_0_2_2_S_v, req_0_2_2_S_r; wire [79:0] req_0_2_2_S_f;
+    wire req_0_2_2_E_v, req_0_2_2_E_r; wire [79:0] req_0_2_2_E_f;
+    wire req_0_2_2_U_v, req_0_2_2_U_r; wire [79:0] req_0_2_2_U_f;
+    wire req_0_3_0_N_v, req_0_3_0_N_r; wire [79:0] req_0_3_0_N_f;
+    wire req_0_3_0_E_v, req_0_3_0_E_r; wire [79:0] req_0_3_0_E_f;
+    wire req_0_3_0_D_v, req_0_3_0_D_r; wire [79:0] req_0_3_0_D_f;
+    wire req_0_3_1_N_v, req_0_3_1_N_r; wire [79:0] req_0_3_1_N_f;
+    wire req_0_3_1_E_v, req_0_3_1_E_r; wire [79:0] req_0_3_1_E_f;
+    wire req_0_3_1_U_v, req_0_3_1_U_r; wire [79:0] req_0_3_1_U_f;
+    wire req_0_3_1_D_v, req_0_3_1_D_r; wire [79:0] req_0_3_1_D_f;
+    wire req_0_3_2_N_v, req_0_3_2_N_r; wire [79:0] req_0_3_2_N_f;
+    wire req_0_3_2_E_v, req_0_3_2_E_r; wire [79:0] req_0_3_2_E_f;
+    wire req_0_3_2_U_v, req_0_3_2_U_r; wire [79:0] req_0_3_2_U_f;
+    wire req_1_0_0_S_v, req_1_0_0_S_r; wire [79:0] req_1_0_0_S_f;
+    wire req_1_0_0_E_v, req_1_0_0_E_r; wire [79:0] req_1_0_0_E_f;
+    wire req_1_0_0_W_v, req_1_0_0_W_r; wire [79:0] req_1_0_0_W_f;
+    wire req_1_0_0_D_v, req_1_0_0_D_r; wire [79:0] req_1_0_0_D_f;
+    wire req_1_0_1_S_v, req_1_0_1_S_r; wire [79:0] req_1_0_1_S_f;
+    wire req_1_0_1_E_v, req_1_0_1_E_r; wire [79:0] req_1_0_1_E_f;
+    wire req_1_0_1_W_v, req_1_0_1_W_r; wire [79:0] req_1_0_1_W_f;
+    wire req_1_0_1_U_v, req_1_0_1_U_r; wire [79:0] req_1_0_1_U_f;
+    wire req_1_0_1_D_v, req_1_0_1_D_r; wire [79:0] req_1_0_1_D_f;
+    wire req_1_0_2_S_v, req_1_0_2_S_r; wire [79:0] req_1_0_2_S_f;
+    wire req_1_0_2_E_v, req_1_0_2_E_r; wire [79:0] req_1_0_2_E_f;
+    wire req_1_0_2_W_v, req_1_0_2_W_r; wire [79:0] req_1_0_2_W_f;
+    wire req_1_0_2_U_v, req_1_0_2_U_r; wire [79:0] req_1_0_2_U_f;
+    wire req_1_1_0_N_v, req_1_1_0_N_r; wire [79:0] req_1_1_0_N_f;
+    wire req_1_1_0_S_v, req_1_1_0_S_r; wire [79:0] req_1_1_0_S_f;
+    wire req_1_1_0_E_v, req_1_1_0_E_r; wire [79:0] req_1_1_0_E_f;
+    wire req_1_1_0_W_v, req_1_1_0_W_r; wire [79:0] req_1_1_0_W_f;
+    wire req_1_1_0_D_v, req_1_1_0_D_r; wire [79:0] req_1_1_0_D_f;
+    wire req_1_1_1_N_v, req_1_1_1_N_r; wire [79:0] req_1_1_1_N_f;
+    wire req_1_1_1_S_v, req_1_1_1_S_r; wire [79:0] req_1_1_1_S_f;
+    wire req_1_1_1_E_v, req_1_1_1_E_r; wire [79:0] req_1_1_1_E_f;
+    wire req_1_1_1_W_v, req_1_1_1_W_r; wire [79:0] req_1_1_1_W_f;
+    wire req_1_1_1_U_v, req_1_1_1_U_r; wire [79:0] req_1_1_1_U_f;
+    wire req_1_1_1_D_v, req_1_1_1_D_r; wire [79:0] req_1_1_1_D_f;
+    wire req_1_1_2_N_v, req_1_1_2_N_r; wire [79:0] req_1_1_2_N_f;
+    wire req_1_1_2_S_v, req_1_1_2_S_r; wire [79:0] req_1_1_2_S_f;
+    wire req_1_1_2_E_v, req_1_1_2_E_r; wire [79:0] req_1_1_2_E_f;
+    wire req_1_1_2_W_v, req_1_1_2_W_r; wire [79:0] req_1_1_2_W_f;
+    wire req_1_1_2_U_v, req_1_1_2_U_r; wire [79:0] req_1_1_2_U_f;
+    wire req_1_2_0_N_v, req_1_2_0_N_r; wire [79:0] req_1_2_0_N_f;
+    wire req_1_2_0_S_v, req_1_2_0_S_r; wire [79:0] req_1_2_0_S_f;
+    wire req_1_2_0_E_v, req_1_2_0_E_r; wire [79:0] req_1_2_0_E_f;
+    wire req_1_2_0_W_v, req_1_2_0_W_r; wire [79:0] req_1_2_0_W_f;
+    wire req_1_2_0_D_v, req_1_2_0_D_r; wire [79:0] req_1_2_0_D_f;
+    wire req_1_2_1_N_v, req_1_2_1_N_r; wire [79:0] req_1_2_1_N_f;
+    wire req_1_2_1_S_v, req_1_2_1_S_r; wire [79:0] req_1_2_1_S_f;
+    wire req_1_2_1_E_v, req_1_2_1_E_r; wire [79:0] req_1_2_1_E_f;
+    wire req_1_2_1_W_v, req_1_2_1_W_r; wire [79:0] req_1_2_1_W_f;
+    wire req_1_2_1_U_v, req_1_2_1_U_r; wire [79:0] req_1_2_1_U_f;
+    wire req_1_2_1_D_v, req_1_2_1_D_r; wire [79:0] req_1_2_1_D_f;
+    wire req_1_2_2_N_v, req_1_2_2_N_r; wire [79:0] req_1_2_2_N_f;
+    wire req_1_2_2_S_v, req_1_2_2_S_r; wire [79:0] req_1_2_2_S_f;
+    wire req_1_2_2_E_v, req_1_2_2_E_r; wire [79:0] req_1_2_2_E_f;
+    wire req_1_2_2_W_v, req_1_2_2_W_r; wire [79:0] req_1_2_2_W_f;
+    wire req_1_2_2_U_v, req_1_2_2_U_r; wire [79:0] req_1_2_2_U_f;
+    wire req_1_3_0_N_v, req_1_3_0_N_r; wire [79:0] req_1_3_0_N_f;
+    wire req_1_3_0_E_v, req_1_3_0_E_r; wire [79:0] req_1_3_0_E_f;
+    wire req_1_3_0_W_v, req_1_3_0_W_r; wire [79:0] req_1_3_0_W_f;
+    wire req_1_3_0_D_v, req_1_3_0_D_r; wire [79:0] req_1_3_0_D_f;
+    wire req_1_3_1_N_v, req_1_3_1_N_r; wire [79:0] req_1_3_1_N_f;
+    wire req_1_3_1_E_v, req_1_3_1_E_r; wire [79:0] req_1_3_1_E_f;
+    wire req_1_3_1_W_v, req_1_3_1_W_r; wire [79:0] req_1_3_1_W_f;
+    wire req_1_3_1_U_v, req_1_3_1_U_r; wire [79:0] req_1_3_1_U_f;
+    wire req_1_3_1_D_v, req_1_3_1_D_r; wire [79:0] req_1_3_1_D_f;
+    wire req_1_3_2_N_v, req_1_3_2_N_r; wire [79:0] req_1_3_2_N_f;
+    wire req_1_3_2_E_v, req_1_3_2_E_r; wire [79:0] req_1_3_2_E_f;
+    wire req_1_3_2_W_v, req_1_3_2_W_r; wire [79:0] req_1_3_2_W_f;
+    wire req_1_3_2_U_v, req_1_3_2_U_r; wire [79:0] req_1_3_2_U_f;
+    wire req_2_0_0_S_v, req_2_0_0_S_r; wire [79:0] req_2_0_0_S_f;
+    wire req_2_0_0_W_v, req_2_0_0_W_r; wire [79:0] req_2_0_0_W_f;
+    wire req_2_0_0_D_v, req_2_0_0_D_r; wire [79:0] req_2_0_0_D_f;
+    wire req_2_0_1_S_v, req_2_0_1_S_r; wire [79:0] req_2_0_1_S_f;
+    wire req_2_0_1_W_v, req_2_0_1_W_r; wire [79:0] req_2_0_1_W_f;
+    wire req_2_0_1_U_v, req_2_0_1_U_r; wire [79:0] req_2_0_1_U_f;
+    wire req_2_0_1_D_v, req_2_0_1_D_r; wire [79:0] req_2_0_1_D_f;
+    wire req_2_0_2_S_v, req_2_0_2_S_r; wire [79:0] req_2_0_2_S_f;
+    wire req_2_0_2_W_v, req_2_0_2_W_r; wire [79:0] req_2_0_2_W_f;
+    wire req_2_0_2_U_v, req_2_0_2_U_r; wire [79:0] req_2_0_2_U_f;
+    wire req_2_1_0_N_v, req_2_1_0_N_r; wire [79:0] req_2_1_0_N_f;
+    wire req_2_1_0_S_v, req_2_1_0_S_r; wire [79:0] req_2_1_0_S_f;
+    wire req_2_1_0_W_v, req_2_1_0_W_r; wire [79:0] req_2_1_0_W_f;
+    wire req_2_1_0_D_v, req_2_1_0_D_r; wire [79:0] req_2_1_0_D_f;
+    wire req_2_1_1_N_v, req_2_1_1_N_r; wire [79:0] req_2_1_1_N_f;
+    wire req_2_1_1_S_v, req_2_1_1_S_r; wire [79:0] req_2_1_1_S_f;
+    wire req_2_1_1_W_v, req_2_1_1_W_r; wire [79:0] req_2_1_1_W_f;
+    wire req_2_1_1_U_v, req_2_1_1_U_r; wire [79:0] req_2_1_1_U_f;
+    wire req_2_1_1_D_v, req_2_1_1_D_r; wire [79:0] req_2_1_1_D_f;
+    wire req_2_1_2_N_v, req_2_1_2_N_r; wire [79:0] req_2_1_2_N_f;
+    wire req_2_1_2_S_v, req_2_1_2_S_r; wire [79:0] req_2_1_2_S_f;
+    wire req_2_1_2_W_v, req_2_1_2_W_r; wire [79:0] req_2_1_2_W_f;
+    wire req_2_1_2_U_v, req_2_1_2_U_r; wire [79:0] req_2_1_2_U_f;
+    wire req_2_2_0_N_v, req_2_2_0_N_r; wire [79:0] req_2_2_0_N_f;
+    wire req_2_2_0_S_v, req_2_2_0_S_r; wire [79:0] req_2_2_0_S_f;
+    wire req_2_2_0_W_v, req_2_2_0_W_r; wire [79:0] req_2_2_0_W_f;
+    wire req_2_2_0_D_v, req_2_2_0_D_r; wire [79:0] req_2_2_0_D_f;
+    wire req_2_2_1_N_v, req_2_2_1_N_r; wire [79:0] req_2_2_1_N_f;
+    wire req_2_2_1_S_v, req_2_2_1_S_r; wire [79:0] req_2_2_1_S_f;
+    wire req_2_2_1_W_v, req_2_2_1_W_r; wire [79:0] req_2_2_1_W_f;
+    wire req_2_2_1_U_v, req_2_2_1_U_r; wire [79:0] req_2_2_1_U_f;
+    wire req_2_2_1_D_v, req_2_2_1_D_r; wire [79:0] req_2_2_1_D_f;
+    wire req_2_2_2_N_v, req_2_2_2_N_r; wire [79:0] req_2_2_2_N_f;
+    wire req_2_2_2_S_v, req_2_2_2_S_r; wire [79:0] req_2_2_2_S_f;
+    wire req_2_2_2_W_v, req_2_2_2_W_r; wire [79:0] req_2_2_2_W_f;
+    wire req_2_2_2_U_v, req_2_2_2_U_r; wire [79:0] req_2_2_2_U_f;
+    wire req_2_3_0_N_v, req_2_3_0_N_r; wire [79:0] req_2_3_0_N_f;
+    wire req_2_3_0_W_v, req_2_3_0_W_r; wire [79:0] req_2_3_0_W_f;
+    wire req_2_3_0_D_v, req_2_3_0_D_r; wire [79:0] req_2_3_0_D_f;
+    wire req_2_3_1_N_v, req_2_3_1_N_r; wire [79:0] req_2_3_1_N_f;
+    wire req_2_3_1_W_v, req_2_3_1_W_r; wire [79:0] req_2_3_1_W_f;
+    wire req_2_3_1_U_v, req_2_3_1_U_r; wire [79:0] req_2_3_1_U_f;
+    wire req_2_3_1_D_v, req_2_3_1_D_r; wire [79:0] req_2_3_1_D_f;
+    wire req_2_3_2_N_v, req_2_3_2_N_r; wire [79:0] req_2_3_2_N_f;
+    wire req_2_3_2_W_v, req_2_3_2_W_r; wire [79:0] req_2_3_2_W_f;
+    wire req_2_3_2_U_v, req_2_3_2_U_r; wire [79:0] req_2_3_2_U_f;
+    wire resp_0_0_0_S_v, resp_0_0_0_S_r; wire [37:0] resp_0_0_0_S_f;
+    wire resp_0_0_0_E_v, resp_0_0_0_E_r; wire [37:0] resp_0_0_0_E_f;
+    wire resp_0_0_0_D_v, resp_0_0_0_D_r; wire [37:0] resp_0_0_0_D_f;
+    wire resp_0_0_1_S_v, resp_0_0_1_S_r; wire [37:0] resp_0_0_1_S_f;
+    wire resp_0_0_1_E_v, resp_0_0_1_E_r; wire [37:0] resp_0_0_1_E_f;
+    wire resp_0_0_1_U_v, resp_0_0_1_U_r; wire [37:0] resp_0_0_1_U_f;
+    wire resp_0_0_1_D_v, resp_0_0_1_D_r; wire [37:0] resp_0_0_1_D_f;
+    wire resp_0_0_2_S_v, resp_0_0_2_S_r; wire [37:0] resp_0_0_2_S_f;
+    wire resp_0_0_2_E_v, resp_0_0_2_E_r; wire [37:0] resp_0_0_2_E_f;
+    wire resp_0_0_2_U_v, resp_0_0_2_U_r; wire [37:0] resp_0_0_2_U_f;
+    wire resp_0_1_0_N_v, resp_0_1_0_N_r; wire [37:0] resp_0_1_0_N_f;
+    wire resp_0_1_0_S_v, resp_0_1_0_S_r; wire [37:0] resp_0_1_0_S_f;
+    wire resp_0_1_0_E_v, resp_0_1_0_E_r; wire [37:0] resp_0_1_0_E_f;
+    wire resp_0_1_0_D_v, resp_0_1_0_D_r; wire [37:0] resp_0_1_0_D_f;
+    wire resp_0_1_1_N_v, resp_0_1_1_N_r; wire [37:0] resp_0_1_1_N_f;
+    wire resp_0_1_1_S_v, resp_0_1_1_S_r; wire [37:0] resp_0_1_1_S_f;
+    wire resp_0_1_1_E_v, resp_0_1_1_E_r; wire [37:0] resp_0_1_1_E_f;
+    wire resp_0_1_1_U_v, resp_0_1_1_U_r; wire [37:0] resp_0_1_1_U_f;
+    wire resp_0_1_1_D_v, resp_0_1_1_D_r; wire [37:0] resp_0_1_1_D_f;
+    wire resp_0_1_2_N_v, resp_0_1_2_N_r; wire [37:0] resp_0_1_2_N_f;
+    wire resp_0_1_2_S_v, resp_0_1_2_S_r; wire [37:0] resp_0_1_2_S_f;
+    wire resp_0_1_2_E_v, resp_0_1_2_E_r; wire [37:0] resp_0_1_2_E_f;
+    wire resp_0_1_2_U_v, resp_0_1_2_U_r; wire [37:0] resp_0_1_2_U_f;
+    wire resp_0_2_0_N_v, resp_0_2_0_N_r; wire [37:0] resp_0_2_0_N_f;
+    wire resp_0_2_0_S_v, resp_0_2_0_S_r; wire [37:0] resp_0_2_0_S_f;
+    wire resp_0_2_0_E_v, resp_0_2_0_E_r; wire [37:0] resp_0_2_0_E_f;
+    wire resp_0_2_0_D_v, resp_0_2_0_D_r; wire [37:0] resp_0_2_0_D_f;
+    wire resp_0_2_1_N_v, resp_0_2_1_N_r; wire [37:0] resp_0_2_1_N_f;
+    wire resp_0_2_1_S_v, resp_0_2_1_S_r; wire [37:0] resp_0_2_1_S_f;
+    wire resp_0_2_1_E_v, resp_0_2_1_E_r; wire [37:0] resp_0_2_1_E_f;
+    wire resp_0_2_1_U_v, resp_0_2_1_U_r; wire [37:0] resp_0_2_1_U_f;
+    wire resp_0_2_1_D_v, resp_0_2_1_D_r; wire [37:0] resp_0_2_1_D_f;
+    wire resp_0_2_2_N_v, resp_0_2_2_N_r; wire [37:0] resp_0_2_2_N_f;
+    wire resp_0_2_2_S_v, resp_0_2_2_S_r; wire [37:0] resp_0_2_2_S_f;
+    wire resp_0_2_2_E_v, resp_0_2_2_E_r; wire [37:0] resp_0_2_2_E_f;
+    wire resp_0_2_2_U_v, resp_0_2_2_U_r; wire [37:0] resp_0_2_2_U_f;
+    wire resp_0_3_0_N_v, resp_0_3_0_N_r; wire [37:0] resp_0_3_0_N_f;
+    wire resp_0_3_0_E_v, resp_0_3_0_E_r; wire [37:0] resp_0_3_0_E_f;
+    wire resp_0_3_0_D_v, resp_0_3_0_D_r; wire [37:0] resp_0_3_0_D_f;
+    wire resp_0_3_1_N_v, resp_0_3_1_N_r; wire [37:0] resp_0_3_1_N_f;
+    wire resp_0_3_1_E_v, resp_0_3_1_E_r; wire [37:0] resp_0_3_1_E_f;
+    wire resp_0_3_1_U_v, resp_0_3_1_U_r; wire [37:0] resp_0_3_1_U_f;
+    wire resp_0_3_1_D_v, resp_0_3_1_D_r; wire [37:0] resp_0_3_1_D_f;
+    wire resp_0_3_2_N_v, resp_0_3_2_N_r; wire [37:0] resp_0_3_2_N_f;
+    wire resp_0_3_2_E_v, resp_0_3_2_E_r; wire [37:0] resp_0_3_2_E_f;
+    wire resp_0_3_2_U_v, resp_0_3_2_U_r; wire [37:0] resp_0_3_2_U_f;
+    wire resp_1_0_0_S_v, resp_1_0_0_S_r; wire [37:0] resp_1_0_0_S_f;
+    wire resp_1_0_0_E_v, resp_1_0_0_E_r; wire [37:0] resp_1_0_0_E_f;
+    wire resp_1_0_0_W_v, resp_1_0_0_W_r; wire [37:0] resp_1_0_0_W_f;
+    wire resp_1_0_0_D_v, resp_1_0_0_D_r; wire [37:0] resp_1_0_0_D_f;
+    wire resp_1_0_1_S_v, resp_1_0_1_S_r; wire [37:0] resp_1_0_1_S_f;
+    wire resp_1_0_1_E_v, resp_1_0_1_E_r; wire [37:0] resp_1_0_1_E_f;
+    wire resp_1_0_1_W_v, resp_1_0_1_W_r; wire [37:0] resp_1_0_1_W_f;
+    wire resp_1_0_1_U_v, resp_1_0_1_U_r; wire [37:0] resp_1_0_1_U_f;
+    wire resp_1_0_1_D_v, resp_1_0_1_D_r; wire [37:0] resp_1_0_1_D_f;
+    wire resp_1_0_2_S_v, resp_1_0_2_S_r; wire [37:0] resp_1_0_2_S_f;
+    wire resp_1_0_2_E_v, resp_1_0_2_E_r; wire [37:0] resp_1_0_2_E_f;
+    wire resp_1_0_2_W_v, resp_1_0_2_W_r; wire [37:0] resp_1_0_2_W_f;
+    wire resp_1_0_2_U_v, resp_1_0_2_U_r; wire [37:0] resp_1_0_2_U_f;
+    wire resp_1_1_0_N_v, resp_1_1_0_N_r; wire [37:0] resp_1_1_0_N_f;
+    wire resp_1_1_0_S_v, resp_1_1_0_S_r; wire [37:0] resp_1_1_0_S_f;
+    wire resp_1_1_0_E_v, resp_1_1_0_E_r; wire [37:0] resp_1_1_0_E_f;
+    wire resp_1_1_0_W_v, resp_1_1_0_W_r; wire [37:0] resp_1_1_0_W_f;
+    wire resp_1_1_0_D_v, resp_1_1_0_D_r; wire [37:0] resp_1_1_0_D_f;
+    wire resp_1_1_1_N_v, resp_1_1_1_N_r; wire [37:0] resp_1_1_1_N_f;
+    wire resp_1_1_1_S_v, resp_1_1_1_S_r; wire [37:0] resp_1_1_1_S_f;
+    wire resp_1_1_1_E_v, resp_1_1_1_E_r; wire [37:0] resp_1_1_1_E_f;
+    wire resp_1_1_1_W_v, resp_1_1_1_W_r; wire [37:0] resp_1_1_1_W_f;
+    wire resp_1_1_1_U_v, resp_1_1_1_U_r; wire [37:0] resp_1_1_1_U_f;
+    wire resp_1_1_1_D_v, resp_1_1_1_D_r; wire [37:0] resp_1_1_1_D_f;
+    wire resp_1_1_2_N_v, resp_1_1_2_N_r; wire [37:0] resp_1_1_2_N_f;
+    wire resp_1_1_2_S_v, resp_1_1_2_S_r; wire [37:0] resp_1_1_2_S_f;
+    wire resp_1_1_2_E_v, resp_1_1_2_E_r; wire [37:0] resp_1_1_2_E_f;
+    wire resp_1_1_2_W_v, resp_1_1_2_W_r; wire [37:0] resp_1_1_2_W_f;
+    wire resp_1_1_2_U_v, resp_1_1_2_U_r; wire [37:0] resp_1_1_2_U_f;
+    wire resp_1_2_0_N_v, resp_1_2_0_N_r; wire [37:0] resp_1_2_0_N_f;
+    wire resp_1_2_0_S_v, resp_1_2_0_S_r; wire [37:0] resp_1_2_0_S_f;
+    wire resp_1_2_0_E_v, resp_1_2_0_E_r; wire [37:0] resp_1_2_0_E_f;
+    wire resp_1_2_0_W_v, resp_1_2_0_W_r; wire [37:0] resp_1_2_0_W_f;
+    wire resp_1_2_0_D_v, resp_1_2_0_D_r; wire [37:0] resp_1_2_0_D_f;
+    wire resp_1_2_1_N_v, resp_1_2_1_N_r; wire [37:0] resp_1_2_1_N_f;
+    wire resp_1_2_1_S_v, resp_1_2_1_S_r; wire [37:0] resp_1_2_1_S_f;
+    wire resp_1_2_1_E_v, resp_1_2_1_E_r; wire [37:0] resp_1_2_1_E_f;
+    wire resp_1_2_1_W_v, resp_1_2_1_W_r; wire [37:0] resp_1_2_1_W_f;
+    wire resp_1_2_1_U_v, resp_1_2_1_U_r; wire [37:0] resp_1_2_1_U_f;
+    wire resp_1_2_1_D_v, resp_1_2_1_D_r; wire [37:0] resp_1_2_1_D_f;
+    wire resp_1_2_2_N_v, resp_1_2_2_N_r; wire [37:0] resp_1_2_2_N_f;
+    wire resp_1_2_2_S_v, resp_1_2_2_S_r; wire [37:0] resp_1_2_2_S_f;
+    wire resp_1_2_2_E_v, resp_1_2_2_E_r; wire [37:0] resp_1_2_2_E_f;
+    wire resp_1_2_2_W_v, resp_1_2_2_W_r; wire [37:0] resp_1_2_2_W_f;
+    wire resp_1_2_2_U_v, resp_1_2_2_U_r; wire [37:0] resp_1_2_2_U_f;
+    wire resp_1_3_0_N_v, resp_1_3_0_N_r; wire [37:0] resp_1_3_0_N_f;
+    wire resp_1_3_0_E_v, resp_1_3_0_E_r; wire [37:0] resp_1_3_0_E_f;
+    wire resp_1_3_0_W_v, resp_1_3_0_W_r; wire [37:0] resp_1_3_0_W_f;
+    wire resp_1_3_0_D_v, resp_1_3_0_D_r; wire [37:0] resp_1_3_0_D_f;
+    wire resp_1_3_1_N_v, resp_1_3_1_N_r; wire [37:0] resp_1_3_1_N_f;
+    wire resp_1_3_1_E_v, resp_1_3_1_E_r; wire [37:0] resp_1_3_1_E_f;
+    wire resp_1_3_1_W_v, resp_1_3_1_W_r; wire [37:0] resp_1_3_1_W_f;
+    wire resp_1_3_1_U_v, resp_1_3_1_U_r; wire [37:0] resp_1_3_1_U_f;
+    wire resp_1_3_1_D_v, resp_1_3_1_D_r; wire [37:0] resp_1_3_1_D_f;
+    wire resp_1_3_2_N_v, resp_1_3_2_N_r; wire [37:0] resp_1_3_2_N_f;
+    wire resp_1_3_2_E_v, resp_1_3_2_E_r; wire [37:0] resp_1_3_2_E_f;
+    wire resp_1_3_2_W_v, resp_1_3_2_W_r; wire [37:0] resp_1_3_2_W_f;
+    wire resp_1_3_2_U_v, resp_1_3_2_U_r; wire [37:0] resp_1_3_2_U_f;
+    wire resp_2_0_0_S_v, resp_2_0_0_S_r; wire [37:0] resp_2_0_0_S_f;
+    wire resp_2_0_0_W_v, resp_2_0_0_W_r; wire [37:0] resp_2_0_0_W_f;
+    wire resp_2_0_0_D_v, resp_2_0_0_D_r; wire [37:0] resp_2_0_0_D_f;
+    wire resp_2_0_1_S_v, resp_2_0_1_S_r; wire [37:0] resp_2_0_1_S_f;
+    wire resp_2_0_1_W_v, resp_2_0_1_W_r; wire [37:0] resp_2_0_1_W_f;
+    wire resp_2_0_1_U_v, resp_2_0_1_U_r; wire [37:0] resp_2_0_1_U_f;
+    wire resp_2_0_1_D_v, resp_2_0_1_D_r; wire [37:0] resp_2_0_1_D_f;
+    wire resp_2_0_2_S_v, resp_2_0_2_S_r; wire [37:0] resp_2_0_2_S_f;
+    wire resp_2_0_2_W_v, resp_2_0_2_W_r; wire [37:0] resp_2_0_2_W_f;
+    wire resp_2_0_2_U_v, resp_2_0_2_U_r; wire [37:0] resp_2_0_2_U_f;
+    wire resp_2_1_0_N_v, resp_2_1_0_N_r; wire [37:0] resp_2_1_0_N_f;
+    wire resp_2_1_0_S_v, resp_2_1_0_S_r; wire [37:0] resp_2_1_0_S_f;
+    wire resp_2_1_0_W_v, resp_2_1_0_W_r; wire [37:0] resp_2_1_0_W_f;
+    wire resp_2_1_0_D_v, resp_2_1_0_D_r; wire [37:0] resp_2_1_0_D_f;
+    wire resp_2_1_1_N_v, resp_2_1_1_N_r; wire [37:0] resp_2_1_1_N_f;
+    wire resp_2_1_1_S_v, resp_2_1_1_S_r; wire [37:0] resp_2_1_1_S_f;
+    wire resp_2_1_1_W_v, resp_2_1_1_W_r; wire [37:0] resp_2_1_1_W_f;
+    wire resp_2_1_1_U_v, resp_2_1_1_U_r; wire [37:0] resp_2_1_1_U_f;
+    wire resp_2_1_1_D_v, resp_2_1_1_D_r; wire [37:0] resp_2_1_1_D_f;
+    wire resp_2_1_2_N_v, resp_2_1_2_N_r; wire [37:0] resp_2_1_2_N_f;
+    wire resp_2_1_2_S_v, resp_2_1_2_S_r; wire [37:0] resp_2_1_2_S_f;
+    wire resp_2_1_2_W_v, resp_2_1_2_W_r; wire [37:0] resp_2_1_2_W_f;
+    wire resp_2_1_2_U_v, resp_2_1_2_U_r; wire [37:0] resp_2_1_2_U_f;
+    wire resp_2_2_0_N_v, resp_2_2_0_N_r; wire [37:0] resp_2_2_0_N_f;
+    wire resp_2_2_0_S_v, resp_2_2_0_S_r; wire [37:0] resp_2_2_0_S_f;
+    wire resp_2_2_0_W_v, resp_2_2_0_W_r; wire [37:0] resp_2_2_0_W_f;
+    wire resp_2_2_0_D_v, resp_2_2_0_D_r; wire [37:0] resp_2_2_0_D_f;
+    wire resp_2_2_1_N_v, resp_2_2_1_N_r; wire [37:0] resp_2_2_1_N_f;
+    wire resp_2_2_1_S_v, resp_2_2_1_S_r; wire [37:0] resp_2_2_1_S_f;
+    wire resp_2_2_1_W_v, resp_2_2_1_W_r; wire [37:0] resp_2_2_1_W_f;
+    wire resp_2_2_1_U_v, resp_2_2_1_U_r; wire [37:0] resp_2_2_1_U_f;
+    wire resp_2_2_1_D_v, resp_2_2_1_D_r; wire [37:0] resp_2_2_1_D_f;
+    wire resp_2_2_2_N_v, resp_2_2_2_N_r; wire [37:0] resp_2_2_2_N_f;
+    wire resp_2_2_2_S_v, resp_2_2_2_S_r; wire [37:0] resp_2_2_2_S_f;
+    wire resp_2_2_2_W_v, resp_2_2_2_W_r; wire [37:0] resp_2_2_2_W_f;
+    wire resp_2_2_2_U_v, resp_2_2_2_U_r; wire [37:0] resp_2_2_2_U_f;
+    wire resp_2_3_0_N_v, resp_2_3_0_N_r; wire [37:0] resp_2_3_0_N_f;
+    wire resp_2_3_0_W_v, resp_2_3_0_W_r; wire [37:0] resp_2_3_0_W_f;
+    wire resp_2_3_0_D_v, resp_2_3_0_D_r; wire [37:0] resp_2_3_0_D_f;
+    wire resp_2_3_1_N_v, resp_2_3_1_N_r; wire [37:0] resp_2_3_1_N_f;
+    wire resp_2_3_1_W_v, resp_2_3_1_W_r; wire [37:0] resp_2_3_1_W_f;
+    wire resp_2_3_1_U_v, resp_2_3_1_U_r; wire [37:0] resp_2_3_1_U_f;
+    wire resp_2_3_1_D_v, resp_2_3_1_D_r; wire [37:0] resp_2_3_1_D_f;
+    wire resp_2_3_2_N_v, resp_2_3_2_N_r; wire [37:0] resp_2_3_2_N_f;
+    wire resp_2_3_2_W_v, resp_2_3_2_W_r; wire [37:0] resp_2_3_2_W_f;
+    wire resp_2_3_2_U_v, resp_2_3_2_U_r; wire [37:0] resp_2_3_2_U_f;
 
-    // ==================== Core bus + adapter wires ====================
+    // ==================== Per-core bus + adapter wires ====================
     wire p0_bus_req, p0_bus_mem_write, p0_bus_mem_unsigned, p0_bus_grant;
     wire [31:0] p0_bus_addr, p0_bus_write_data, p0_bus_read_data;
     wire [1:0] p0_bus_mem_size;
@@ -362,6 +547,42 @@ module soc_top #(
     wire p11_req_out_valid, p11_req_out_ready, p11_resp_in_valid, p11_resp_in_ready;
     wire [79:0] p11_req_out_flit;
     wire [37:0] p11_resp_in_flit;
+    wire p12_bus_req, p12_bus_mem_write, p12_bus_mem_unsigned, p12_bus_grant;
+    wire [31:0] p12_bus_addr, p12_bus_write_data, p12_bus_read_data;
+    wire [1:0] p12_bus_mem_size;
+    wire p12_req_out_valid, p12_req_out_ready, p12_resp_in_valid, p12_resp_in_ready;
+    wire [79:0] p12_req_out_flit;
+    wire [37:0] p12_resp_in_flit;
+    wire p13_bus_req, p13_bus_mem_write, p13_bus_mem_unsigned, p13_bus_grant;
+    wire [31:0] p13_bus_addr, p13_bus_write_data, p13_bus_read_data;
+    wire [1:0] p13_bus_mem_size;
+    wire p13_req_out_valid, p13_req_out_ready, p13_resp_in_valid, p13_resp_in_ready;
+    wire [79:0] p13_req_out_flit;
+    wire [37:0] p13_resp_in_flit;
+    wire p14_bus_req, p14_bus_mem_write, p14_bus_mem_unsigned, p14_bus_grant;
+    wire [31:0] p14_bus_addr, p14_bus_write_data, p14_bus_read_data;
+    wire [1:0] p14_bus_mem_size;
+    wire p14_req_out_valid, p14_req_out_ready, p14_resp_in_valid, p14_resp_in_ready;
+    wire [79:0] p14_req_out_flit;
+    wire [37:0] p14_resp_in_flit;
+    wire p15_bus_req, p15_bus_mem_write, p15_bus_mem_unsigned, p15_bus_grant;
+    wire [31:0] p15_bus_addr, p15_bus_write_data, p15_bus_read_data;
+    wire [1:0] p15_bus_mem_size;
+    wire p15_req_out_valid, p15_req_out_ready, p15_resp_in_valid, p15_resp_in_ready;
+    wire [79:0] p15_req_out_flit;
+    wire [37:0] p15_resp_in_flit;
+    wire p16_bus_req, p16_bus_mem_write, p16_bus_mem_unsigned, p16_bus_grant;
+    wire [31:0] p16_bus_addr, p16_bus_write_data, p16_bus_read_data;
+    wire [1:0] p16_bus_mem_size;
+    wire p16_req_out_valid, p16_req_out_ready, p16_resp_in_valid, p16_resp_in_ready;
+    wire [79:0] p16_req_out_flit;
+    wire [37:0] p16_resp_in_flit;
+    wire p17_bus_req, p17_bus_mem_write, p17_bus_mem_unsigned, p17_bus_grant;
+    wire [31:0] p17_bus_addr, p17_bus_write_data, p17_bus_read_data;
+    wire [1:0] p17_bus_mem_size;
+    wire p17_req_out_valid, p17_req_out_ready, p17_resp_in_valid, p17_resp_in_ready;
+    wire [79:0] p17_req_out_flit;
+    wire [37:0] p17_resp_in_flit;
     wire e0_bus_req, e0_bus_mem_write, e0_bus_mem_unsigned, e0_bus_grant;
     wire [31:0] e0_bus_addr, e0_bus_write_data, e0_bus_read_data;
     wire [1:0] e0_bus_mem_size;
@@ -434,709 +655,1335 @@ module soc_top #(
     wire e11_req_out_valid, e11_req_out_ready, e11_resp_in_valid, e11_resp_in_ready;
     wire [79:0] e11_req_out_flit;
     wire [37:0] e11_resp_in_flit;
+    wire e12_bus_req, e12_bus_mem_write, e12_bus_mem_unsigned, e12_bus_grant;
+    wire [31:0] e12_bus_addr, e12_bus_write_data, e12_bus_read_data;
+    wire [1:0] e12_bus_mem_size;
+    wire e12_req_out_valid, e12_req_out_ready, e12_resp_in_valid, e12_resp_in_ready;
+    wire [79:0] e12_req_out_flit;
+    wire [37:0] e12_resp_in_flit;
+    wire e13_bus_req, e13_bus_mem_write, e13_bus_mem_unsigned, e13_bus_grant;
+    wire [31:0] e13_bus_addr, e13_bus_write_data, e13_bus_read_data;
+    wire [1:0] e13_bus_mem_size;
+    wire e13_req_out_valid, e13_req_out_ready, e13_resp_in_valid, e13_resp_in_ready;
+    wire [79:0] e13_req_out_flit;
+    wire [37:0] e13_resp_in_flit;
+    wire e14_bus_req, e14_bus_mem_write, e14_bus_mem_unsigned, e14_bus_grant;
+    wire [31:0] e14_bus_addr, e14_bus_write_data, e14_bus_read_data;
+    wire [1:0] e14_bus_mem_size;
+    wire e14_req_out_valid, e14_req_out_ready, e14_resp_in_valid, e14_resp_in_ready;
+    wire [79:0] e14_req_out_flit;
+    wire [37:0] e14_resp_in_flit;
+    wire e15_bus_req, e15_bus_mem_write, e15_bus_mem_unsigned, e15_bus_grant;
+    wire [31:0] e15_bus_addr, e15_bus_write_data, e15_bus_read_data;
+    wire [1:0] e15_bus_mem_size;
+    wire e15_req_out_valid, e15_req_out_ready, e15_resp_in_valid, e15_resp_in_ready;
+    wire [79:0] e15_req_out_flit;
+    wire [37:0] e15_resp_in_flit;
+    wire e16_bus_req, e16_bus_mem_write, e16_bus_mem_unsigned, e16_bus_grant;
+    wire [31:0] e16_bus_addr, e16_bus_write_data, e16_bus_read_data;
+    wire [1:0] e16_bus_mem_size;
+    wire e16_req_out_valid, e16_req_out_ready, e16_resp_in_valid, e16_resp_in_ready;
+    wire [79:0] e16_req_out_flit;
+    wire [37:0] e16_resp_in_flit;
     wire mem_req_in_valid, mem_req_in_ready, mem_resp_out_valid, mem_resp_out_ready;
     wire [79:0] mem_req_in_flit;
     wire [37:0] mem_resp_out_flit;
 
-    // ==================== Routers (2 networks x 25 grid positions) ====================
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(0), .MY_Y(0)) req_r00 (
+    // ==================== Routers (2 networks x 36 grid positions) ====================
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(0), .MY_Y(0), .MY_Z(0)) req_r0_0_0 (
         .clk(clk), .reset(reset),
         .n_in_valid(1'b0), .n_in_flit({80{1'b0}}), .n_in_ready(),
         .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(req_10_W_v), .e_in_flit(req_10_W_f), .e_in_ready(req_10_W_r),
-        .e_out_valid(req_00_E_v), .e_out_flit(req_00_E_f), .e_out_ready(req_00_E_r),
-        .s_in_valid(req_01_N_v), .s_in_flit(req_01_N_f), .s_in_ready(req_01_N_r),
-        .s_out_valid(req_00_S_v), .s_out_flit(req_00_S_f), .s_out_ready(req_00_S_r),
+        .s_in_valid(req_0_1_0_N_v), .s_in_flit(req_0_1_0_N_f), .s_in_ready(req_0_1_0_N_r),
+        .s_out_valid(req_0_0_0_S_v), .s_out_flit(req_0_0_0_S_f), .s_out_ready(req_0_0_0_S_r),
+        .e_in_valid(req_1_0_0_W_v), .e_in_flit(req_1_0_0_W_f), .e_in_ready(req_1_0_0_W_r),
+        .e_out_valid(req_0_0_0_E_v), .e_out_flit(req_0_0_0_E_f), .e_out_ready(req_0_0_0_E_r),
         .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
         .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(1'b0), .u_in_flit({80{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(req_0_0_1_U_v), .d_in_flit(req_0_0_1_U_f), .d_in_ready(req_0_0_1_U_r),
+        .d_out_valid(req_0_0_0_D_v), .d_out_flit(req_0_0_0_D_f), .d_out_ready(req_0_0_0_D_r),
         .l_in_valid(p0_req_out_valid), .l_in_flit(p0_req_out_flit), .l_in_ready(p0_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(0), .MY_Y(0)) resp_r00 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(0), .MY_Y(0), .MY_Z(0)) resp_r0_0_0 (
         .clk(clk), .reset(reset),
         .n_in_valid(1'b0), .n_in_flit({38{1'b0}}), .n_in_ready(),
         .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(resp_10_W_v), .e_in_flit(resp_10_W_f), .e_in_ready(resp_10_W_r),
-        .e_out_valid(resp_00_E_v), .e_out_flit(resp_00_E_f), .e_out_ready(resp_00_E_r),
-        .s_in_valid(resp_01_N_v), .s_in_flit(resp_01_N_f), .s_in_ready(resp_01_N_r),
-        .s_out_valid(resp_00_S_v), .s_out_flit(resp_00_S_f), .s_out_ready(resp_00_S_r),
+        .s_in_valid(resp_0_1_0_N_v), .s_in_flit(resp_0_1_0_N_f), .s_in_ready(resp_0_1_0_N_r),
+        .s_out_valid(resp_0_0_0_S_v), .s_out_flit(resp_0_0_0_S_f), .s_out_ready(resp_0_0_0_S_r),
+        .e_in_valid(resp_1_0_0_W_v), .e_in_flit(resp_1_0_0_W_f), .e_in_ready(resp_1_0_0_W_r),
+        .e_out_valid(resp_0_0_0_E_v), .e_out_flit(resp_0_0_0_E_f), .e_out_ready(resp_0_0_0_E_r),
         .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
         .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(1'b0), .u_in_flit({38{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(resp_0_0_1_U_v), .d_in_flit(resp_0_0_1_U_f), .d_in_ready(resp_0_0_1_U_r),
+        .d_out_valid(resp_0_0_0_D_v), .d_out_flit(resp_0_0_0_D_f), .d_out_ready(resp_0_0_0_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(p0_resp_in_valid), .l_out_flit(p0_resp_in_flit), .l_out_ready(p0_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(1), .MY_Y(0)) req_r10 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(0), .MY_Y(0), .MY_Z(1)) req_r0_0_1 (
         .clk(clk), .reset(reset),
         .n_in_valid(1'b0), .n_in_flit({80{1'b0}}), .n_in_ready(),
         .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(req_20_W_v), .e_in_flit(req_20_W_f), .e_in_ready(req_20_W_r),
-        .e_out_valid(req_10_E_v), .e_out_flit(req_10_E_f), .e_out_ready(req_10_E_r),
-        .s_in_valid(req_11_N_v), .s_in_flit(req_11_N_f), .s_in_ready(req_11_N_r),
-        .s_out_valid(req_10_S_v), .s_out_flit(req_10_S_f), .s_out_ready(req_10_S_r),
-        .w_in_valid(req_00_E_v), .w_in_flit(req_00_E_f), .w_in_ready(req_00_E_r),
-        .w_out_valid(req_10_W_v), .w_out_flit(req_10_W_f), .w_out_ready(req_10_W_r),
+        .s_in_valid(req_0_1_1_N_v), .s_in_flit(req_0_1_1_N_f), .s_in_ready(req_0_1_1_N_r),
+        .s_out_valid(req_0_0_1_S_v), .s_out_flit(req_0_0_1_S_f), .s_out_ready(req_0_0_1_S_r),
+        .e_in_valid(req_1_0_1_W_v), .e_in_flit(req_1_0_1_W_f), .e_in_ready(req_1_0_1_W_r),
+        .e_out_valid(req_0_0_1_E_v), .e_out_flit(req_0_0_1_E_f), .e_out_ready(req_0_0_1_E_r),
+        .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(req_0_0_0_D_v), .u_in_flit(req_0_0_0_D_f), .u_in_ready(req_0_0_0_D_r),
+        .u_out_valid(req_0_0_1_U_v), .u_out_flit(req_0_0_1_U_f), .u_out_ready(req_0_0_1_U_r),
+        .d_in_valid(req_0_0_2_U_v), .d_in_flit(req_0_0_2_U_f), .d_in_ready(req_0_0_2_U_r),
+        .d_out_valid(req_0_0_1_D_v), .d_out_flit(req_0_0_1_D_f), .d_out_ready(req_0_0_1_D_r),
         .l_in_valid(p1_req_out_valid), .l_in_flit(p1_req_out_flit), .l_in_ready(p1_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(1), .MY_Y(0)) resp_r10 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(0), .MY_Y(0), .MY_Z(1)) resp_r0_0_1 (
         .clk(clk), .reset(reset),
         .n_in_valid(1'b0), .n_in_flit({38{1'b0}}), .n_in_ready(),
         .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(resp_20_W_v), .e_in_flit(resp_20_W_f), .e_in_ready(resp_20_W_r),
-        .e_out_valid(resp_10_E_v), .e_out_flit(resp_10_E_f), .e_out_ready(resp_10_E_r),
-        .s_in_valid(resp_11_N_v), .s_in_flit(resp_11_N_f), .s_in_ready(resp_11_N_r),
-        .s_out_valid(resp_10_S_v), .s_out_flit(resp_10_S_f), .s_out_ready(resp_10_S_r),
-        .w_in_valid(resp_00_E_v), .w_in_flit(resp_00_E_f), .w_in_ready(resp_00_E_r),
-        .w_out_valid(resp_10_W_v), .w_out_flit(resp_10_W_f), .w_out_ready(resp_10_W_r),
+        .s_in_valid(resp_0_1_1_N_v), .s_in_flit(resp_0_1_1_N_f), .s_in_ready(resp_0_1_1_N_r),
+        .s_out_valid(resp_0_0_1_S_v), .s_out_flit(resp_0_0_1_S_f), .s_out_ready(resp_0_0_1_S_r),
+        .e_in_valid(resp_1_0_1_W_v), .e_in_flit(resp_1_0_1_W_f), .e_in_ready(resp_1_0_1_W_r),
+        .e_out_valid(resp_0_0_1_E_v), .e_out_flit(resp_0_0_1_E_f), .e_out_ready(resp_0_0_1_E_r),
+        .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(resp_0_0_0_D_v), .u_in_flit(resp_0_0_0_D_f), .u_in_ready(resp_0_0_0_D_r),
+        .u_out_valid(resp_0_0_1_U_v), .u_out_flit(resp_0_0_1_U_f), .u_out_ready(resp_0_0_1_U_r),
+        .d_in_valid(resp_0_0_2_U_v), .d_in_flit(resp_0_0_2_U_f), .d_in_ready(resp_0_0_2_U_r),
+        .d_out_valid(resp_0_0_1_D_v), .d_out_flit(resp_0_0_1_D_f), .d_out_ready(resp_0_0_1_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(p1_resp_in_valid), .l_out_flit(p1_resp_in_flit), .l_out_ready(p1_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(2), .MY_Y(0)) req_r20 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(0), .MY_Y(0), .MY_Z(2)) req_r0_0_2 (
         .clk(clk), .reset(reset),
         .n_in_valid(1'b0), .n_in_flit({80{1'b0}}), .n_in_ready(),
         .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(req_30_W_v), .e_in_flit(req_30_W_f), .e_in_ready(req_30_W_r),
-        .e_out_valid(req_20_E_v), .e_out_flit(req_20_E_f), .e_out_ready(req_20_E_r),
-        .s_in_valid(req_21_N_v), .s_in_flit(req_21_N_f), .s_in_ready(req_21_N_r),
-        .s_out_valid(req_20_S_v), .s_out_flit(req_20_S_f), .s_out_ready(req_20_S_r),
-        .w_in_valid(req_10_E_v), .w_in_flit(req_10_E_f), .w_in_ready(req_10_E_r),
-        .w_out_valid(req_20_W_v), .w_out_flit(req_20_W_f), .w_out_ready(req_20_W_r),
+        .s_in_valid(req_0_1_2_N_v), .s_in_flit(req_0_1_2_N_f), .s_in_ready(req_0_1_2_N_r),
+        .s_out_valid(req_0_0_2_S_v), .s_out_flit(req_0_0_2_S_f), .s_out_ready(req_0_0_2_S_r),
+        .e_in_valid(req_1_0_2_W_v), .e_in_flit(req_1_0_2_W_f), .e_in_ready(req_1_0_2_W_r),
+        .e_out_valid(req_0_0_2_E_v), .e_out_flit(req_0_0_2_E_f), .e_out_ready(req_0_0_2_E_r),
+        .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(req_0_0_1_D_v), .u_in_flit(req_0_0_1_D_f), .u_in_ready(req_0_0_1_D_r),
+        .u_out_valid(req_0_0_2_U_v), .u_out_flit(req_0_0_2_U_f), .u_out_ready(req_0_0_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({80{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(p2_req_out_valid), .l_in_flit(p2_req_out_flit), .l_in_ready(p2_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(2), .MY_Y(0)) resp_r20 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(0), .MY_Y(0), .MY_Z(2)) resp_r0_0_2 (
         .clk(clk), .reset(reset),
         .n_in_valid(1'b0), .n_in_flit({38{1'b0}}), .n_in_ready(),
         .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(resp_30_W_v), .e_in_flit(resp_30_W_f), .e_in_ready(resp_30_W_r),
-        .e_out_valid(resp_20_E_v), .e_out_flit(resp_20_E_f), .e_out_ready(resp_20_E_r),
-        .s_in_valid(resp_21_N_v), .s_in_flit(resp_21_N_f), .s_in_ready(resp_21_N_r),
-        .s_out_valid(resp_20_S_v), .s_out_flit(resp_20_S_f), .s_out_ready(resp_20_S_r),
-        .w_in_valid(resp_10_E_v), .w_in_flit(resp_10_E_f), .w_in_ready(resp_10_E_r),
-        .w_out_valid(resp_20_W_v), .w_out_flit(resp_20_W_f), .w_out_ready(resp_20_W_r),
+        .s_in_valid(resp_0_1_2_N_v), .s_in_flit(resp_0_1_2_N_f), .s_in_ready(resp_0_1_2_N_r),
+        .s_out_valid(resp_0_0_2_S_v), .s_out_flit(resp_0_0_2_S_f), .s_out_ready(resp_0_0_2_S_r),
+        .e_in_valid(resp_1_0_2_W_v), .e_in_flit(resp_1_0_2_W_f), .e_in_ready(resp_1_0_2_W_r),
+        .e_out_valid(resp_0_0_2_E_v), .e_out_flit(resp_0_0_2_E_f), .e_out_ready(resp_0_0_2_E_r),
+        .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(resp_0_0_1_D_v), .u_in_flit(resp_0_0_1_D_f), .u_in_ready(resp_0_0_1_D_r),
+        .u_out_valid(resp_0_0_2_U_v), .u_out_flit(resp_0_0_2_U_f), .u_out_ready(resp_0_0_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({38{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(p2_resp_in_valid), .l_out_flit(p2_resp_in_flit), .l_out_ready(p2_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(3), .MY_Y(0)) req_r30 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(0), .MY_Y(1), .MY_Z(0)) req_r0_1_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(1'b0), .n_in_flit({80{1'b0}}), .n_in_ready(),
-        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(req_40_W_v), .e_in_flit(req_40_W_f), .e_in_ready(req_40_W_r),
-        .e_out_valid(req_30_E_v), .e_out_flit(req_30_E_f), .e_out_ready(req_30_E_r),
-        .s_in_valid(req_31_N_v), .s_in_flit(req_31_N_f), .s_in_ready(req_31_N_r),
-        .s_out_valid(req_30_S_v), .s_out_flit(req_30_S_f), .s_out_ready(req_30_S_r),
-        .w_in_valid(req_20_E_v), .w_in_flit(req_20_E_f), .w_in_ready(req_20_E_r),
-        .w_out_valid(req_30_W_v), .w_out_flit(req_30_W_f), .w_out_ready(req_30_W_r),
+        .n_in_valid(req_0_0_0_S_v), .n_in_flit(req_0_0_0_S_f), .n_in_ready(req_0_0_0_S_r),
+        .n_out_valid(req_0_1_0_N_v), .n_out_flit(req_0_1_0_N_f), .n_out_ready(req_0_1_0_N_r),
+        .s_in_valid(req_0_2_0_N_v), .s_in_flit(req_0_2_0_N_f), .s_in_ready(req_0_2_0_N_r),
+        .s_out_valid(req_0_1_0_S_v), .s_out_flit(req_0_1_0_S_f), .s_out_ready(req_0_1_0_S_r),
+        .e_in_valid(req_1_1_0_W_v), .e_in_flit(req_1_1_0_W_f), .e_in_ready(req_1_1_0_W_r),
+        .e_out_valid(req_0_1_0_E_v), .e_out_flit(req_0_1_0_E_f), .e_out_ready(req_0_1_0_E_r),
+        .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(1'b0), .u_in_flit({80{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(req_0_1_1_U_v), .d_in_flit(req_0_1_1_U_f), .d_in_ready(req_0_1_1_U_r),
+        .d_out_valid(req_0_1_0_D_v), .d_out_flit(req_0_1_0_D_f), .d_out_ready(req_0_1_0_D_r),
         .l_in_valid(p3_req_out_valid), .l_in_flit(p3_req_out_flit), .l_in_ready(p3_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(3), .MY_Y(0)) resp_r30 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(0), .MY_Y(1), .MY_Z(0)) resp_r0_1_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(1'b0), .n_in_flit({38{1'b0}}), .n_in_ready(),
-        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(resp_40_W_v), .e_in_flit(resp_40_W_f), .e_in_ready(resp_40_W_r),
-        .e_out_valid(resp_30_E_v), .e_out_flit(resp_30_E_f), .e_out_ready(resp_30_E_r),
-        .s_in_valid(resp_31_N_v), .s_in_flit(resp_31_N_f), .s_in_ready(resp_31_N_r),
-        .s_out_valid(resp_30_S_v), .s_out_flit(resp_30_S_f), .s_out_ready(resp_30_S_r),
-        .w_in_valid(resp_20_E_v), .w_in_flit(resp_20_E_f), .w_in_ready(resp_20_E_r),
-        .w_out_valid(resp_30_W_v), .w_out_flit(resp_30_W_f), .w_out_ready(resp_30_W_r),
+        .n_in_valid(resp_0_0_0_S_v), .n_in_flit(resp_0_0_0_S_f), .n_in_ready(resp_0_0_0_S_r),
+        .n_out_valid(resp_0_1_0_N_v), .n_out_flit(resp_0_1_0_N_f), .n_out_ready(resp_0_1_0_N_r),
+        .s_in_valid(resp_0_2_0_N_v), .s_in_flit(resp_0_2_0_N_f), .s_in_ready(resp_0_2_0_N_r),
+        .s_out_valid(resp_0_1_0_S_v), .s_out_flit(resp_0_1_0_S_f), .s_out_ready(resp_0_1_0_S_r),
+        .e_in_valid(resp_1_1_0_W_v), .e_in_flit(resp_1_1_0_W_f), .e_in_ready(resp_1_1_0_W_r),
+        .e_out_valid(resp_0_1_0_E_v), .e_out_flit(resp_0_1_0_E_f), .e_out_ready(resp_0_1_0_E_r),
+        .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(1'b0), .u_in_flit({38{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(resp_0_1_1_U_v), .d_in_flit(resp_0_1_1_U_f), .d_in_ready(resp_0_1_1_U_r),
+        .d_out_valid(resp_0_1_0_D_v), .d_out_flit(resp_0_1_0_D_f), .d_out_ready(resp_0_1_0_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(p3_resp_in_valid), .l_out_flit(p3_resp_in_flit), .l_out_ready(p3_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(4), .MY_Y(0)) req_r40 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(0), .MY_Y(1), .MY_Z(1)) req_r0_1_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(1'b0), .n_in_flit({80{1'b0}}), .n_in_ready(),
-        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
-        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
-        .s_in_valid(req_41_N_v), .s_in_flit(req_41_N_f), .s_in_ready(req_41_N_r),
-        .s_out_valid(req_40_S_v), .s_out_flit(req_40_S_f), .s_out_ready(req_40_S_r),
-        .w_in_valid(req_30_E_v), .w_in_flit(req_30_E_f), .w_in_ready(req_30_E_r),
-        .w_out_valid(req_40_W_v), .w_out_flit(req_40_W_f), .w_out_ready(req_40_W_r),
+        .n_in_valid(req_0_0_1_S_v), .n_in_flit(req_0_0_1_S_f), .n_in_ready(req_0_0_1_S_r),
+        .n_out_valid(req_0_1_1_N_v), .n_out_flit(req_0_1_1_N_f), .n_out_ready(req_0_1_1_N_r),
+        .s_in_valid(req_0_2_1_N_v), .s_in_flit(req_0_2_1_N_f), .s_in_ready(req_0_2_1_N_r),
+        .s_out_valid(req_0_1_1_S_v), .s_out_flit(req_0_1_1_S_f), .s_out_ready(req_0_1_1_S_r),
+        .e_in_valid(req_1_1_1_W_v), .e_in_flit(req_1_1_1_W_f), .e_in_ready(req_1_1_1_W_r),
+        .e_out_valid(req_0_1_1_E_v), .e_out_flit(req_0_1_1_E_f), .e_out_ready(req_0_1_1_E_r),
+        .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(req_0_1_0_D_v), .u_in_flit(req_0_1_0_D_f), .u_in_ready(req_0_1_0_D_r),
+        .u_out_valid(req_0_1_1_U_v), .u_out_flit(req_0_1_1_U_f), .u_out_ready(req_0_1_1_U_r),
+        .d_in_valid(req_0_1_2_U_v), .d_in_flit(req_0_1_2_U_f), .d_in_ready(req_0_1_2_U_r),
+        .d_out_valid(req_0_1_1_D_v), .d_out_flit(req_0_1_1_D_f), .d_out_ready(req_0_1_1_D_r),
         .l_in_valid(p4_req_out_valid), .l_in_flit(p4_req_out_flit), .l_in_ready(p4_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(4), .MY_Y(0)) resp_r40 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(0), .MY_Y(1), .MY_Z(1)) resp_r0_1_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(1'b0), .n_in_flit({38{1'b0}}), .n_in_ready(),
-        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
-        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
-        .s_in_valid(resp_41_N_v), .s_in_flit(resp_41_N_f), .s_in_ready(resp_41_N_r),
-        .s_out_valid(resp_40_S_v), .s_out_flit(resp_40_S_f), .s_out_ready(resp_40_S_r),
-        .w_in_valid(resp_30_E_v), .w_in_flit(resp_30_E_f), .w_in_ready(resp_30_E_r),
-        .w_out_valid(resp_40_W_v), .w_out_flit(resp_40_W_f), .w_out_ready(resp_40_W_r),
+        .n_in_valid(resp_0_0_1_S_v), .n_in_flit(resp_0_0_1_S_f), .n_in_ready(resp_0_0_1_S_r),
+        .n_out_valid(resp_0_1_1_N_v), .n_out_flit(resp_0_1_1_N_f), .n_out_ready(resp_0_1_1_N_r),
+        .s_in_valid(resp_0_2_1_N_v), .s_in_flit(resp_0_2_1_N_f), .s_in_ready(resp_0_2_1_N_r),
+        .s_out_valid(resp_0_1_1_S_v), .s_out_flit(resp_0_1_1_S_f), .s_out_ready(resp_0_1_1_S_r),
+        .e_in_valid(resp_1_1_1_W_v), .e_in_flit(resp_1_1_1_W_f), .e_in_ready(resp_1_1_1_W_r),
+        .e_out_valid(resp_0_1_1_E_v), .e_out_flit(resp_0_1_1_E_f), .e_out_ready(resp_0_1_1_E_r),
+        .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(resp_0_1_0_D_v), .u_in_flit(resp_0_1_0_D_f), .u_in_ready(resp_0_1_0_D_r),
+        .u_out_valid(resp_0_1_1_U_v), .u_out_flit(resp_0_1_1_U_f), .u_out_ready(resp_0_1_1_U_r),
+        .d_in_valid(resp_0_1_2_U_v), .d_in_flit(resp_0_1_2_U_f), .d_in_ready(resp_0_1_2_U_r),
+        .d_out_valid(resp_0_1_1_D_v), .d_out_flit(resp_0_1_1_D_f), .d_out_ready(resp_0_1_1_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(p4_resp_in_valid), .l_out_flit(p4_resp_in_flit), .l_out_ready(p4_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(0), .MY_Y(1)) req_r01 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(0), .MY_Y(1), .MY_Z(2)) req_r0_1_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_00_S_v), .n_in_flit(req_00_S_f), .n_in_ready(req_00_S_r),
-        .n_out_valid(req_01_N_v), .n_out_flit(req_01_N_f), .n_out_ready(req_01_N_r),
-        .e_in_valid(req_11_W_v), .e_in_flit(req_11_W_f), .e_in_ready(req_11_W_r),
-        .e_out_valid(req_01_E_v), .e_out_flit(req_01_E_f), .e_out_ready(req_01_E_r),
-        .s_in_valid(req_02_N_v), .s_in_flit(req_02_N_f), .s_in_ready(req_02_N_r),
-        .s_out_valid(req_01_S_v), .s_out_flit(req_01_S_f), .s_out_ready(req_01_S_r),
+        .n_in_valid(req_0_0_2_S_v), .n_in_flit(req_0_0_2_S_f), .n_in_ready(req_0_0_2_S_r),
+        .n_out_valid(req_0_1_2_N_v), .n_out_flit(req_0_1_2_N_f), .n_out_ready(req_0_1_2_N_r),
+        .s_in_valid(req_0_2_2_N_v), .s_in_flit(req_0_2_2_N_f), .s_in_ready(req_0_2_2_N_r),
+        .s_out_valid(req_0_1_2_S_v), .s_out_flit(req_0_1_2_S_f), .s_out_ready(req_0_1_2_S_r),
+        .e_in_valid(req_1_1_2_W_v), .e_in_flit(req_1_1_2_W_f), .e_in_ready(req_1_1_2_W_r),
+        .e_out_valid(req_0_1_2_E_v), .e_out_flit(req_0_1_2_E_f), .e_out_ready(req_0_1_2_E_r),
         .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
         .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(req_0_1_1_D_v), .u_in_flit(req_0_1_1_D_f), .u_in_ready(req_0_1_1_D_r),
+        .u_out_valid(req_0_1_2_U_v), .u_out_flit(req_0_1_2_U_f), .u_out_ready(req_0_1_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({80{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(p5_req_out_valid), .l_in_flit(p5_req_out_flit), .l_in_ready(p5_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(0), .MY_Y(1)) resp_r01 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(0), .MY_Y(1), .MY_Z(2)) resp_r0_1_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_00_S_v), .n_in_flit(resp_00_S_f), .n_in_ready(resp_00_S_r),
-        .n_out_valid(resp_01_N_v), .n_out_flit(resp_01_N_f), .n_out_ready(resp_01_N_r),
-        .e_in_valid(resp_11_W_v), .e_in_flit(resp_11_W_f), .e_in_ready(resp_11_W_r),
-        .e_out_valid(resp_01_E_v), .e_out_flit(resp_01_E_f), .e_out_ready(resp_01_E_r),
-        .s_in_valid(resp_02_N_v), .s_in_flit(resp_02_N_f), .s_in_ready(resp_02_N_r),
-        .s_out_valid(resp_01_S_v), .s_out_flit(resp_01_S_f), .s_out_ready(resp_01_S_r),
+        .n_in_valid(resp_0_0_2_S_v), .n_in_flit(resp_0_0_2_S_f), .n_in_ready(resp_0_0_2_S_r),
+        .n_out_valid(resp_0_1_2_N_v), .n_out_flit(resp_0_1_2_N_f), .n_out_ready(resp_0_1_2_N_r),
+        .s_in_valid(resp_0_2_2_N_v), .s_in_flit(resp_0_2_2_N_f), .s_in_ready(resp_0_2_2_N_r),
+        .s_out_valid(resp_0_1_2_S_v), .s_out_flit(resp_0_1_2_S_f), .s_out_ready(resp_0_1_2_S_r),
+        .e_in_valid(resp_1_1_2_W_v), .e_in_flit(resp_1_1_2_W_f), .e_in_ready(resp_1_1_2_W_r),
+        .e_out_valid(resp_0_1_2_E_v), .e_out_flit(resp_0_1_2_E_f), .e_out_ready(resp_0_1_2_E_r),
         .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
         .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(resp_0_1_1_D_v), .u_in_flit(resp_0_1_1_D_f), .u_in_ready(resp_0_1_1_D_r),
+        .u_out_valid(resp_0_1_2_U_v), .u_out_flit(resp_0_1_2_U_f), .u_out_ready(resp_0_1_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({38{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(p5_resp_in_valid), .l_out_flit(p5_resp_in_flit), .l_out_ready(p5_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(1), .MY_Y(1)) req_r11 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(0), .MY_Y(2), .MY_Z(0)) req_r0_2_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_10_S_v), .n_in_flit(req_10_S_f), .n_in_ready(req_10_S_r),
-        .n_out_valid(req_11_N_v), .n_out_flit(req_11_N_f), .n_out_ready(req_11_N_r),
-        .e_in_valid(req_21_W_v), .e_in_flit(req_21_W_f), .e_in_ready(req_21_W_r),
-        .e_out_valid(req_11_E_v), .e_out_flit(req_11_E_f), .e_out_ready(req_11_E_r),
-        .s_in_valid(req_12_N_v), .s_in_flit(req_12_N_f), .s_in_ready(req_12_N_r),
-        .s_out_valid(req_11_S_v), .s_out_flit(req_11_S_f), .s_out_ready(req_11_S_r),
-        .w_in_valid(req_01_E_v), .w_in_flit(req_01_E_f), .w_in_ready(req_01_E_r),
-        .w_out_valid(req_11_W_v), .w_out_flit(req_11_W_f), .w_out_ready(req_11_W_r),
+        .n_in_valid(req_0_1_0_S_v), .n_in_flit(req_0_1_0_S_f), .n_in_ready(req_0_1_0_S_r),
+        .n_out_valid(req_0_2_0_N_v), .n_out_flit(req_0_2_0_N_f), .n_out_ready(req_0_2_0_N_r),
+        .s_in_valid(req_0_3_0_N_v), .s_in_flit(req_0_3_0_N_f), .s_in_ready(req_0_3_0_N_r),
+        .s_out_valid(req_0_2_0_S_v), .s_out_flit(req_0_2_0_S_f), .s_out_ready(req_0_2_0_S_r),
+        .e_in_valid(req_1_2_0_W_v), .e_in_flit(req_1_2_0_W_f), .e_in_ready(req_1_2_0_W_r),
+        .e_out_valid(req_0_2_0_E_v), .e_out_flit(req_0_2_0_E_f), .e_out_ready(req_0_2_0_E_r),
+        .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(1'b0), .u_in_flit({80{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(req_0_2_1_U_v), .d_in_flit(req_0_2_1_U_f), .d_in_ready(req_0_2_1_U_r),
+        .d_out_valid(req_0_2_0_D_v), .d_out_flit(req_0_2_0_D_f), .d_out_ready(req_0_2_0_D_r),
         .l_in_valid(p6_req_out_valid), .l_in_flit(p6_req_out_flit), .l_in_ready(p6_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(1), .MY_Y(1)) resp_r11 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(0), .MY_Y(2), .MY_Z(0)) resp_r0_2_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_10_S_v), .n_in_flit(resp_10_S_f), .n_in_ready(resp_10_S_r),
-        .n_out_valid(resp_11_N_v), .n_out_flit(resp_11_N_f), .n_out_ready(resp_11_N_r),
-        .e_in_valid(resp_21_W_v), .e_in_flit(resp_21_W_f), .e_in_ready(resp_21_W_r),
-        .e_out_valid(resp_11_E_v), .e_out_flit(resp_11_E_f), .e_out_ready(resp_11_E_r),
-        .s_in_valid(resp_12_N_v), .s_in_flit(resp_12_N_f), .s_in_ready(resp_12_N_r),
-        .s_out_valid(resp_11_S_v), .s_out_flit(resp_11_S_f), .s_out_ready(resp_11_S_r),
-        .w_in_valid(resp_01_E_v), .w_in_flit(resp_01_E_f), .w_in_ready(resp_01_E_r),
-        .w_out_valid(resp_11_W_v), .w_out_flit(resp_11_W_f), .w_out_ready(resp_11_W_r),
+        .n_in_valid(resp_0_1_0_S_v), .n_in_flit(resp_0_1_0_S_f), .n_in_ready(resp_0_1_0_S_r),
+        .n_out_valid(resp_0_2_0_N_v), .n_out_flit(resp_0_2_0_N_f), .n_out_ready(resp_0_2_0_N_r),
+        .s_in_valid(resp_0_3_0_N_v), .s_in_flit(resp_0_3_0_N_f), .s_in_ready(resp_0_3_0_N_r),
+        .s_out_valid(resp_0_2_0_S_v), .s_out_flit(resp_0_2_0_S_f), .s_out_ready(resp_0_2_0_S_r),
+        .e_in_valid(resp_1_2_0_W_v), .e_in_flit(resp_1_2_0_W_f), .e_in_ready(resp_1_2_0_W_r),
+        .e_out_valid(resp_0_2_0_E_v), .e_out_flit(resp_0_2_0_E_f), .e_out_ready(resp_0_2_0_E_r),
+        .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(1'b0), .u_in_flit({38{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(resp_0_2_1_U_v), .d_in_flit(resp_0_2_1_U_f), .d_in_ready(resp_0_2_1_U_r),
+        .d_out_valid(resp_0_2_0_D_v), .d_out_flit(resp_0_2_0_D_f), .d_out_ready(resp_0_2_0_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(p6_resp_in_valid), .l_out_flit(p6_resp_in_flit), .l_out_ready(p6_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(2), .MY_Y(1)) req_r21 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(0), .MY_Y(2), .MY_Z(1)) req_r0_2_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_20_S_v), .n_in_flit(req_20_S_f), .n_in_ready(req_20_S_r),
-        .n_out_valid(req_21_N_v), .n_out_flit(req_21_N_f), .n_out_ready(req_21_N_r),
-        .e_in_valid(req_31_W_v), .e_in_flit(req_31_W_f), .e_in_ready(req_31_W_r),
-        .e_out_valid(req_21_E_v), .e_out_flit(req_21_E_f), .e_out_ready(req_21_E_r),
-        .s_in_valid(req_22_N_v), .s_in_flit(req_22_N_f), .s_in_ready(req_22_N_r),
-        .s_out_valid(req_21_S_v), .s_out_flit(req_21_S_f), .s_out_ready(req_21_S_r),
-        .w_in_valid(req_11_E_v), .w_in_flit(req_11_E_f), .w_in_ready(req_11_E_r),
-        .w_out_valid(req_21_W_v), .w_out_flit(req_21_W_f), .w_out_ready(req_21_W_r),
+        .n_in_valid(req_0_1_1_S_v), .n_in_flit(req_0_1_1_S_f), .n_in_ready(req_0_1_1_S_r),
+        .n_out_valid(req_0_2_1_N_v), .n_out_flit(req_0_2_1_N_f), .n_out_ready(req_0_2_1_N_r),
+        .s_in_valid(req_0_3_1_N_v), .s_in_flit(req_0_3_1_N_f), .s_in_ready(req_0_3_1_N_r),
+        .s_out_valid(req_0_2_1_S_v), .s_out_flit(req_0_2_1_S_f), .s_out_ready(req_0_2_1_S_r),
+        .e_in_valid(req_1_2_1_W_v), .e_in_flit(req_1_2_1_W_f), .e_in_ready(req_1_2_1_W_r),
+        .e_out_valid(req_0_2_1_E_v), .e_out_flit(req_0_2_1_E_f), .e_out_ready(req_0_2_1_E_r),
+        .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(req_0_2_0_D_v), .u_in_flit(req_0_2_0_D_f), .u_in_ready(req_0_2_0_D_r),
+        .u_out_valid(req_0_2_1_U_v), .u_out_flit(req_0_2_1_U_f), .u_out_ready(req_0_2_1_U_r),
+        .d_in_valid(req_0_2_2_U_v), .d_in_flit(req_0_2_2_U_f), .d_in_ready(req_0_2_2_U_r),
+        .d_out_valid(req_0_2_1_D_v), .d_out_flit(req_0_2_1_D_f), .d_out_ready(req_0_2_1_D_r),
         .l_in_valid(p7_req_out_valid), .l_in_flit(p7_req_out_flit), .l_in_ready(p7_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(2), .MY_Y(1)) resp_r21 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(0), .MY_Y(2), .MY_Z(1)) resp_r0_2_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_20_S_v), .n_in_flit(resp_20_S_f), .n_in_ready(resp_20_S_r),
-        .n_out_valid(resp_21_N_v), .n_out_flit(resp_21_N_f), .n_out_ready(resp_21_N_r),
-        .e_in_valid(resp_31_W_v), .e_in_flit(resp_31_W_f), .e_in_ready(resp_31_W_r),
-        .e_out_valid(resp_21_E_v), .e_out_flit(resp_21_E_f), .e_out_ready(resp_21_E_r),
-        .s_in_valid(resp_22_N_v), .s_in_flit(resp_22_N_f), .s_in_ready(resp_22_N_r),
-        .s_out_valid(resp_21_S_v), .s_out_flit(resp_21_S_f), .s_out_ready(resp_21_S_r),
-        .w_in_valid(resp_11_E_v), .w_in_flit(resp_11_E_f), .w_in_ready(resp_11_E_r),
-        .w_out_valid(resp_21_W_v), .w_out_flit(resp_21_W_f), .w_out_ready(resp_21_W_r),
+        .n_in_valid(resp_0_1_1_S_v), .n_in_flit(resp_0_1_1_S_f), .n_in_ready(resp_0_1_1_S_r),
+        .n_out_valid(resp_0_2_1_N_v), .n_out_flit(resp_0_2_1_N_f), .n_out_ready(resp_0_2_1_N_r),
+        .s_in_valid(resp_0_3_1_N_v), .s_in_flit(resp_0_3_1_N_f), .s_in_ready(resp_0_3_1_N_r),
+        .s_out_valid(resp_0_2_1_S_v), .s_out_flit(resp_0_2_1_S_f), .s_out_ready(resp_0_2_1_S_r),
+        .e_in_valid(resp_1_2_1_W_v), .e_in_flit(resp_1_2_1_W_f), .e_in_ready(resp_1_2_1_W_r),
+        .e_out_valid(resp_0_2_1_E_v), .e_out_flit(resp_0_2_1_E_f), .e_out_ready(resp_0_2_1_E_r),
+        .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(resp_0_2_0_D_v), .u_in_flit(resp_0_2_0_D_f), .u_in_ready(resp_0_2_0_D_r),
+        .u_out_valid(resp_0_2_1_U_v), .u_out_flit(resp_0_2_1_U_f), .u_out_ready(resp_0_2_1_U_r),
+        .d_in_valid(resp_0_2_2_U_v), .d_in_flit(resp_0_2_2_U_f), .d_in_ready(resp_0_2_2_U_r),
+        .d_out_valid(resp_0_2_1_D_v), .d_out_flit(resp_0_2_1_D_f), .d_out_ready(resp_0_2_1_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(p7_resp_in_valid), .l_out_flit(p7_resp_in_flit), .l_out_ready(p7_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(3), .MY_Y(1)) req_r31 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(0), .MY_Y(2), .MY_Z(2)) req_r0_2_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_30_S_v), .n_in_flit(req_30_S_f), .n_in_ready(req_30_S_r),
-        .n_out_valid(req_31_N_v), .n_out_flit(req_31_N_f), .n_out_ready(req_31_N_r),
-        .e_in_valid(req_41_W_v), .e_in_flit(req_41_W_f), .e_in_ready(req_41_W_r),
-        .e_out_valid(req_31_E_v), .e_out_flit(req_31_E_f), .e_out_ready(req_31_E_r),
-        .s_in_valid(req_32_N_v), .s_in_flit(req_32_N_f), .s_in_ready(req_32_N_r),
-        .s_out_valid(req_31_S_v), .s_out_flit(req_31_S_f), .s_out_ready(req_31_S_r),
-        .w_in_valid(req_21_E_v), .w_in_flit(req_21_E_f), .w_in_ready(req_21_E_r),
-        .w_out_valid(req_31_W_v), .w_out_flit(req_31_W_f), .w_out_ready(req_31_W_r),
+        .n_in_valid(req_0_1_2_S_v), .n_in_flit(req_0_1_2_S_f), .n_in_ready(req_0_1_2_S_r),
+        .n_out_valid(req_0_2_2_N_v), .n_out_flit(req_0_2_2_N_f), .n_out_ready(req_0_2_2_N_r),
+        .s_in_valid(req_0_3_2_N_v), .s_in_flit(req_0_3_2_N_f), .s_in_ready(req_0_3_2_N_r),
+        .s_out_valid(req_0_2_2_S_v), .s_out_flit(req_0_2_2_S_f), .s_out_ready(req_0_2_2_S_r),
+        .e_in_valid(req_1_2_2_W_v), .e_in_flit(req_1_2_2_W_f), .e_in_ready(req_1_2_2_W_r),
+        .e_out_valid(req_0_2_2_E_v), .e_out_flit(req_0_2_2_E_f), .e_out_ready(req_0_2_2_E_r),
+        .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(req_0_2_1_D_v), .u_in_flit(req_0_2_1_D_f), .u_in_ready(req_0_2_1_D_r),
+        .u_out_valid(req_0_2_2_U_v), .u_out_flit(req_0_2_2_U_f), .u_out_ready(req_0_2_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({80{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(p8_req_out_valid), .l_in_flit(p8_req_out_flit), .l_in_ready(p8_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(3), .MY_Y(1)) resp_r31 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(0), .MY_Y(2), .MY_Z(2)) resp_r0_2_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_30_S_v), .n_in_flit(resp_30_S_f), .n_in_ready(resp_30_S_r),
-        .n_out_valid(resp_31_N_v), .n_out_flit(resp_31_N_f), .n_out_ready(resp_31_N_r),
-        .e_in_valid(resp_41_W_v), .e_in_flit(resp_41_W_f), .e_in_ready(resp_41_W_r),
-        .e_out_valid(resp_31_E_v), .e_out_flit(resp_31_E_f), .e_out_ready(resp_31_E_r),
-        .s_in_valid(resp_32_N_v), .s_in_flit(resp_32_N_f), .s_in_ready(resp_32_N_r),
-        .s_out_valid(resp_31_S_v), .s_out_flit(resp_31_S_f), .s_out_ready(resp_31_S_r),
-        .w_in_valid(resp_21_E_v), .w_in_flit(resp_21_E_f), .w_in_ready(resp_21_E_r),
-        .w_out_valid(resp_31_W_v), .w_out_flit(resp_31_W_f), .w_out_ready(resp_31_W_r),
+        .n_in_valid(resp_0_1_2_S_v), .n_in_flit(resp_0_1_2_S_f), .n_in_ready(resp_0_1_2_S_r),
+        .n_out_valid(resp_0_2_2_N_v), .n_out_flit(resp_0_2_2_N_f), .n_out_ready(resp_0_2_2_N_r),
+        .s_in_valid(resp_0_3_2_N_v), .s_in_flit(resp_0_3_2_N_f), .s_in_ready(resp_0_3_2_N_r),
+        .s_out_valid(resp_0_2_2_S_v), .s_out_flit(resp_0_2_2_S_f), .s_out_ready(resp_0_2_2_S_r),
+        .e_in_valid(resp_1_2_2_W_v), .e_in_flit(resp_1_2_2_W_f), .e_in_ready(resp_1_2_2_W_r),
+        .e_out_valid(resp_0_2_2_E_v), .e_out_flit(resp_0_2_2_E_f), .e_out_ready(resp_0_2_2_E_r),
+        .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(resp_0_2_1_D_v), .u_in_flit(resp_0_2_1_D_f), .u_in_ready(resp_0_2_1_D_r),
+        .u_out_valid(resp_0_2_2_U_v), .u_out_flit(resp_0_2_2_U_f), .u_out_ready(resp_0_2_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({38{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(p8_resp_in_valid), .l_out_flit(p8_resp_in_flit), .l_out_ready(p8_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(4), .MY_Y(1)) req_r41 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(0), .MY_Y(3), .MY_Z(0)) req_r0_3_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_40_S_v), .n_in_flit(req_40_S_f), .n_in_ready(req_40_S_r),
-        .n_out_valid(req_41_N_v), .n_out_flit(req_41_N_f), .n_out_ready(req_41_N_r),
-        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
-        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
-        .s_in_valid(req_42_N_v), .s_in_flit(req_42_N_f), .s_in_ready(req_42_N_r),
-        .s_out_valid(req_41_S_v), .s_out_flit(req_41_S_f), .s_out_ready(req_41_S_r),
-        .w_in_valid(req_31_E_v), .w_in_flit(req_31_E_f), .w_in_ready(req_31_E_r),
-        .w_out_valid(req_41_W_v), .w_out_flit(req_41_W_f), .w_out_ready(req_41_W_r),
+        .n_in_valid(req_0_2_0_S_v), .n_in_flit(req_0_2_0_S_f), .n_in_ready(req_0_2_0_S_r),
+        .n_out_valid(req_0_3_0_N_v), .n_out_flit(req_0_3_0_N_f), .n_out_ready(req_0_3_0_N_r),
+        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(req_1_3_0_W_v), .e_in_flit(req_1_3_0_W_f), .e_in_ready(req_1_3_0_W_r),
+        .e_out_valid(req_0_3_0_E_v), .e_out_flit(req_0_3_0_E_f), .e_out_ready(req_0_3_0_E_r),
+        .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(1'b0), .u_in_flit({80{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(req_0_3_1_U_v), .d_in_flit(req_0_3_1_U_f), .d_in_ready(req_0_3_1_U_r),
+        .d_out_valid(req_0_3_0_D_v), .d_out_flit(req_0_3_0_D_f), .d_out_ready(req_0_3_0_D_r),
         .l_in_valid(p9_req_out_valid), .l_in_flit(p9_req_out_flit), .l_in_ready(p9_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(4), .MY_Y(1)) resp_r41 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(0), .MY_Y(3), .MY_Z(0)) resp_r0_3_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_40_S_v), .n_in_flit(resp_40_S_f), .n_in_ready(resp_40_S_r),
-        .n_out_valid(resp_41_N_v), .n_out_flit(resp_41_N_f), .n_out_ready(resp_41_N_r),
-        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
-        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
-        .s_in_valid(resp_42_N_v), .s_in_flit(resp_42_N_f), .s_in_ready(resp_42_N_r),
-        .s_out_valid(resp_41_S_v), .s_out_flit(resp_41_S_f), .s_out_ready(resp_41_S_r),
-        .w_in_valid(resp_31_E_v), .w_in_flit(resp_31_E_f), .w_in_ready(resp_31_E_r),
-        .w_out_valid(resp_41_W_v), .w_out_flit(resp_41_W_f), .w_out_ready(resp_41_W_r),
+        .n_in_valid(resp_0_2_0_S_v), .n_in_flit(resp_0_2_0_S_f), .n_in_ready(resp_0_2_0_S_r),
+        .n_out_valid(resp_0_3_0_N_v), .n_out_flit(resp_0_3_0_N_f), .n_out_ready(resp_0_3_0_N_r),
+        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(resp_1_3_0_W_v), .e_in_flit(resp_1_3_0_W_f), .e_in_ready(resp_1_3_0_W_r),
+        .e_out_valid(resp_0_3_0_E_v), .e_out_flit(resp_0_3_0_E_f), .e_out_ready(resp_0_3_0_E_r),
+        .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(1'b0), .u_in_flit({38{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(resp_0_3_1_U_v), .d_in_flit(resp_0_3_1_U_f), .d_in_ready(resp_0_3_1_U_r),
+        .d_out_valid(resp_0_3_0_D_v), .d_out_flit(resp_0_3_0_D_f), .d_out_ready(resp_0_3_0_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(p9_resp_in_valid), .l_out_flit(p9_resp_in_flit), .l_out_ready(p9_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(0), .MY_Y(2)) req_r02 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(0), .MY_Y(3), .MY_Z(1)) req_r0_3_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_01_S_v), .n_in_flit(req_01_S_f), .n_in_ready(req_01_S_r),
-        .n_out_valid(req_02_N_v), .n_out_flit(req_02_N_f), .n_out_ready(req_02_N_r),
-        .e_in_valid(req_12_W_v), .e_in_flit(req_12_W_f), .e_in_ready(req_12_W_r),
-        .e_out_valid(req_02_E_v), .e_out_flit(req_02_E_f), .e_out_ready(req_02_E_r),
-        .s_in_valid(req_03_N_v), .s_in_flit(req_03_N_f), .s_in_ready(req_03_N_r),
-        .s_out_valid(req_02_S_v), .s_out_flit(req_02_S_f), .s_out_ready(req_02_S_r),
+        .n_in_valid(req_0_2_1_S_v), .n_in_flit(req_0_2_1_S_f), .n_in_ready(req_0_2_1_S_r),
+        .n_out_valid(req_0_3_1_N_v), .n_out_flit(req_0_3_1_N_f), .n_out_ready(req_0_3_1_N_r),
+        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(req_1_3_1_W_v), .e_in_flit(req_1_3_1_W_f), .e_in_ready(req_1_3_1_W_r),
+        .e_out_valid(req_0_3_1_E_v), .e_out_flit(req_0_3_1_E_f), .e_out_ready(req_0_3_1_E_r),
         .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
         .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(req_0_3_0_D_v), .u_in_flit(req_0_3_0_D_f), .u_in_ready(req_0_3_0_D_r),
+        .u_out_valid(req_0_3_1_U_v), .u_out_flit(req_0_3_1_U_f), .u_out_ready(req_0_3_1_U_r),
+        .d_in_valid(req_0_3_2_U_v), .d_in_flit(req_0_3_2_U_f), .d_in_ready(req_0_3_2_U_r),
+        .d_out_valid(req_0_3_1_D_v), .d_out_flit(req_0_3_1_D_f), .d_out_ready(req_0_3_1_D_r),
         .l_in_valid(p10_req_out_valid), .l_in_flit(p10_req_out_flit), .l_in_ready(p10_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(0), .MY_Y(2)) resp_r02 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(0), .MY_Y(3), .MY_Z(1)) resp_r0_3_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_01_S_v), .n_in_flit(resp_01_S_f), .n_in_ready(resp_01_S_r),
-        .n_out_valid(resp_02_N_v), .n_out_flit(resp_02_N_f), .n_out_ready(resp_02_N_r),
-        .e_in_valid(resp_12_W_v), .e_in_flit(resp_12_W_f), .e_in_ready(resp_12_W_r),
-        .e_out_valid(resp_02_E_v), .e_out_flit(resp_02_E_f), .e_out_ready(resp_02_E_r),
-        .s_in_valid(resp_03_N_v), .s_in_flit(resp_03_N_f), .s_in_ready(resp_03_N_r),
-        .s_out_valid(resp_02_S_v), .s_out_flit(resp_02_S_f), .s_out_ready(resp_02_S_r),
+        .n_in_valid(resp_0_2_1_S_v), .n_in_flit(resp_0_2_1_S_f), .n_in_ready(resp_0_2_1_S_r),
+        .n_out_valid(resp_0_3_1_N_v), .n_out_flit(resp_0_3_1_N_f), .n_out_ready(resp_0_3_1_N_r),
+        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(resp_1_3_1_W_v), .e_in_flit(resp_1_3_1_W_f), .e_in_ready(resp_1_3_1_W_r),
+        .e_out_valid(resp_0_3_1_E_v), .e_out_flit(resp_0_3_1_E_f), .e_out_ready(resp_0_3_1_E_r),
         .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
         .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(resp_0_3_0_D_v), .u_in_flit(resp_0_3_0_D_f), .u_in_ready(resp_0_3_0_D_r),
+        .u_out_valid(resp_0_3_1_U_v), .u_out_flit(resp_0_3_1_U_f), .u_out_ready(resp_0_3_1_U_r),
+        .d_in_valid(resp_0_3_2_U_v), .d_in_flit(resp_0_3_2_U_f), .d_in_ready(resp_0_3_2_U_r),
+        .d_out_valid(resp_0_3_1_D_v), .d_out_flit(resp_0_3_1_D_f), .d_out_ready(resp_0_3_1_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(p10_resp_in_valid), .l_out_flit(p10_resp_in_flit), .l_out_ready(p10_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(1), .MY_Y(2)) req_r12 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(0), .MY_Y(3), .MY_Z(2)) req_r0_3_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_11_S_v), .n_in_flit(req_11_S_f), .n_in_ready(req_11_S_r),
-        .n_out_valid(req_12_N_v), .n_out_flit(req_12_N_f), .n_out_ready(req_12_N_r),
-        .e_in_valid(req_22_W_v), .e_in_flit(req_22_W_f), .e_in_ready(req_22_W_r),
-        .e_out_valid(req_12_E_v), .e_out_flit(req_12_E_f), .e_out_ready(req_12_E_r),
-        .s_in_valid(req_13_N_v), .s_in_flit(req_13_N_f), .s_in_ready(req_13_N_r),
-        .s_out_valid(req_12_S_v), .s_out_flit(req_12_S_f), .s_out_ready(req_12_S_r),
-        .w_in_valid(req_02_E_v), .w_in_flit(req_02_E_f), .w_in_ready(req_02_E_r),
-        .w_out_valid(req_12_W_v), .w_out_flit(req_12_W_f), .w_out_ready(req_12_W_r),
+        .n_in_valid(req_0_2_2_S_v), .n_in_flit(req_0_2_2_S_f), .n_in_ready(req_0_2_2_S_r),
+        .n_out_valid(req_0_3_2_N_v), .n_out_flit(req_0_3_2_N_f), .n_out_ready(req_0_3_2_N_r),
+        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(req_1_3_2_W_v), .e_in_flit(req_1_3_2_W_f), .e_in_ready(req_1_3_2_W_r),
+        .e_out_valid(req_0_3_2_E_v), .e_out_flit(req_0_3_2_E_f), .e_out_ready(req_0_3_2_E_r),
+        .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(req_0_3_1_D_v), .u_in_flit(req_0_3_1_D_f), .u_in_ready(req_0_3_1_D_r),
+        .u_out_valid(req_0_3_2_U_v), .u_out_flit(req_0_3_2_U_f), .u_out_ready(req_0_3_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({80{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(p11_req_out_valid), .l_in_flit(p11_req_out_flit), .l_in_ready(p11_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(1), .MY_Y(2)) resp_r12 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(0), .MY_Y(3), .MY_Z(2)) resp_r0_3_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_11_S_v), .n_in_flit(resp_11_S_f), .n_in_ready(resp_11_S_r),
-        .n_out_valid(resp_12_N_v), .n_out_flit(resp_12_N_f), .n_out_ready(resp_12_N_r),
-        .e_in_valid(resp_22_W_v), .e_in_flit(resp_22_W_f), .e_in_ready(resp_22_W_r),
-        .e_out_valid(resp_12_E_v), .e_out_flit(resp_12_E_f), .e_out_ready(resp_12_E_r),
-        .s_in_valid(resp_13_N_v), .s_in_flit(resp_13_N_f), .s_in_ready(resp_13_N_r),
-        .s_out_valid(resp_12_S_v), .s_out_flit(resp_12_S_f), .s_out_ready(resp_12_S_r),
-        .w_in_valid(resp_02_E_v), .w_in_flit(resp_02_E_f), .w_in_ready(resp_02_E_r),
-        .w_out_valid(resp_12_W_v), .w_out_flit(resp_12_W_f), .w_out_ready(resp_12_W_r),
+        .n_in_valid(resp_0_2_2_S_v), .n_in_flit(resp_0_2_2_S_f), .n_in_ready(resp_0_2_2_S_r),
+        .n_out_valid(resp_0_3_2_N_v), .n_out_flit(resp_0_3_2_N_f), .n_out_ready(resp_0_3_2_N_r),
+        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(resp_1_3_2_W_v), .e_in_flit(resp_1_3_2_W_f), .e_in_ready(resp_1_3_2_W_r),
+        .e_out_valid(resp_0_3_2_E_v), .e_out_flit(resp_0_3_2_E_f), .e_out_ready(resp_0_3_2_E_r),
+        .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(resp_0_3_1_D_v), .u_in_flit(resp_0_3_1_D_f), .u_in_ready(resp_0_3_1_D_r),
+        .u_out_valid(resp_0_3_2_U_v), .u_out_flit(resp_0_3_2_U_f), .u_out_ready(resp_0_3_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({38{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(p11_resp_in_valid), .l_out_flit(p11_resp_in_flit), .l_out_ready(p11_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(2), .MY_Y(2)) req_r22 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(1), .MY_Y(0), .MY_Z(0)) req_r1_0_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_21_S_v), .n_in_flit(req_21_S_f), .n_in_ready(req_21_S_r),
-        .n_out_valid(req_22_N_v), .n_out_flit(req_22_N_f), .n_out_ready(req_22_N_r),
-        .e_in_valid(req_32_W_v), .e_in_flit(req_32_W_f), .e_in_ready(req_32_W_r),
-        .e_out_valid(req_22_E_v), .e_out_flit(req_22_E_f), .e_out_ready(req_22_E_r),
-        .s_in_valid(req_23_N_v), .s_in_flit(req_23_N_f), .s_in_ready(req_23_N_r),
-        .s_out_valid(req_22_S_v), .s_out_flit(req_22_S_f), .s_out_ready(req_22_S_r),
-        .w_in_valid(req_12_E_v), .w_in_flit(req_12_E_f), .w_in_ready(req_12_E_r),
-        .w_out_valid(req_22_W_v), .w_out_flit(req_22_W_f), .w_out_ready(req_22_W_r),
+        .n_in_valid(1'b0), .n_in_flit({80{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .s_in_valid(req_1_1_0_N_v), .s_in_flit(req_1_1_0_N_f), .s_in_ready(req_1_1_0_N_r),
+        .s_out_valid(req_1_0_0_S_v), .s_out_flit(req_1_0_0_S_f), .s_out_ready(req_1_0_0_S_r),
+        .e_in_valid(req_2_0_0_W_v), .e_in_flit(req_2_0_0_W_f), .e_in_ready(req_2_0_0_W_r),
+        .e_out_valid(req_1_0_0_E_v), .e_out_flit(req_1_0_0_E_f), .e_out_ready(req_1_0_0_E_r),
+        .w_in_valid(req_0_0_0_E_v), .w_in_flit(req_0_0_0_E_f), .w_in_ready(req_0_0_0_E_r),
+        .w_out_valid(req_1_0_0_W_v), .w_out_flit(req_1_0_0_W_f), .w_out_ready(req_1_0_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({80{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(req_1_0_1_U_v), .d_in_flit(req_1_0_1_U_f), .d_in_ready(req_1_0_1_U_r),
+        .d_out_valid(req_1_0_0_D_v), .d_out_flit(req_1_0_0_D_f), .d_out_ready(req_1_0_0_D_r),
+        .l_in_valid(p12_req_out_valid), .l_in_flit(p12_req_out_flit), .l_in_ready(p12_req_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
+    );
+
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(1), .MY_Y(0), .MY_Z(0)) resp_r1_0_0 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(1'b0), .n_in_flit({38{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .s_in_valid(resp_1_1_0_N_v), .s_in_flit(resp_1_1_0_N_f), .s_in_ready(resp_1_1_0_N_r),
+        .s_out_valid(resp_1_0_0_S_v), .s_out_flit(resp_1_0_0_S_f), .s_out_ready(resp_1_0_0_S_r),
+        .e_in_valid(resp_2_0_0_W_v), .e_in_flit(resp_2_0_0_W_f), .e_in_ready(resp_2_0_0_W_r),
+        .e_out_valid(resp_1_0_0_E_v), .e_out_flit(resp_1_0_0_E_f), .e_out_ready(resp_1_0_0_E_r),
+        .w_in_valid(resp_0_0_0_E_v), .w_in_flit(resp_0_0_0_E_f), .w_in_ready(resp_0_0_0_E_r),
+        .w_out_valid(resp_1_0_0_W_v), .w_out_flit(resp_1_0_0_W_f), .w_out_ready(resp_1_0_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({38{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(resp_1_0_1_U_v), .d_in_flit(resp_1_0_1_U_f), .d_in_ready(resp_1_0_1_U_r),
+        .d_out_valid(resp_1_0_0_D_v), .d_out_flit(resp_1_0_0_D_f), .d_out_ready(resp_1_0_0_D_r),
+        .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
+        .l_out_valid(p12_resp_in_valid), .l_out_flit(p12_resp_in_flit), .l_out_ready(p12_resp_in_ready)
+    );
+
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(1), .MY_Y(0), .MY_Z(1)) req_r1_0_1 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(1'b0), .n_in_flit({80{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .s_in_valid(req_1_1_1_N_v), .s_in_flit(req_1_1_1_N_f), .s_in_ready(req_1_1_1_N_r),
+        .s_out_valid(req_1_0_1_S_v), .s_out_flit(req_1_0_1_S_f), .s_out_ready(req_1_0_1_S_r),
+        .e_in_valid(req_2_0_1_W_v), .e_in_flit(req_2_0_1_W_f), .e_in_ready(req_2_0_1_W_r),
+        .e_out_valid(req_1_0_1_E_v), .e_out_flit(req_1_0_1_E_f), .e_out_ready(req_1_0_1_E_r),
+        .w_in_valid(req_0_0_1_E_v), .w_in_flit(req_0_0_1_E_f), .w_in_ready(req_0_0_1_E_r),
+        .w_out_valid(req_1_0_1_W_v), .w_out_flit(req_1_0_1_W_f), .w_out_ready(req_1_0_1_W_r),
+        .u_in_valid(req_1_0_0_D_v), .u_in_flit(req_1_0_0_D_f), .u_in_ready(req_1_0_0_D_r),
+        .u_out_valid(req_1_0_1_U_v), .u_out_flit(req_1_0_1_U_f), .u_out_ready(req_1_0_1_U_r),
+        .d_in_valid(req_1_0_2_U_v), .d_in_flit(req_1_0_2_U_f), .d_in_ready(req_1_0_2_U_r),
+        .d_out_valid(req_1_0_1_D_v), .d_out_flit(req_1_0_1_D_f), .d_out_ready(req_1_0_1_D_r),
+        .l_in_valid(p13_req_out_valid), .l_in_flit(p13_req_out_flit), .l_in_ready(p13_req_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
+    );
+
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(1), .MY_Y(0), .MY_Z(1)) resp_r1_0_1 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(1'b0), .n_in_flit({38{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .s_in_valid(resp_1_1_1_N_v), .s_in_flit(resp_1_1_1_N_f), .s_in_ready(resp_1_1_1_N_r),
+        .s_out_valid(resp_1_0_1_S_v), .s_out_flit(resp_1_0_1_S_f), .s_out_ready(resp_1_0_1_S_r),
+        .e_in_valid(resp_2_0_1_W_v), .e_in_flit(resp_2_0_1_W_f), .e_in_ready(resp_2_0_1_W_r),
+        .e_out_valid(resp_1_0_1_E_v), .e_out_flit(resp_1_0_1_E_f), .e_out_ready(resp_1_0_1_E_r),
+        .w_in_valid(resp_0_0_1_E_v), .w_in_flit(resp_0_0_1_E_f), .w_in_ready(resp_0_0_1_E_r),
+        .w_out_valid(resp_1_0_1_W_v), .w_out_flit(resp_1_0_1_W_f), .w_out_ready(resp_1_0_1_W_r),
+        .u_in_valid(resp_1_0_0_D_v), .u_in_flit(resp_1_0_0_D_f), .u_in_ready(resp_1_0_0_D_r),
+        .u_out_valid(resp_1_0_1_U_v), .u_out_flit(resp_1_0_1_U_f), .u_out_ready(resp_1_0_1_U_r),
+        .d_in_valid(resp_1_0_2_U_v), .d_in_flit(resp_1_0_2_U_f), .d_in_ready(resp_1_0_2_U_r),
+        .d_out_valid(resp_1_0_1_D_v), .d_out_flit(resp_1_0_1_D_f), .d_out_ready(resp_1_0_1_D_r),
+        .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
+        .l_out_valid(p13_resp_in_valid), .l_out_flit(p13_resp_in_flit), .l_out_ready(p13_resp_in_ready)
+    );
+
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(1), .MY_Y(0), .MY_Z(2)) req_r1_0_2 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(1'b0), .n_in_flit({80{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .s_in_valid(req_1_1_2_N_v), .s_in_flit(req_1_1_2_N_f), .s_in_ready(req_1_1_2_N_r),
+        .s_out_valid(req_1_0_2_S_v), .s_out_flit(req_1_0_2_S_f), .s_out_ready(req_1_0_2_S_r),
+        .e_in_valid(req_2_0_2_W_v), .e_in_flit(req_2_0_2_W_f), .e_in_ready(req_2_0_2_W_r),
+        .e_out_valid(req_1_0_2_E_v), .e_out_flit(req_1_0_2_E_f), .e_out_ready(req_1_0_2_E_r),
+        .w_in_valid(req_0_0_2_E_v), .w_in_flit(req_0_0_2_E_f), .w_in_ready(req_0_0_2_E_r),
+        .w_out_valid(req_1_0_2_W_v), .w_out_flit(req_1_0_2_W_f), .w_out_ready(req_1_0_2_W_r),
+        .u_in_valid(req_1_0_1_D_v), .u_in_flit(req_1_0_1_D_f), .u_in_ready(req_1_0_1_D_r),
+        .u_out_valid(req_1_0_2_U_v), .u_out_flit(req_1_0_2_U_f), .u_out_ready(req_1_0_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({80{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
+        .l_in_valid(p14_req_out_valid), .l_in_flit(p14_req_out_flit), .l_in_ready(p14_req_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
+    );
+
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(1), .MY_Y(0), .MY_Z(2)) resp_r1_0_2 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(1'b0), .n_in_flit({38{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .s_in_valid(resp_1_1_2_N_v), .s_in_flit(resp_1_1_2_N_f), .s_in_ready(resp_1_1_2_N_r),
+        .s_out_valid(resp_1_0_2_S_v), .s_out_flit(resp_1_0_2_S_f), .s_out_ready(resp_1_0_2_S_r),
+        .e_in_valid(resp_2_0_2_W_v), .e_in_flit(resp_2_0_2_W_f), .e_in_ready(resp_2_0_2_W_r),
+        .e_out_valid(resp_1_0_2_E_v), .e_out_flit(resp_1_0_2_E_f), .e_out_ready(resp_1_0_2_E_r),
+        .w_in_valid(resp_0_0_2_E_v), .w_in_flit(resp_0_0_2_E_f), .w_in_ready(resp_0_0_2_E_r),
+        .w_out_valid(resp_1_0_2_W_v), .w_out_flit(resp_1_0_2_W_f), .w_out_ready(resp_1_0_2_W_r),
+        .u_in_valid(resp_1_0_1_D_v), .u_in_flit(resp_1_0_1_D_f), .u_in_ready(resp_1_0_1_D_r),
+        .u_out_valid(resp_1_0_2_U_v), .u_out_flit(resp_1_0_2_U_f), .u_out_ready(resp_1_0_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({38{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
+        .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
+        .l_out_valid(p14_resp_in_valid), .l_out_flit(p14_resp_in_flit), .l_out_ready(p14_resp_in_ready)
+    );
+
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(1), .MY_Y(1), .MY_Z(0)) req_r1_1_0 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(req_1_0_0_S_v), .n_in_flit(req_1_0_0_S_f), .n_in_ready(req_1_0_0_S_r),
+        .n_out_valid(req_1_1_0_N_v), .n_out_flit(req_1_1_0_N_f), .n_out_ready(req_1_1_0_N_r),
+        .s_in_valid(req_1_2_0_N_v), .s_in_flit(req_1_2_0_N_f), .s_in_ready(req_1_2_0_N_r),
+        .s_out_valid(req_1_1_0_S_v), .s_out_flit(req_1_1_0_S_f), .s_out_ready(req_1_1_0_S_r),
+        .e_in_valid(req_2_1_0_W_v), .e_in_flit(req_2_1_0_W_f), .e_in_ready(req_2_1_0_W_r),
+        .e_out_valid(req_1_1_0_E_v), .e_out_flit(req_1_1_0_E_f), .e_out_ready(req_1_1_0_E_r),
+        .w_in_valid(req_0_1_0_E_v), .w_in_flit(req_0_1_0_E_f), .w_in_ready(req_0_1_0_E_r),
+        .w_out_valid(req_1_1_0_W_v), .w_out_flit(req_1_1_0_W_f), .w_out_ready(req_1_1_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({80{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(req_1_1_1_U_v), .d_in_flit(req_1_1_1_U_f), .d_in_ready(req_1_1_1_U_r),
+        .d_out_valid(req_1_1_0_D_v), .d_out_flit(req_1_1_0_D_f), .d_out_ready(req_1_1_0_D_r),
+        .l_in_valid(p15_req_out_valid), .l_in_flit(p15_req_out_flit), .l_in_ready(p15_req_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
+    );
+
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(1), .MY_Y(1), .MY_Z(0)) resp_r1_1_0 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(resp_1_0_0_S_v), .n_in_flit(resp_1_0_0_S_f), .n_in_ready(resp_1_0_0_S_r),
+        .n_out_valid(resp_1_1_0_N_v), .n_out_flit(resp_1_1_0_N_f), .n_out_ready(resp_1_1_0_N_r),
+        .s_in_valid(resp_1_2_0_N_v), .s_in_flit(resp_1_2_0_N_f), .s_in_ready(resp_1_2_0_N_r),
+        .s_out_valid(resp_1_1_0_S_v), .s_out_flit(resp_1_1_0_S_f), .s_out_ready(resp_1_1_0_S_r),
+        .e_in_valid(resp_2_1_0_W_v), .e_in_flit(resp_2_1_0_W_f), .e_in_ready(resp_2_1_0_W_r),
+        .e_out_valid(resp_1_1_0_E_v), .e_out_flit(resp_1_1_0_E_f), .e_out_ready(resp_1_1_0_E_r),
+        .w_in_valid(resp_0_1_0_E_v), .w_in_flit(resp_0_1_0_E_f), .w_in_ready(resp_0_1_0_E_r),
+        .w_out_valid(resp_1_1_0_W_v), .w_out_flit(resp_1_1_0_W_f), .w_out_ready(resp_1_1_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({38{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(resp_1_1_1_U_v), .d_in_flit(resp_1_1_1_U_f), .d_in_ready(resp_1_1_1_U_r),
+        .d_out_valid(resp_1_1_0_D_v), .d_out_flit(resp_1_1_0_D_f), .d_out_ready(resp_1_1_0_D_r),
+        .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
+        .l_out_valid(p15_resp_in_valid), .l_out_flit(p15_resp_in_flit), .l_out_ready(p15_resp_in_ready)
+    );
+
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(1), .MY_Y(1), .MY_Z(1)) req_r1_1_1 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(req_1_0_1_S_v), .n_in_flit(req_1_0_1_S_f), .n_in_ready(req_1_0_1_S_r),
+        .n_out_valid(req_1_1_1_N_v), .n_out_flit(req_1_1_1_N_f), .n_out_ready(req_1_1_1_N_r),
+        .s_in_valid(req_1_2_1_N_v), .s_in_flit(req_1_2_1_N_f), .s_in_ready(req_1_2_1_N_r),
+        .s_out_valid(req_1_1_1_S_v), .s_out_flit(req_1_1_1_S_f), .s_out_ready(req_1_1_1_S_r),
+        .e_in_valid(req_2_1_1_W_v), .e_in_flit(req_2_1_1_W_f), .e_in_ready(req_2_1_1_W_r),
+        .e_out_valid(req_1_1_1_E_v), .e_out_flit(req_1_1_1_E_f), .e_out_ready(req_1_1_1_E_r),
+        .w_in_valid(req_0_1_1_E_v), .w_in_flit(req_0_1_1_E_f), .w_in_ready(req_0_1_1_E_r),
+        .w_out_valid(req_1_1_1_W_v), .w_out_flit(req_1_1_1_W_f), .w_out_ready(req_1_1_1_W_r),
+        .u_in_valid(req_1_1_0_D_v), .u_in_flit(req_1_1_0_D_f), .u_in_ready(req_1_1_0_D_r),
+        .u_out_valid(req_1_1_1_U_v), .u_out_flit(req_1_1_1_U_f), .u_out_ready(req_1_1_1_U_r),
+        .d_in_valid(req_1_1_2_U_v), .d_in_flit(req_1_1_2_U_f), .d_in_ready(req_1_1_2_U_r),
+        .d_out_valid(req_1_1_1_D_v), .d_out_flit(req_1_1_1_D_f), .d_out_ready(req_1_1_1_D_r),
         .l_in_valid(1'b0), .l_in_flit({80{1'b0}}), .l_in_ready(),
         .l_out_valid(mem_req_in_valid), .l_out_flit(mem_req_in_flit), .l_out_ready(mem_req_in_ready)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(2), .MY_Y(2)) resp_r22 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(1), .MY_Y(1), .MY_Z(1)) resp_r1_1_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_21_S_v), .n_in_flit(resp_21_S_f), .n_in_ready(resp_21_S_r),
-        .n_out_valid(resp_22_N_v), .n_out_flit(resp_22_N_f), .n_out_ready(resp_22_N_r),
-        .e_in_valid(resp_32_W_v), .e_in_flit(resp_32_W_f), .e_in_ready(resp_32_W_r),
-        .e_out_valid(resp_22_E_v), .e_out_flit(resp_22_E_f), .e_out_ready(resp_22_E_r),
-        .s_in_valid(resp_23_N_v), .s_in_flit(resp_23_N_f), .s_in_ready(resp_23_N_r),
-        .s_out_valid(resp_22_S_v), .s_out_flit(resp_22_S_f), .s_out_ready(resp_22_S_r),
-        .w_in_valid(resp_12_E_v), .w_in_flit(resp_12_E_f), .w_in_ready(resp_12_E_r),
-        .w_out_valid(resp_22_W_v), .w_out_flit(resp_22_W_f), .w_out_ready(resp_22_W_r),
+        .n_in_valid(resp_1_0_1_S_v), .n_in_flit(resp_1_0_1_S_f), .n_in_ready(resp_1_0_1_S_r),
+        .n_out_valid(resp_1_1_1_N_v), .n_out_flit(resp_1_1_1_N_f), .n_out_ready(resp_1_1_1_N_r),
+        .s_in_valid(resp_1_2_1_N_v), .s_in_flit(resp_1_2_1_N_f), .s_in_ready(resp_1_2_1_N_r),
+        .s_out_valid(resp_1_1_1_S_v), .s_out_flit(resp_1_1_1_S_f), .s_out_ready(resp_1_1_1_S_r),
+        .e_in_valid(resp_2_1_1_W_v), .e_in_flit(resp_2_1_1_W_f), .e_in_ready(resp_2_1_1_W_r),
+        .e_out_valid(resp_1_1_1_E_v), .e_out_flit(resp_1_1_1_E_f), .e_out_ready(resp_1_1_1_E_r),
+        .w_in_valid(resp_0_1_1_E_v), .w_in_flit(resp_0_1_1_E_f), .w_in_ready(resp_0_1_1_E_r),
+        .w_out_valid(resp_1_1_1_W_v), .w_out_flit(resp_1_1_1_W_f), .w_out_ready(resp_1_1_1_W_r),
+        .u_in_valid(resp_1_1_0_D_v), .u_in_flit(resp_1_1_0_D_f), .u_in_ready(resp_1_1_0_D_r),
+        .u_out_valid(resp_1_1_1_U_v), .u_out_flit(resp_1_1_1_U_f), .u_out_ready(resp_1_1_1_U_r),
+        .d_in_valid(resp_1_1_2_U_v), .d_in_flit(resp_1_1_2_U_f), .d_in_ready(resp_1_1_2_U_r),
+        .d_out_valid(resp_1_1_1_D_v), .d_out_flit(resp_1_1_1_D_f), .d_out_ready(resp_1_1_1_D_r),
         .l_in_valid(mem_resp_out_valid), .l_in_flit(mem_resp_out_flit), .l_in_ready(mem_resp_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(3), .MY_Y(2)) req_r32 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(1), .MY_Y(1), .MY_Z(2)) req_r1_1_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_31_S_v), .n_in_flit(req_31_S_f), .n_in_ready(req_31_S_r),
-        .n_out_valid(req_32_N_v), .n_out_flit(req_32_N_f), .n_out_ready(req_32_N_r),
-        .e_in_valid(req_42_W_v), .e_in_flit(req_42_W_f), .e_in_ready(req_42_W_r),
-        .e_out_valid(req_32_E_v), .e_out_flit(req_32_E_f), .e_out_ready(req_32_E_r),
-        .s_in_valid(req_33_N_v), .s_in_flit(req_33_N_f), .s_in_ready(req_33_N_r),
-        .s_out_valid(req_32_S_v), .s_out_flit(req_32_S_f), .s_out_ready(req_32_S_r),
-        .w_in_valid(req_22_E_v), .w_in_flit(req_22_E_f), .w_in_ready(req_22_E_r),
-        .w_out_valid(req_32_W_v), .w_out_flit(req_32_W_f), .w_out_ready(req_32_W_r),
+        .n_in_valid(req_1_0_2_S_v), .n_in_flit(req_1_0_2_S_f), .n_in_ready(req_1_0_2_S_r),
+        .n_out_valid(req_1_1_2_N_v), .n_out_flit(req_1_1_2_N_f), .n_out_ready(req_1_1_2_N_r),
+        .s_in_valid(req_1_2_2_N_v), .s_in_flit(req_1_2_2_N_f), .s_in_ready(req_1_2_2_N_r),
+        .s_out_valid(req_1_1_2_S_v), .s_out_flit(req_1_1_2_S_f), .s_out_ready(req_1_1_2_S_r),
+        .e_in_valid(req_2_1_2_W_v), .e_in_flit(req_2_1_2_W_f), .e_in_ready(req_2_1_2_W_r),
+        .e_out_valid(req_1_1_2_E_v), .e_out_flit(req_1_1_2_E_f), .e_out_ready(req_1_1_2_E_r),
+        .w_in_valid(req_0_1_2_E_v), .w_in_flit(req_0_1_2_E_f), .w_in_ready(req_0_1_2_E_r),
+        .w_out_valid(req_1_1_2_W_v), .w_out_flit(req_1_1_2_W_f), .w_out_ready(req_1_1_2_W_r),
+        .u_in_valid(req_1_1_1_D_v), .u_in_flit(req_1_1_1_D_f), .u_in_ready(req_1_1_1_D_r),
+        .u_out_valid(req_1_1_2_U_v), .u_out_flit(req_1_1_2_U_f), .u_out_ready(req_1_1_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({80{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
+        .l_in_valid(p16_req_out_valid), .l_in_flit(p16_req_out_flit), .l_in_ready(p16_req_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
+    );
+
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(1), .MY_Y(1), .MY_Z(2)) resp_r1_1_2 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(resp_1_0_2_S_v), .n_in_flit(resp_1_0_2_S_f), .n_in_ready(resp_1_0_2_S_r),
+        .n_out_valid(resp_1_1_2_N_v), .n_out_flit(resp_1_1_2_N_f), .n_out_ready(resp_1_1_2_N_r),
+        .s_in_valid(resp_1_2_2_N_v), .s_in_flit(resp_1_2_2_N_f), .s_in_ready(resp_1_2_2_N_r),
+        .s_out_valid(resp_1_1_2_S_v), .s_out_flit(resp_1_1_2_S_f), .s_out_ready(resp_1_1_2_S_r),
+        .e_in_valid(resp_2_1_2_W_v), .e_in_flit(resp_2_1_2_W_f), .e_in_ready(resp_2_1_2_W_r),
+        .e_out_valid(resp_1_1_2_E_v), .e_out_flit(resp_1_1_2_E_f), .e_out_ready(resp_1_1_2_E_r),
+        .w_in_valid(resp_0_1_2_E_v), .w_in_flit(resp_0_1_2_E_f), .w_in_ready(resp_0_1_2_E_r),
+        .w_out_valid(resp_1_1_2_W_v), .w_out_flit(resp_1_1_2_W_f), .w_out_ready(resp_1_1_2_W_r),
+        .u_in_valid(resp_1_1_1_D_v), .u_in_flit(resp_1_1_1_D_f), .u_in_ready(resp_1_1_1_D_r),
+        .u_out_valid(resp_1_1_2_U_v), .u_out_flit(resp_1_1_2_U_f), .u_out_ready(resp_1_1_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({38{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
+        .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
+        .l_out_valid(p16_resp_in_valid), .l_out_flit(p16_resp_in_flit), .l_out_ready(p16_resp_in_ready)
+    );
+
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(1), .MY_Y(2), .MY_Z(0)) req_r1_2_0 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(req_1_1_0_S_v), .n_in_flit(req_1_1_0_S_f), .n_in_ready(req_1_1_0_S_r),
+        .n_out_valid(req_1_2_0_N_v), .n_out_flit(req_1_2_0_N_f), .n_out_ready(req_1_2_0_N_r),
+        .s_in_valid(req_1_3_0_N_v), .s_in_flit(req_1_3_0_N_f), .s_in_ready(req_1_3_0_N_r),
+        .s_out_valid(req_1_2_0_S_v), .s_out_flit(req_1_2_0_S_f), .s_out_ready(req_1_2_0_S_r),
+        .e_in_valid(req_2_2_0_W_v), .e_in_flit(req_2_2_0_W_f), .e_in_ready(req_2_2_0_W_r),
+        .e_out_valid(req_1_2_0_E_v), .e_out_flit(req_1_2_0_E_f), .e_out_ready(req_1_2_0_E_r),
+        .w_in_valid(req_0_2_0_E_v), .w_in_flit(req_0_2_0_E_f), .w_in_ready(req_0_2_0_E_r),
+        .w_out_valid(req_1_2_0_W_v), .w_out_flit(req_1_2_0_W_f), .w_out_ready(req_1_2_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({80{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(req_1_2_1_U_v), .d_in_flit(req_1_2_1_U_f), .d_in_ready(req_1_2_1_U_r),
+        .d_out_valid(req_1_2_0_D_v), .d_out_flit(req_1_2_0_D_f), .d_out_ready(req_1_2_0_D_r),
+        .l_in_valid(p17_req_out_valid), .l_in_flit(p17_req_out_flit), .l_in_ready(p17_req_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
+    );
+
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(1), .MY_Y(2), .MY_Z(0)) resp_r1_2_0 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(resp_1_1_0_S_v), .n_in_flit(resp_1_1_0_S_f), .n_in_ready(resp_1_1_0_S_r),
+        .n_out_valid(resp_1_2_0_N_v), .n_out_flit(resp_1_2_0_N_f), .n_out_ready(resp_1_2_0_N_r),
+        .s_in_valid(resp_1_3_0_N_v), .s_in_flit(resp_1_3_0_N_f), .s_in_ready(resp_1_3_0_N_r),
+        .s_out_valid(resp_1_2_0_S_v), .s_out_flit(resp_1_2_0_S_f), .s_out_ready(resp_1_2_0_S_r),
+        .e_in_valid(resp_2_2_0_W_v), .e_in_flit(resp_2_2_0_W_f), .e_in_ready(resp_2_2_0_W_r),
+        .e_out_valid(resp_1_2_0_E_v), .e_out_flit(resp_1_2_0_E_f), .e_out_ready(resp_1_2_0_E_r),
+        .w_in_valid(resp_0_2_0_E_v), .w_in_flit(resp_0_2_0_E_f), .w_in_ready(resp_0_2_0_E_r),
+        .w_out_valid(resp_1_2_0_W_v), .w_out_flit(resp_1_2_0_W_f), .w_out_ready(resp_1_2_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({38{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(resp_1_2_1_U_v), .d_in_flit(resp_1_2_1_U_f), .d_in_ready(resp_1_2_1_U_r),
+        .d_out_valid(resp_1_2_0_D_v), .d_out_flit(resp_1_2_0_D_f), .d_out_ready(resp_1_2_0_D_r),
+        .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
+        .l_out_valid(p17_resp_in_valid), .l_out_flit(p17_resp_in_flit), .l_out_ready(p17_resp_in_ready)
+    );
+
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(1), .MY_Y(2), .MY_Z(1)) req_r1_2_1 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(req_1_1_1_S_v), .n_in_flit(req_1_1_1_S_f), .n_in_ready(req_1_1_1_S_r),
+        .n_out_valid(req_1_2_1_N_v), .n_out_flit(req_1_2_1_N_f), .n_out_ready(req_1_2_1_N_r),
+        .s_in_valid(req_1_3_1_N_v), .s_in_flit(req_1_3_1_N_f), .s_in_ready(req_1_3_1_N_r),
+        .s_out_valid(req_1_2_1_S_v), .s_out_flit(req_1_2_1_S_f), .s_out_ready(req_1_2_1_S_r),
+        .e_in_valid(req_2_2_1_W_v), .e_in_flit(req_2_2_1_W_f), .e_in_ready(req_2_2_1_W_r),
+        .e_out_valid(req_1_2_1_E_v), .e_out_flit(req_1_2_1_E_f), .e_out_ready(req_1_2_1_E_r),
+        .w_in_valid(req_0_2_1_E_v), .w_in_flit(req_0_2_1_E_f), .w_in_ready(req_0_2_1_E_r),
+        .w_out_valid(req_1_2_1_W_v), .w_out_flit(req_1_2_1_W_f), .w_out_ready(req_1_2_1_W_r),
+        .u_in_valid(req_1_2_0_D_v), .u_in_flit(req_1_2_0_D_f), .u_in_ready(req_1_2_0_D_r),
+        .u_out_valid(req_1_2_1_U_v), .u_out_flit(req_1_2_1_U_f), .u_out_ready(req_1_2_1_U_r),
+        .d_in_valid(req_1_2_2_U_v), .d_in_flit(req_1_2_2_U_f), .d_in_ready(req_1_2_2_U_r),
+        .d_out_valid(req_1_2_1_D_v), .d_out_flit(req_1_2_1_D_f), .d_out_ready(req_1_2_1_D_r),
         .l_in_valid(e0_req_out_valid), .l_in_flit(e0_req_out_flit), .l_in_ready(e0_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(3), .MY_Y(2)) resp_r32 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(1), .MY_Y(2), .MY_Z(1)) resp_r1_2_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_31_S_v), .n_in_flit(resp_31_S_f), .n_in_ready(resp_31_S_r),
-        .n_out_valid(resp_32_N_v), .n_out_flit(resp_32_N_f), .n_out_ready(resp_32_N_r),
-        .e_in_valid(resp_42_W_v), .e_in_flit(resp_42_W_f), .e_in_ready(resp_42_W_r),
-        .e_out_valid(resp_32_E_v), .e_out_flit(resp_32_E_f), .e_out_ready(resp_32_E_r),
-        .s_in_valid(resp_33_N_v), .s_in_flit(resp_33_N_f), .s_in_ready(resp_33_N_r),
-        .s_out_valid(resp_32_S_v), .s_out_flit(resp_32_S_f), .s_out_ready(resp_32_S_r),
-        .w_in_valid(resp_22_E_v), .w_in_flit(resp_22_E_f), .w_in_ready(resp_22_E_r),
-        .w_out_valid(resp_32_W_v), .w_out_flit(resp_32_W_f), .w_out_ready(resp_32_W_r),
+        .n_in_valid(resp_1_1_1_S_v), .n_in_flit(resp_1_1_1_S_f), .n_in_ready(resp_1_1_1_S_r),
+        .n_out_valid(resp_1_2_1_N_v), .n_out_flit(resp_1_2_1_N_f), .n_out_ready(resp_1_2_1_N_r),
+        .s_in_valid(resp_1_3_1_N_v), .s_in_flit(resp_1_3_1_N_f), .s_in_ready(resp_1_3_1_N_r),
+        .s_out_valid(resp_1_2_1_S_v), .s_out_flit(resp_1_2_1_S_f), .s_out_ready(resp_1_2_1_S_r),
+        .e_in_valid(resp_2_2_1_W_v), .e_in_flit(resp_2_2_1_W_f), .e_in_ready(resp_2_2_1_W_r),
+        .e_out_valid(resp_1_2_1_E_v), .e_out_flit(resp_1_2_1_E_f), .e_out_ready(resp_1_2_1_E_r),
+        .w_in_valid(resp_0_2_1_E_v), .w_in_flit(resp_0_2_1_E_f), .w_in_ready(resp_0_2_1_E_r),
+        .w_out_valid(resp_1_2_1_W_v), .w_out_flit(resp_1_2_1_W_f), .w_out_ready(resp_1_2_1_W_r),
+        .u_in_valid(resp_1_2_0_D_v), .u_in_flit(resp_1_2_0_D_f), .u_in_ready(resp_1_2_0_D_r),
+        .u_out_valid(resp_1_2_1_U_v), .u_out_flit(resp_1_2_1_U_f), .u_out_ready(resp_1_2_1_U_r),
+        .d_in_valid(resp_1_2_2_U_v), .d_in_flit(resp_1_2_2_U_f), .d_in_ready(resp_1_2_2_U_r),
+        .d_out_valid(resp_1_2_1_D_v), .d_out_flit(resp_1_2_1_D_f), .d_out_ready(resp_1_2_1_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(e0_resp_in_valid), .l_out_flit(e0_resp_in_flit), .l_out_ready(e0_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(4), .MY_Y(2)) req_r42 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(1), .MY_Y(2), .MY_Z(2)) req_r1_2_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_41_S_v), .n_in_flit(req_41_S_f), .n_in_ready(req_41_S_r),
-        .n_out_valid(req_42_N_v), .n_out_flit(req_42_N_f), .n_out_ready(req_42_N_r),
-        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
-        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
-        .s_in_valid(req_43_N_v), .s_in_flit(req_43_N_f), .s_in_ready(req_43_N_r),
-        .s_out_valid(req_42_S_v), .s_out_flit(req_42_S_f), .s_out_ready(req_42_S_r),
-        .w_in_valid(req_32_E_v), .w_in_flit(req_32_E_f), .w_in_ready(req_32_E_r),
-        .w_out_valid(req_42_W_v), .w_out_flit(req_42_W_f), .w_out_ready(req_42_W_r),
+        .n_in_valid(req_1_1_2_S_v), .n_in_flit(req_1_1_2_S_f), .n_in_ready(req_1_1_2_S_r),
+        .n_out_valid(req_1_2_2_N_v), .n_out_flit(req_1_2_2_N_f), .n_out_ready(req_1_2_2_N_r),
+        .s_in_valid(req_1_3_2_N_v), .s_in_flit(req_1_3_2_N_f), .s_in_ready(req_1_3_2_N_r),
+        .s_out_valid(req_1_2_2_S_v), .s_out_flit(req_1_2_2_S_f), .s_out_ready(req_1_2_2_S_r),
+        .e_in_valid(req_2_2_2_W_v), .e_in_flit(req_2_2_2_W_f), .e_in_ready(req_2_2_2_W_r),
+        .e_out_valid(req_1_2_2_E_v), .e_out_flit(req_1_2_2_E_f), .e_out_ready(req_1_2_2_E_r),
+        .w_in_valid(req_0_2_2_E_v), .w_in_flit(req_0_2_2_E_f), .w_in_ready(req_0_2_2_E_r),
+        .w_out_valid(req_1_2_2_W_v), .w_out_flit(req_1_2_2_W_f), .w_out_ready(req_1_2_2_W_r),
+        .u_in_valid(req_1_2_1_D_v), .u_in_flit(req_1_2_1_D_f), .u_in_ready(req_1_2_1_D_r),
+        .u_out_valid(req_1_2_2_U_v), .u_out_flit(req_1_2_2_U_f), .u_out_ready(req_1_2_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({80{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(e1_req_out_valid), .l_in_flit(e1_req_out_flit), .l_in_ready(e1_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(4), .MY_Y(2)) resp_r42 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(1), .MY_Y(2), .MY_Z(2)) resp_r1_2_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_41_S_v), .n_in_flit(resp_41_S_f), .n_in_ready(resp_41_S_r),
-        .n_out_valid(resp_42_N_v), .n_out_flit(resp_42_N_f), .n_out_ready(resp_42_N_r),
-        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
-        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
-        .s_in_valid(resp_43_N_v), .s_in_flit(resp_43_N_f), .s_in_ready(resp_43_N_r),
-        .s_out_valid(resp_42_S_v), .s_out_flit(resp_42_S_f), .s_out_ready(resp_42_S_r),
-        .w_in_valid(resp_32_E_v), .w_in_flit(resp_32_E_f), .w_in_ready(resp_32_E_r),
-        .w_out_valid(resp_42_W_v), .w_out_flit(resp_42_W_f), .w_out_ready(resp_42_W_r),
+        .n_in_valid(resp_1_1_2_S_v), .n_in_flit(resp_1_1_2_S_f), .n_in_ready(resp_1_1_2_S_r),
+        .n_out_valid(resp_1_2_2_N_v), .n_out_flit(resp_1_2_2_N_f), .n_out_ready(resp_1_2_2_N_r),
+        .s_in_valid(resp_1_3_2_N_v), .s_in_flit(resp_1_3_2_N_f), .s_in_ready(resp_1_3_2_N_r),
+        .s_out_valid(resp_1_2_2_S_v), .s_out_flit(resp_1_2_2_S_f), .s_out_ready(resp_1_2_2_S_r),
+        .e_in_valid(resp_2_2_2_W_v), .e_in_flit(resp_2_2_2_W_f), .e_in_ready(resp_2_2_2_W_r),
+        .e_out_valid(resp_1_2_2_E_v), .e_out_flit(resp_1_2_2_E_f), .e_out_ready(resp_1_2_2_E_r),
+        .w_in_valid(resp_0_2_2_E_v), .w_in_flit(resp_0_2_2_E_f), .w_in_ready(resp_0_2_2_E_r),
+        .w_out_valid(resp_1_2_2_W_v), .w_out_flit(resp_1_2_2_W_f), .w_out_ready(resp_1_2_2_W_r),
+        .u_in_valid(resp_1_2_1_D_v), .u_in_flit(resp_1_2_1_D_f), .u_in_ready(resp_1_2_1_D_r),
+        .u_out_valid(resp_1_2_2_U_v), .u_out_flit(resp_1_2_2_U_f), .u_out_ready(resp_1_2_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({38{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(e1_resp_in_valid), .l_out_flit(e1_resp_in_flit), .l_out_ready(e1_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(0), .MY_Y(3)) req_r03 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(1), .MY_Y(3), .MY_Z(0)) req_r1_3_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_02_S_v), .n_in_flit(req_02_S_f), .n_in_ready(req_02_S_r),
-        .n_out_valid(req_03_N_v), .n_out_flit(req_03_N_f), .n_out_ready(req_03_N_r),
-        .e_in_valid(req_13_W_v), .e_in_flit(req_13_W_f), .e_in_ready(req_13_W_r),
-        .e_out_valid(req_03_E_v), .e_out_flit(req_03_E_f), .e_out_ready(req_03_E_r),
-        .s_in_valid(req_04_N_v), .s_in_flit(req_04_N_f), .s_in_ready(req_04_N_r),
-        .s_out_valid(req_03_S_v), .s_out_flit(req_03_S_f), .s_out_ready(req_03_S_r),
-        .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
-        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .n_in_valid(req_1_2_0_S_v), .n_in_flit(req_1_2_0_S_f), .n_in_ready(req_1_2_0_S_r),
+        .n_out_valid(req_1_3_0_N_v), .n_out_flit(req_1_3_0_N_f), .n_out_ready(req_1_3_0_N_r),
+        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(req_2_3_0_W_v), .e_in_flit(req_2_3_0_W_f), .e_in_ready(req_2_3_0_W_r),
+        .e_out_valid(req_1_3_0_E_v), .e_out_flit(req_1_3_0_E_f), .e_out_ready(req_1_3_0_E_r),
+        .w_in_valid(req_0_3_0_E_v), .w_in_flit(req_0_3_0_E_f), .w_in_ready(req_0_3_0_E_r),
+        .w_out_valid(req_1_3_0_W_v), .w_out_flit(req_1_3_0_W_f), .w_out_ready(req_1_3_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({80{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(req_1_3_1_U_v), .d_in_flit(req_1_3_1_U_f), .d_in_ready(req_1_3_1_U_r),
+        .d_out_valid(req_1_3_0_D_v), .d_out_flit(req_1_3_0_D_f), .d_out_ready(req_1_3_0_D_r),
         .l_in_valid(e2_req_out_valid), .l_in_flit(e2_req_out_flit), .l_in_ready(e2_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(0), .MY_Y(3)) resp_r03 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(1), .MY_Y(3), .MY_Z(0)) resp_r1_3_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_02_S_v), .n_in_flit(resp_02_S_f), .n_in_ready(resp_02_S_r),
-        .n_out_valid(resp_03_N_v), .n_out_flit(resp_03_N_f), .n_out_ready(resp_03_N_r),
-        .e_in_valid(resp_13_W_v), .e_in_flit(resp_13_W_f), .e_in_ready(resp_13_W_r),
-        .e_out_valid(resp_03_E_v), .e_out_flit(resp_03_E_f), .e_out_ready(resp_03_E_r),
-        .s_in_valid(resp_04_N_v), .s_in_flit(resp_04_N_f), .s_in_ready(resp_04_N_r),
-        .s_out_valid(resp_03_S_v), .s_out_flit(resp_03_S_f), .s_out_ready(resp_03_S_r),
-        .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
-        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .n_in_valid(resp_1_2_0_S_v), .n_in_flit(resp_1_2_0_S_f), .n_in_ready(resp_1_2_0_S_r),
+        .n_out_valid(resp_1_3_0_N_v), .n_out_flit(resp_1_3_0_N_f), .n_out_ready(resp_1_3_0_N_r),
+        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(resp_2_3_0_W_v), .e_in_flit(resp_2_3_0_W_f), .e_in_ready(resp_2_3_0_W_r),
+        .e_out_valid(resp_1_3_0_E_v), .e_out_flit(resp_1_3_0_E_f), .e_out_ready(resp_1_3_0_E_r),
+        .w_in_valid(resp_0_3_0_E_v), .w_in_flit(resp_0_3_0_E_f), .w_in_ready(resp_0_3_0_E_r),
+        .w_out_valid(resp_1_3_0_W_v), .w_out_flit(resp_1_3_0_W_f), .w_out_ready(resp_1_3_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({38{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(resp_1_3_1_U_v), .d_in_flit(resp_1_3_1_U_f), .d_in_ready(resp_1_3_1_U_r),
+        .d_out_valid(resp_1_3_0_D_v), .d_out_flit(resp_1_3_0_D_f), .d_out_ready(resp_1_3_0_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(e2_resp_in_valid), .l_out_flit(e2_resp_in_flit), .l_out_ready(e2_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(1), .MY_Y(3)) req_r13 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(1), .MY_Y(3), .MY_Z(1)) req_r1_3_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_12_S_v), .n_in_flit(req_12_S_f), .n_in_ready(req_12_S_r),
-        .n_out_valid(req_13_N_v), .n_out_flit(req_13_N_f), .n_out_ready(req_13_N_r),
-        .e_in_valid(req_23_W_v), .e_in_flit(req_23_W_f), .e_in_ready(req_23_W_r),
-        .e_out_valid(req_13_E_v), .e_out_flit(req_13_E_f), .e_out_ready(req_13_E_r),
-        .s_in_valid(req_14_N_v), .s_in_flit(req_14_N_f), .s_in_ready(req_14_N_r),
-        .s_out_valid(req_13_S_v), .s_out_flit(req_13_S_f), .s_out_ready(req_13_S_r),
-        .w_in_valid(req_03_E_v), .w_in_flit(req_03_E_f), .w_in_ready(req_03_E_r),
-        .w_out_valid(req_13_W_v), .w_out_flit(req_13_W_f), .w_out_ready(req_13_W_r),
+        .n_in_valid(req_1_2_1_S_v), .n_in_flit(req_1_2_1_S_f), .n_in_ready(req_1_2_1_S_r),
+        .n_out_valid(req_1_3_1_N_v), .n_out_flit(req_1_3_1_N_f), .n_out_ready(req_1_3_1_N_r),
+        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(req_2_3_1_W_v), .e_in_flit(req_2_3_1_W_f), .e_in_ready(req_2_3_1_W_r),
+        .e_out_valid(req_1_3_1_E_v), .e_out_flit(req_1_3_1_E_f), .e_out_ready(req_1_3_1_E_r),
+        .w_in_valid(req_0_3_1_E_v), .w_in_flit(req_0_3_1_E_f), .w_in_ready(req_0_3_1_E_r),
+        .w_out_valid(req_1_3_1_W_v), .w_out_flit(req_1_3_1_W_f), .w_out_ready(req_1_3_1_W_r),
+        .u_in_valid(req_1_3_0_D_v), .u_in_flit(req_1_3_0_D_f), .u_in_ready(req_1_3_0_D_r),
+        .u_out_valid(req_1_3_1_U_v), .u_out_flit(req_1_3_1_U_f), .u_out_ready(req_1_3_1_U_r),
+        .d_in_valid(req_1_3_2_U_v), .d_in_flit(req_1_3_2_U_f), .d_in_ready(req_1_3_2_U_r),
+        .d_out_valid(req_1_3_1_D_v), .d_out_flit(req_1_3_1_D_f), .d_out_ready(req_1_3_1_D_r),
         .l_in_valid(e3_req_out_valid), .l_in_flit(e3_req_out_flit), .l_in_ready(e3_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(1), .MY_Y(3)) resp_r13 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(1), .MY_Y(3), .MY_Z(1)) resp_r1_3_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_12_S_v), .n_in_flit(resp_12_S_f), .n_in_ready(resp_12_S_r),
-        .n_out_valid(resp_13_N_v), .n_out_flit(resp_13_N_f), .n_out_ready(resp_13_N_r),
-        .e_in_valid(resp_23_W_v), .e_in_flit(resp_23_W_f), .e_in_ready(resp_23_W_r),
-        .e_out_valid(resp_13_E_v), .e_out_flit(resp_13_E_f), .e_out_ready(resp_13_E_r),
-        .s_in_valid(resp_14_N_v), .s_in_flit(resp_14_N_f), .s_in_ready(resp_14_N_r),
-        .s_out_valid(resp_13_S_v), .s_out_flit(resp_13_S_f), .s_out_ready(resp_13_S_r),
-        .w_in_valid(resp_03_E_v), .w_in_flit(resp_03_E_f), .w_in_ready(resp_03_E_r),
-        .w_out_valid(resp_13_W_v), .w_out_flit(resp_13_W_f), .w_out_ready(resp_13_W_r),
+        .n_in_valid(resp_1_2_1_S_v), .n_in_flit(resp_1_2_1_S_f), .n_in_ready(resp_1_2_1_S_r),
+        .n_out_valid(resp_1_3_1_N_v), .n_out_flit(resp_1_3_1_N_f), .n_out_ready(resp_1_3_1_N_r),
+        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(resp_2_3_1_W_v), .e_in_flit(resp_2_3_1_W_f), .e_in_ready(resp_2_3_1_W_r),
+        .e_out_valid(resp_1_3_1_E_v), .e_out_flit(resp_1_3_1_E_f), .e_out_ready(resp_1_3_1_E_r),
+        .w_in_valid(resp_0_3_1_E_v), .w_in_flit(resp_0_3_1_E_f), .w_in_ready(resp_0_3_1_E_r),
+        .w_out_valid(resp_1_3_1_W_v), .w_out_flit(resp_1_3_1_W_f), .w_out_ready(resp_1_3_1_W_r),
+        .u_in_valid(resp_1_3_0_D_v), .u_in_flit(resp_1_3_0_D_f), .u_in_ready(resp_1_3_0_D_r),
+        .u_out_valid(resp_1_3_1_U_v), .u_out_flit(resp_1_3_1_U_f), .u_out_ready(resp_1_3_1_U_r),
+        .d_in_valid(resp_1_3_2_U_v), .d_in_flit(resp_1_3_2_U_f), .d_in_ready(resp_1_3_2_U_r),
+        .d_out_valid(resp_1_3_1_D_v), .d_out_flit(resp_1_3_1_D_f), .d_out_ready(resp_1_3_1_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(e3_resp_in_valid), .l_out_flit(e3_resp_in_flit), .l_out_ready(e3_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(2), .MY_Y(3)) req_r23 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(1), .MY_Y(3), .MY_Z(2)) req_r1_3_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_22_S_v), .n_in_flit(req_22_S_f), .n_in_ready(req_22_S_r),
-        .n_out_valid(req_23_N_v), .n_out_flit(req_23_N_f), .n_out_ready(req_23_N_r),
-        .e_in_valid(req_33_W_v), .e_in_flit(req_33_W_f), .e_in_ready(req_33_W_r),
-        .e_out_valid(req_23_E_v), .e_out_flit(req_23_E_f), .e_out_ready(req_23_E_r),
-        .s_in_valid(req_24_N_v), .s_in_flit(req_24_N_f), .s_in_ready(req_24_N_r),
-        .s_out_valid(req_23_S_v), .s_out_flit(req_23_S_f), .s_out_ready(req_23_S_r),
-        .w_in_valid(req_13_E_v), .w_in_flit(req_13_E_f), .w_in_ready(req_13_E_r),
-        .w_out_valid(req_23_W_v), .w_out_flit(req_23_W_f), .w_out_ready(req_23_W_r),
+        .n_in_valid(req_1_2_2_S_v), .n_in_flit(req_1_2_2_S_f), .n_in_ready(req_1_2_2_S_r),
+        .n_out_valid(req_1_3_2_N_v), .n_out_flit(req_1_3_2_N_f), .n_out_ready(req_1_3_2_N_r),
+        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(req_2_3_2_W_v), .e_in_flit(req_2_3_2_W_f), .e_in_ready(req_2_3_2_W_r),
+        .e_out_valid(req_1_3_2_E_v), .e_out_flit(req_1_3_2_E_f), .e_out_ready(req_1_3_2_E_r),
+        .w_in_valid(req_0_3_2_E_v), .w_in_flit(req_0_3_2_E_f), .w_in_ready(req_0_3_2_E_r),
+        .w_out_valid(req_1_3_2_W_v), .w_out_flit(req_1_3_2_W_f), .w_out_ready(req_1_3_2_W_r),
+        .u_in_valid(req_1_3_1_D_v), .u_in_flit(req_1_3_1_D_f), .u_in_ready(req_1_3_1_D_r),
+        .u_out_valid(req_1_3_2_U_v), .u_out_flit(req_1_3_2_U_f), .u_out_ready(req_1_3_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({80{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(e4_req_out_valid), .l_in_flit(e4_req_out_flit), .l_in_ready(e4_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(2), .MY_Y(3)) resp_r23 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(1), .MY_Y(3), .MY_Z(2)) resp_r1_3_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_22_S_v), .n_in_flit(resp_22_S_f), .n_in_ready(resp_22_S_r),
-        .n_out_valid(resp_23_N_v), .n_out_flit(resp_23_N_f), .n_out_ready(resp_23_N_r),
-        .e_in_valid(resp_33_W_v), .e_in_flit(resp_33_W_f), .e_in_ready(resp_33_W_r),
-        .e_out_valid(resp_23_E_v), .e_out_flit(resp_23_E_f), .e_out_ready(resp_23_E_r),
-        .s_in_valid(resp_24_N_v), .s_in_flit(resp_24_N_f), .s_in_ready(resp_24_N_r),
-        .s_out_valid(resp_23_S_v), .s_out_flit(resp_23_S_f), .s_out_ready(resp_23_S_r),
-        .w_in_valid(resp_13_E_v), .w_in_flit(resp_13_E_f), .w_in_ready(resp_13_E_r),
-        .w_out_valid(resp_23_W_v), .w_out_flit(resp_23_W_f), .w_out_ready(resp_23_W_r),
+        .n_in_valid(resp_1_2_2_S_v), .n_in_flit(resp_1_2_2_S_f), .n_in_ready(resp_1_2_2_S_r),
+        .n_out_valid(resp_1_3_2_N_v), .n_out_flit(resp_1_3_2_N_f), .n_out_ready(resp_1_3_2_N_r),
+        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(resp_2_3_2_W_v), .e_in_flit(resp_2_3_2_W_f), .e_in_ready(resp_2_3_2_W_r),
+        .e_out_valid(resp_1_3_2_E_v), .e_out_flit(resp_1_3_2_E_f), .e_out_ready(resp_1_3_2_E_r),
+        .w_in_valid(resp_0_3_2_E_v), .w_in_flit(resp_0_3_2_E_f), .w_in_ready(resp_0_3_2_E_r),
+        .w_out_valid(resp_1_3_2_W_v), .w_out_flit(resp_1_3_2_W_f), .w_out_ready(resp_1_3_2_W_r),
+        .u_in_valid(resp_1_3_1_D_v), .u_in_flit(resp_1_3_1_D_f), .u_in_ready(resp_1_3_1_D_r),
+        .u_out_valid(resp_1_3_2_U_v), .u_out_flit(resp_1_3_2_U_f), .u_out_ready(resp_1_3_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({38{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(e4_resp_in_valid), .l_out_flit(e4_resp_in_flit), .l_out_ready(e4_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(3), .MY_Y(3)) req_r33 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(2), .MY_Y(0), .MY_Z(0)) req_r2_0_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_32_S_v), .n_in_flit(req_32_S_f), .n_in_ready(req_32_S_r),
-        .n_out_valid(req_33_N_v), .n_out_flit(req_33_N_f), .n_out_ready(req_33_N_r),
-        .e_in_valid(req_43_W_v), .e_in_flit(req_43_W_f), .e_in_ready(req_43_W_r),
-        .e_out_valid(req_33_E_v), .e_out_flit(req_33_E_f), .e_out_ready(req_33_E_r),
-        .s_in_valid(req_34_N_v), .s_in_flit(req_34_N_f), .s_in_ready(req_34_N_r),
-        .s_out_valid(req_33_S_v), .s_out_flit(req_33_S_f), .s_out_ready(req_33_S_r),
-        .w_in_valid(req_23_E_v), .w_in_flit(req_23_E_f), .w_in_ready(req_23_E_r),
-        .w_out_valid(req_33_W_v), .w_out_flit(req_33_W_f), .w_out_ready(req_33_W_r),
+        .n_in_valid(1'b0), .n_in_flit({80{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .s_in_valid(req_2_1_0_N_v), .s_in_flit(req_2_1_0_N_f), .s_in_ready(req_2_1_0_N_r),
+        .s_out_valid(req_2_0_0_S_v), .s_out_flit(req_2_0_0_S_f), .s_out_ready(req_2_0_0_S_r),
+        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(req_1_0_0_E_v), .w_in_flit(req_1_0_0_E_f), .w_in_ready(req_1_0_0_E_r),
+        .w_out_valid(req_2_0_0_W_v), .w_out_flit(req_2_0_0_W_f), .w_out_ready(req_2_0_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({80{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(req_2_0_1_U_v), .d_in_flit(req_2_0_1_U_f), .d_in_ready(req_2_0_1_U_r),
+        .d_out_valid(req_2_0_0_D_v), .d_out_flit(req_2_0_0_D_f), .d_out_ready(req_2_0_0_D_r),
         .l_in_valid(e5_req_out_valid), .l_in_flit(e5_req_out_flit), .l_in_ready(e5_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(3), .MY_Y(3)) resp_r33 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(2), .MY_Y(0), .MY_Z(0)) resp_r2_0_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_32_S_v), .n_in_flit(resp_32_S_f), .n_in_ready(resp_32_S_r),
-        .n_out_valid(resp_33_N_v), .n_out_flit(resp_33_N_f), .n_out_ready(resp_33_N_r),
-        .e_in_valid(resp_43_W_v), .e_in_flit(resp_43_W_f), .e_in_ready(resp_43_W_r),
-        .e_out_valid(resp_33_E_v), .e_out_flit(resp_33_E_f), .e_out_ready(resp_33_E_r),
-        .s_in_valid(resp_34_N_v), .s_in_flit(resp_34_N_f), .s_in_ready(resp_34_N_r),
-        .s_out_valid(resp_33_S_v), .s_out_flit(resp_33_S_f), .s_out_ready(resp_33_S_r),
-        .w_in_valid(resp_23_E_v), .w_in_flit(resp_23_E_f), .w_in_ready(resp_23_E_r),
-        .w_out_valid(resp_33_W_v), .w_out_flit(resp_33_W_f), .w_out_ready(resp_33_W_r),
+        .n_in_valid(1'b0), .n_in_flit({38{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .s_in_valid(resp_2_1_0_N_v), .s_in_flit(resp_2_1_0_N_f), .s_in_ready(resp_2_1_0_N_r),
+        .s_out_valid(resp_2_0_0_S_v), .s_out_flit(resp_2_0_0_S_f), .s_out_ready(resp_2_0_0_S_r),
+        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(resp_1_0_0_E_v), .w_in_flit(resp_1_0_0_E_f), .w_in_ready(resp_1_0_0_E_r),
+        .w_out_valid(resp_2_0_0_W_v), .w_out_flit(resp_2_0_0_W_f), .w_out_ready(resp_2_0_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({38{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(resp_2_0_1_U_v), .d_in_flit(resp_2_0_1_U_f), .d_in_ready(resp_2_0_1_U_r),
+        .d_out_valid(resp_2_0_0_D_v), .d_out_flit(resp_2_0_0_D_f), .d_out_ready(resp_2_0_0_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(e5_resp_in_valid), .l_out_flit(e5_resp_in_flit), .l_out_ready(e5_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(4), .MY_Y(3)) req_r43 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(2), .MY_Y(0), .MY_Z(1)) req_r2_0_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_42_S_v), .n_in_flit(req_42_S_f), .n_in_ready(req_42_S_r),
-        .n_out_valid(req_43_N_v), .n_out_flit(req_43_N_f), .n_out_ready(req_43_N_r),
+        .n_in_valid(1'b0), .n_in_flit({80{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .s_in_valid(req_2_1_1_N_v), .s_in_flit(req_2_1_1_N_f), .s_in_ready(req_2_1_1_N_r),
+        .s_out_valid(req_2_0_1_S_v), .s_out_flit(req_2_0_1_S_f), .s_out_ready(req_2_0_1_S_r),
         .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
         .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
-        .s_in_valid(req_44_N_v), .s_in_flit(req_44_N_f), .s_in_ready(req_44_N_r),
-        .s_out_valid(req_43_S_v), .s_out_flit(req_43_S_f), .s_out_ready(req_43_S_r),
-        .w_in_valid(req_33_E_v), .w_in_flit(req_33_E_f), .w_in_ready(req_33_E_r),
-        .w_out_valid(req_43_W_v), .w_out_flit(req_43_W_f), .w_out_ready(req_43_W_r),
+        .w_in_valid(req_1_0_1_E_v), .w_in_flit(req_1_0_1_E_f), .w_in_ready(req_1_0_1_E_r),
+        .w_out_valid(req_2_0_1_W_v), .w_out_flit(req_2_0_1_W_f), .w_out_ready(req_2_0_1_W_r),
+        .u_in_valid(req_2_0_0_D_v), .u_in_flit(req_2_0_0_D_f), .u_in_ready(req_2_0_0_D_r),
+        .u_out_valid(req_2_0_1_U_v), .u_out_flit(req_2_0_1_U_f), .u_out_ready(req_2_0_1_U_r),
+        .d_in_valid(req_2_0_2_U_v), .d_in_flit(req_2_0_2_U_f), .d_in_ready(req_2_0_2_U_r),
+        .d_out_valid(req_2_0_1_D_v), .d_out_flit(req_2_0_1_D_f), .d_out_ready(req_2_0_1_D_r),
         .l_in_valid(e6_req_out_valid), .l_in_flit(e6_req_out_flit), .l_in_ready(e6_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(4), .MY_Y(3)) resp_r43 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(2), .MY_Y(0), .MY_Z(1)) resp_r2_0_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_42_S_v), .n_in_flit(resp_42_S_f), .n_in_ready(resp_42_S_r),
-        .n_out_valid(resp_43_N_v), .n_out_flit(resp_43_N_f), .n_out_ready(resp_43_N_r),
+        .n_in_valid(1'b0), .n_in_flit({38{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .s_in_valid(resp_2_1_1_N_v), .s_in_flit(resp_2_1_1_N_f), .s_in_ready(resp_2_1_1_N_r),
+        .s_out_valid(resp_2_0_1_S_v), .s_out_flit(resp_2_0_1_S_f), .s_out_ready(resp_2_0_1_S_r),
         .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
         .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
-        .s_in_valid(resp_44_N_v), .s_in_flit(resp_44_N_f), .s_in_ready(resp_44_N_r),
-        .s_out_valid(resp_43_S_v), .s_out_flit(resp_43_S_f), .s_out_ready(resp_43_S_r),
-        .w_in_valid(resp_33_E_v), .w_in_flit(resp_33_E_f), .w_in_ready(resp_33_E_r),
-        .w_out_valid(resp_43_W_v), .w_out_flit(resp_43_W_f), .w_out_ready(resp_43_W_r),
+        .w_in_valid(resp_1_0_1_E_v), .w_in_flit(resp_1_0_1_E_f), .w_in_ready(resp_1_0_1_E_r),
+        .w_out_valid(resp_2_0_1_W_v), .w_out_flit(resp_2_0_1_W_f), .w_out_ready(resp_2_0_1_W_r),
+        .u_in_valid(resp_2_0_0_D_v), .u_in_flit(resp_2_0_0_D_f), .u_in_ready(resp_2_0_0_D_r),
+        .u_out_valid(resp_2_0_1_U_v), .u_out_flit(resp_2_0_1_U_f), .u_out_ready(resp_2_0_1_U_r),
+        .d_in_valid(resp_2_0_2_U_v), .d_in_flit(resp_2_0_2_U_f), .d_in_ready(resp_2_0_2_U_r),
+        .d_out_valid(resp_2_0_1_D_v), .d_out_flit(resp_2_0_1_D_f), .d_out_ready(resp_2_0_1_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(e6_resp_in_valid), .l_out_flit(e6_resp_in_flit), .l_out_ready(e6_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(0), .MY_Y(4)) req_r04 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(2), .MY_Y(0), .MY_Z(2)) req_r2_0_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_03_S_v), .n_in_flit(req_03_S_f), .n_in_ready(req_03_S_r),
-        .n_out_valid(req_04_N_v), .n_out_flit(req_04_N_f), .n_out_ready(req_04_N_r),
-        .e_in_valid(req_14_W_v), .e_in_flit(req_14_W_f), .e_in_ready(req_14_W_r),
-        .e_out_valid(req_04_E_v), .e_out_flit(req_04_E_f), .e_out_ready(req_04_E_r),
-        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
-        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
-        .w_in_valid(1'b0), .w_in_flit({80{1'b0}}), .w_in_ready(),
-        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .n_in_valid(1'b0), .n_in_flit({80{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .s_in_valid(req_2_1_2_N_v), .s_in_flit(req_2_1_2_N_f), .s_in_ready(req_2_1_2_N_r),
+        .s_out_valid(req_2_0_2_S_v), .s_out_flit(req_2_0_2_S_f), .s_out_ready(req_2_0_2_S_r),
+        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(req_1_0_2_E_v), .w_in_flit(req_1_0_2_E_f), .w_in_ready(req_1_0_2_E_r),
+        .w_out_valid(req_2_0_2_W_v), .w_out_flit(req_2_0_2_W_f), .w_out_ready(req_2_0_2_W_r),
+        .u_in_valid(req_2_0_1_D_v), .u_in_flit(req_2_0_1_D_f), .u_in_ready(req_2_0_1_D_r),
+        .u_out_valid(req_2_0_2_U_v), .u_out_flit(req_2_0_2_U_f), .u_out_ready(req_2_0_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({80{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(e7_req_out_valid), .l_in_flit(e7_req_out_flit), .l_in_ready(e7_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(0), .MY_Y(4)) resp_r04 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(2), .MY_Y(0), .MY_Z(2)) resp_r2_0_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_03_S_v), .n_in_flit(resp_03_S_f), .n_in_ready(resp_03_S_r),
-        .n_out_valid(resp_04_N_v), .n_out_flit(resp_04_N_f), .n_out_ready(resp_04_N_r),
-        .e_in_valid(resp_14_W_v), .e_in_flit(resp_14_W_f), .e_in_ready(resp_14_W_r),
-        .e_out_valid(resp_04_E_v), .e_out_flit(resp_04_E_f), .e_out_ready(resp_04_E_r),
-        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
-        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
-        .w_in_valid(1'b0), .w_in_flit({38{1'b0}}), .w_in_ready(),
-        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .n_in_valid(1'b0), .n_in_flit({38{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .s_in_valid(resp_2_1_2_N_v), .s_in_flit(resp_2_1_2_N_f), .s_in_ready(resp_2_1_2_N_r),
+        .s_out_valid(resp_2_0_2_S_v), .s_out_flit(resp_2_0_2_S_f), .s_out_ready(resp_2_0_2_S_r),
+        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(resp_1_0_2_E_v), .w_in_flit(resp_1_0_2_E_f), .w_in_ready(resp_1_0_2_E_r),
+        .w_out_valid(resp_2_0_2_W_v), .w_out_flit(resp_2_0_2_W_f), .w_out_ready(resp_2_0_2_W_r),
+        .u_in_valid(resp_2_0_1_D_v), .u_in_flit(resp_2_0_1_D_f), .u_in_ready(resp_2_0_1_D_r),
+        .u_out_valid(resp_2_0_2_U_v), .u_out_flit(resp_2_0_2_U_f), .u_out_ready(resp_2_0_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({38{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(e7_resp_in_valid), .l_out_flit(e7_resp_in_flit), .l_out_ready(e7_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(1), .MY_Y(4)) req_r14 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(2), .MY_Y(1), .MY_Z(0)) req_r2_1_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_13_S_v), .n_in_flit(req_13_S_f), .n_in_ready(req_13_S_r),
-        .n_out_valid(req_14_N_v), .n_out_flit(req_14_N_f), .n_out_ready(req_14_N_r),
-        .e_in_valid(req_24_W_v), .e_in_flit(req_24_W_f), .e_in_ready(req_24_W_r),
-        .e_out_valid(req_14_E_v), .e_out_flit(req_14_E_f), .e_out_ready(req_14_E_r),
-        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
-        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
-        .w_in_valid(req_04_E_v), .w_in_flit(req_04_E_f), .w_in_ready(req_04_E_r),
-        .w_out_valid(req_14_W_v), .w_out_flit(req_14_W_f), .w_out_ready(req_14_W_r),
+        .n_in_valid(req_2_0_0_S_v), .n_in_flit(req_2_0_0_S_f), .n_in_ready(req_2_0_0_S_r),
+        .n_out_valid(req_2_1_0_N_v), .n_out_flit(req_2_1_0_N_f), .n_out_ready(req_2_1_0_N_r),
+        .s_in_valid(req_2_2_0_N_v), .s_in_flit(req_2_2_0_N_f), .s_in_ready(req_2_2_0_N_r),
+        .s_out_valid(req_2_1_0_S_v), .s_out_flit(req_2_1_0_S_f), .s_out_ready(req_2_1_0_S_r),
+        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(req_1_1_0_E_v), .w_in_flit(req_1_1_0_E_f), .w_in_ready(req_1_1_0_E_r),
+        .w_out_valid(req_2_1_0_W_v), .w_out_flit(req_2_1_0_W_f), .w_out_ready(req_2_1_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({80{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(req_2_1_1_U_v), .d_in_flit(req_2_1_1_U_f), .d_in_ready(req_2_1_1_U_r),
+        .d_out_valid(req_2_1_0_D_v), .d_out_flit(req_2_1_0_D_f), .d_out_ready(req_2_1_0_D_r),
         .l_in_valid(e8_req_out_valid), .l_in_flit(e8_req_out_flit), .l_in_ready(e8_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(1), .MY_Y(4)) resp_r14 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(2), .MY_Y(1), .MY_Z(0)) resp_r2_1_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_13_S_v), .n_in_flit(resp_13_S_f), .n_in_ready(resp_13_S_r),
-        .n_out_valid(resp_14_N_v), .n_out_flit(resp_14_N_f), .n_out_ready(resp_14_N_r),
-        .e_in_valid(resp_24_W_v), .e_in_flit(resp_24_W_f), .e_in_ready(resp_24_W_r),
-        .e_out_valid(resp_14_E_v), .e_out_flit(resp_14_E_f), .e_out_ready(resp_14_E_r),
-        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
-        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
-        .w_in_valid(resp_04_E_v), .w_in_flit(resp_04_E_f), .w_in_ready(resp_04_E_r),
-        .w_out_valid(resp_14_W_v), .w_out_flit(resp_14_W_f), .w_out_ready(resp_14_W_r),
+        .n_in_valid(resp_2_0_0_S_v), .n_in_flit(resp_2_0_0_S_f), .n_in_ready(resp_2_0_0_S_r),
+        .n_out_valid(resp_2_1_0_N_v), .n_out_flit(resp_2_1_0_N_f), .n_out_ready(resp_2_1_0_N_r),
+        .s_in_valid(resp_2_2_0_N_v), .s_in_flit(resp_2_2_0_N_f), .s_in_ready(resp_2_2_0_N_r),
+        .s_out_valid(resp_2_1_0_S_v), .s_out_flit(resp_2_1_0_S_f), .s_out_ready(resp_2_1_0_S_r),
+        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(resp_1_1_0_E_v), .w_in_flit(resp_1_1_0_E_f), .w_in_ready(resp_1_1_0_E_r),
+        .w_out_valid(resp_2_1_0_W_v), .w_out_flit(resp_2_1_0_W_f), .w_out_ready(resp_2_1_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({38{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(resp_2_1_1_U_v), .d_in_flit(resp_2_1_1_U_f), .d_in_ready(resp_2_1_1_U_r),
+        .d_out_valid(resp_2_1_0_D_v), .d_out_flit(resp_2_1_0_D_f), .d_out_ready(resp_2_1_0_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(e8_resp_in_valid), .l_out_flit(e8_resp_in_flit), .l_out_ready(e8_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(2), .MY_Y(4)) req_r24 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(2), .MY_Y(1), .MY_Z(1)) req_r2_1_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_23_S_v), .n_in_flit(req_23_S_f), .n_in_ready(req_23_S_r),
-        .n_out_valid(req_24_N_v), .n_out_flit(req_24_N_f), .n_out_ready(req_24_N_r),
-        .e_in_valid(req_34_W_v), .e_in_flit(req_34_W_f), .e_in_ready(req_34_W_r),
-        .e_out_valid(req_24_E_v), .e_out_flit(req_24_E_f), .e_out_ready(req_24_E_r),
-        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
-        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
-        .w_in_valid(req_14_E_v), .w_in_flit(req_14_E_f), .w_in_ready(req_14_E_r),
-        .w_out_valid(req_24_W_v), .w_out_flit(req_24_W_f), .w_out_ready(req_24_W_r),
+        .n_in_valid(req_2_0_1_S_v), .n_in_flit(req_2_0_1_S_f), .n_in_ready(req_2_0_1_S_r),
+        .n_out_valid(req_2_1_1_N_v), .n_out_flit(req_2_1_1_N_f), .n_out_ready(req_2_1_1_N_r),
+        .s_in_valid(req_2_2_1_N_v), .s_in_flit(req_2_2_1_N_f), .s_in_ready(req_2_2_1_N_r),
+        .s_out_valid(req_2_1_1_S_v), .s_out_flit(req_2_1_1_S_f), .s_out_ready(req_2_1_1_S_r),
+        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(req_1_1_1_E_v), .w_in_flit(req_1_1_1_E_f), .w_in_ready(req_1_1_1_E_r),
+        .w_out_valid(req_2_1_1_W_v), .w_out_flit(req_2_1_1_W_f), .w_out_ready(req_2_1_1_W_r),
+        .u_in_valid(req_2_1_0_D_v), .u_in_flit(req_2_1_0_D_f), .u_in_ready(req_2_1_0_D_r),
+        .u_out_valid(req_2_1_1_U_v), .u_out_flit(req_2_1_1_U_f), .u_out_ready(req_2_1_1_U_r),
+        .d_in_valid(req_2_1_2_U_v), .d_in_flit(req_2_1_2_U_f), .d_in_ready(req_2_1_2_U_r),
+        .d_out_valid(req_2_1_1_D_v), .d_out_flit(req_2_1_1_D_f), .d_out_ready(req_2_1_1_D_r),
         .l_in_valid(e9_req_out_valid), .l_in_flit(e9_req_out_flit), .l_in_ready(e9_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(2), .MY_Y(4)) resp_r24 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(2), .MY_Y(1), .MY_Z(1)) resp_r2_1_1 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_23_S_v), .n_in_flit(resp_23_S_f), .n_in_ready(resp_23_S_r),
-        .n_out_valid(resp_24_N_v), .n_out_flit(resp_24_N_f), .n_out_ready(resp_24_N_r),
-        .e_in_valid(resp_34_W_v), .e_in_flit(resp_34_W_f), .e_in_ready(resp_34_W_r),
-        .e_out_valid(resp_24_E_v), .e_out_flit(resp_24_E_f), .e_out_ready(resp_24_E_r),
-        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
-        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
-        .w_in_valid(resp_14_E_v), .w_in_flit(resp_14_E_f), .w_in_ready(resp_14_E_r),
-        .w_out_valid(resp_24_W_v), .w_out_flit(resp_24_W_f), .w_out_ready(resp_24_W_r),
+        .n_in_valid(resp_2_0_1_S_v), .n_in_flit(resp_2_0_1_S_f), .n_in_ready(resp_2_0_1_S_r),
+        .n_out_valid(resp_2_1_1_N_v), .n_out_flit(resp_2_1_1_N_f), .n_out_ready(resp_2_1_1_N_r),
+        .s_in_valid(resp_2_2_1_N_v), .s_in_flit(resp_2_2_1_N_f), .s_in_ready(resp_2_2_1_N_r),
+        .s_out_valid(resp_2_1_1_S_v), .s_out_flit(resp_2_1_1_S_f), .s_out_ready(resp_2_1_1_S_r),
+        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(resp_1_1_1_E_v), .w_in_flit(resp_1_1_1_E_f), .w_in_ready(resp_1_1_1_E_r),
+        .w_out_valid(resp_2_1_1_W_v), .w_out_flit(resp_2_1_1_W_f), .w_out_ready(resp_2_1_1_W_r),
+        .u_in_valid(resp_2_1_0_D_v), .u_in_flit(resp_2_1_0_D_f), .u_in_ready(resp_2_1_0_D_r),
+        .u_out_valid(resp_2_1_1_U_v), .u_out_flit(resp_2_1_1_U_f), .u_out_ready(resp_2_1_1_U_r),
+        .d_in_valid(resp_2_1_2_U_v), .d_in_flit(resp_2_1_2_U_f), .d_in_ready(resp_2_1_2_U_r),
+        .d_out_valid(resp_2_1_1_D_v), .d_out_flit(resp_2_1_1_D_f), .d_out_ready(resp_2_1_1_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(e9_resp_in_valid), .l_out_flit(e9_resp_in_flit), .l_out_ready(e9_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(3), .MY_Y(4)) req_r34 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(2), .MY_Y(1), .MY_Z(2)) req_r2_1_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_33_S_v), .n_in_flit(req_33_S_f), .n_in_ready(req_33_S_r),
-        .n_out_valid(req_34_N_v), .n_out_flit(req_34_N_f), .n_out_ready(req_34_N_r),
-        .e_in_valid(req_44_W_v), .e_in_flit(req_44_W_f), .e_in_ready(req_44_W_r),
-        .e_out_valid(req_34_E_v), .e_out_flit(req_34_E_f), .e_out_ready(req_34_E_r),
-        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
-        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
-        .w_in_valid(req_24_E_v), .w_in_flit(req_24_E_f), .w_in_ready(req_24_E_r),
-        .w_out_valid(req_34_W_v), .w_out_flit(req_34_W_f), .w_out_ready(req_34_W_r),
+        .n_in_valid(req_2_0_2_S_v), .n_in_flit(req_2_0_2_S_f), .n_in_ready(req_2_0_2_S_r),
+        .n_out_valid(req_2_1_2_N_v), .n_out_flit(req_2_1_2_N_f), .n_out_ready(req_2_1_2_N_r),
+        .s_in_valid(req_2_2_2_N_v), .s_in_flit(req_2_2_2_N_f), .s_in_ready(req_2_2_2_N_r),
+        .s_out_valid(req_2_1_2_S_v), .s_out_flit(req_2_1_2_S_f), .s_out_ready(req_2_1_2_S_r),
+        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(req_1_1_2_E_v), .w_in_flit(req_1_1_2_E_f), .w_in_ready(req_1_1_2_E_r),
+        .w_out_valid(req_2_1_2_W_v), .w_out_flit(req_2_1_2_W_f), .w_out_ready(req_2_1_2_W_r),
+        .u_in_valid(req_2_1_1_D_v), .u_in_flit(req_2_1_1_D_f), .u_in_ready(req_2_1_1_D_r),
+        .u_out_valid(req_2_1_2_U_v), .u_out_flit(req_2_1_2_U_f), .u_out_ready(req_2_1_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({80{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(e10_req_out_valid), .l_in_flit(e10_req_out_flit), .l_in_ready(e10_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(3), .MY_Y(4)) resp_r34 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(2), .MY_Y(1), .MY_Z(2)) resp_r2_1_2 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_33_S_v), .n_in_flit(resp_33_S_f), .n_in_ready(resp_33_S_r),
-        .n_out_valid(resp_34_N_v), .n_out_flit(resp_34_N_f), .n_out_ready(resp_34_N_r),
-        .e_in_valid(resp_44_W_v), .e_in_flit(resp_44_W_f), .e_in_ready(resp_44_W_r),
-        .e_out_valid(resp_34_E_v), .e_out_flit(resp_34_E_f), .e_out_ready(resp_34_E_r),
-        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
-        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
-        .w_in_valid(resp_24_E_v), .w_in_flit(resp_24_E_f), .w_in_ready(resp_24_E_r),
-        .w_out_valid(resp_34_W_v), .w_out_flit(resp_34_W_f), .w_out_ready(resp_34_W_r),
+        .n_in_valid(resp_2_0_2_S_v), .n_in_flit(resp_2_0_2_S_f), .n_in_ready(resp_2_0_2_S_r),
+        .n_out_valid(resp_2_1_2_N_v), .n_out_flit(resp_2_1_2_N_f), .n_out_ready(resp_2_1_2_N_r),
+        .s_in_valid(resp_2_2_2_N_v), .s_in_flit(resp_2_2_2_N_f), .s_in_ready(resp_2_2_2_N_r),
+        .s_out_valid(resp_2_1_2_S_v), .s_out_flit(resp_2_1_2_S_f), .s_out_ready(resp_2_1_2_S_r),
+        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(resp_1_1_2_E_v), .w_in_flit(resp_1_1_2_E_f), .w_in_ready(resp_1_1_2_E_r),
+        .w_out_valid(resp_2_1_2_W_v), .w_out_flit(resp_2_1_2_W_f), .w_out_ready(resp_2_1_2_W_r),
+        .u_in_valid(resp_2_1_1_D_v), .u_in_flit(resp_2_1_1_D_f), .u_in_ready(resp_2_1_1_D_r),
+        .u_out_valid(resp_2_1_2_U_v), .u_out_flit(resp_2_1_2_U_f), .u_out_ready(resp_2_1_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({38{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(e10_resp_in_valid), .l_out_flit(e10_resp_in_flit), .l_out_ready(e10_resp_in_ready)
     );
 
-    router #(.FLIT_WIDTH(80), .COORD_BITS(3), .MY_X(4), .MY_Y(4)) req_r44 (
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(2), .MY_Y(2), .MY_Z(0)) req_r2_2_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(req_43_S_v), .n_in_flit(req_43_S_f), .n_in_ready(req_43_S_r),
-        .n_out_valid(req_44_N_v), .n_out_flit(req_44_N_f), .n_out_ready(req_44_N_r),
+        .n_in_valid(req_2_1_0_S_v), .n_in_flit(req_2_1_0_S_f), .n_in_ready(req_2_1_0_S_r),
+        .n_out_valid(req_2_2_0_N_v), .n_out_flit(req_2_2_0_N_f), .n_out_ready(req_2_2_0_N_r),
+        .s_in_valid(req_2_3_0_N_v), .s_in_flit(req_2_3_0_N_f), .s_in_ready(req_2_3_0_N_r),
+        .s_out_valid(req_2_2_0_S_v), .s_out_flit(req_2_2_0_S_f), .s_out_ready(req_2_2_0_S_r),
         .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
         .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
-        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
-        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
-        .w_in_valid(req_34_E_v), .w_in_flit(req_34_E_f), .w_in_ready(req_34_E_r),
-        .w_out_valid(req_44_W_v), .w_out_flit(req_44_W_f), .w_out_ready(req_44_W_r),
+        .w_in_valid(req_1_2_0_E_v), .w_in_flit(req_1_2_0_E_f), .w_in_ready(req_1_2_0_E_r),
+        .w_out_valid(req_2_2_0_W_v), .w_out_flit(req_2_2_0_W_f), .w_out_ready(req_2_2_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({80{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(req_2_2_1_U_v), .d_in_flit(req_2_2_1_U_f), .d_in_ready(req_2_2_1_U_r),
+        .d_out_valid(req_2_2_0_D_v), .d_out_flit(req_2_2_0_D_f), .d_out_ready(req_2_2_0_D_r),
         .l_in_valid(e11_req_out_valid), .l_in_flit(e11_req_out_flit), .l_in_ready(e11_req_out_ready),
         .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
     );
 
-    router #(.FLIT_WIDTH(38), .COORD_BITS(3), .MY_X(4), .MY_Y(4)) resp_r44 (
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(2), .MY_Y(2), .MY_Z(0)) resp_r2_2_0 (
         .clk(clk), .reset(reset),
-        .n_in_valid(resp_43_S_v), .n_in_flit(resp_43_S_f), .n_in_ready(resp_43_S_r),
-        .n_out_valid(resp_44_N_v), .n_out_flit(resp_44_N_f), .n_out_ready(resp_44_N_r),
+        .n_in_valid(resp_2_1_0_S_v), .n_in_flit(resp_2_1_0_S_f), .n_in_ready(resp_2_1_0_S_r),
+        .n_out_valid(resp_2_2_0_N_v), .n_out_flit(resp_2_2_0_N_f), .n_out_ready(resp_2_2_0_N_r),
+        .s_in_valid(resp_2_3_0_N_v), .s_in_flit(resp_2_3_0_N_f), .s_in_ready(resp_2_3_0_N_r),
+        .s_out_valid(resp_2_2_0_S_v), .s_out_flit(resp_2_2_0_S_f), .s_out_ready(resp_2_2_0_S_r),
         .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
         .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
-        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
-        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
-        .w_in_valid(resp_34_E_v), .w_in_flit(resp_34_E_f), .w_in_ready(resp_34_E_r),
-        .w_out_valid(resp_44_W_v), .w_out_flit(resp_44_W_f), .w_out_ready(resp_44_W_r),
+        .w_in_valid(resp_1_2_0_E_v), .w_in_flit(resp_1_2_0_E_f), .w_in_ready(resp_1_2_0_E_r),
+        .w_out_valid(resp_2_2_0_W_v), .w_out_flit(resp_2_2_0_W_f), .w_out_ready(resp_2_2_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({38{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(resp_2_2_1_U_v), .d_in_flit(resp_2_2_1_U_f), .d_in_ready(resp_2_2_1_U_r),
+        .d_out_valid(resp_2_2_0_D_v), .d_out_flit(resp_2_2_0_D_f), .d_out_ready(resp_2_2_0_D_r),
         .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
         .l_out_valid(e11_resp_in_valid), .l_out_flit(e11_resp_in_flit), .l_out_ready(e11_resp_in_ready)
+    );
+
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(2), .MY_Y(2), .MY_Z(1)) req_r2_2_1 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(req_2_1_1_S_v), .n_in_flit(req_2_1_1_S_f), .n_in_ready(req_2_1_1_S_r),
+        .n_out_valid(req_2_2_1_N_v), .n_out_flit(req_2_2_1_N_f), .n_out_ready(req_2_2_1_N_r),
+        .s_in_valid(req_2_3_1_N_v), .s_in_flit(req_2_3_1_N_f), .s_in_ready(req_2_3_1_N_r),
+        .s_out_valid(req_2_2_1_S_v), .s_out_flit(req_2_2_1_S_f), .s_out_ready(req_2_2_1_S_r),
+        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(req_1_2_1_E_v), .w_in_flit(req_1_2_1_E_f), .w_in_ready(req_1_2_1_E_r),
+        .w_out_valid(req_2_2_1_W_v), .w_out_flit(req_2_2_1_W_f), .w_out_ready(req_2_2_1_W_r),
+        .u_in_valid(req_2_2_0_D_v), .u_in_flit(req_2_2_0_D_f), .u_in_ready(req_2_2_0_D_r),
+        .u_out_valid(req_2_2_1_U_v), .u_out_flit(req_2_2_1_U_f), .u_out_ready(req_2_2_1_U_r),
+        .d_in_valid(req_2_2_2_U_v), .d_in_flit(req_2_2_2_U_f), .d_in_ready(req_2_2_2_U_r),
+        .d_out_valid(req_2_2_1_D_v), .d_out_flit(req_2_2_1_D_f), .d_out_ready(req_2_2_1_D_r),
+        .l_in_valid(e12_req_out_valid), .l_in_flit(e12_req_out_flit), .l_in_ready(e12_req_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
+    );
+
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(2), .MY_Y(2), .MY_Z(1)) resp_r2_2_1 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(resp_2_1_1_S_v), .n_in_flit(resp_2_1_1_S_f), .n_in_ready(resp_2_1_1_S_r),
+        .n_out_valid(resp_2_2_1_N_v), .n_out_flit(resp_2_2_1_N_f), .n_out_ready(resp_2_2_1_N_r),
+        .s_in_valid(resp_2_3_1_N_v), .s_in_flit(resp_2_3_1_N_f), .s_in_ready(resp_2_3_1_N_r),
+        .s_out_valid(resp_2_2_1_S_v), .s_out_flit(resp_2_2_1_S_f), .s_out_ready(resp_2_2_1_S_r),
+        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(resp_1_2_1_E_v), .w_in_flit(resp_1_2_1_E_f), .w_in_ready(resp_1_2_1_E_r),
+        .w_out_valid(resp_2_2_1_W_v), .w_out_flit(resp_2_2_1_W_f), .w_out_ready(resp_2_2_1_W_r),
+        .u_in_valid(resp_2_2_0_D_v), .u_in_flit(resp_2_2_0_D_f), .u_in_ready(resp_2_2_0_D_r),
+        .u_out_valid(resp_2_2_1_U_v), .u_out_flit(resp_2_2_1_U_f), .u_out_ready(resp_2_2_1_U_r),
+        .d_in_valid(resp_2_2_2_U_v), .d_in_flit(resp_2_2_2_U_f), .d_in_ready(resp_2_2_2_U_r),
+        .d_out_valid(resp_2_2_1_D_v), .d_out_flit(resp_2_2_1_D_f), .d_out_ready(resp_2_2_1_D_r),
+        .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
+        .l_out_valid(e12_resp_in_valid), .l_out_flit(e12_resp_in_flit), .l_out_ready(e12_resp_in_ready)
+    );
+
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(2), .MY_Y(2), .MY_Z(2)) req_r2_2_2 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(req_2_1_2_S_v), .n_in_flit(req_2_1_2_S_f), .n_in_ready(req_2_1_2_S_r),
+        .n_out_valid(req_2_2_2_N_v), .n_out_flit(req_2_2_2_N_f), .n_out_ready(req_2_2_2_N_r),
+        .s_in_valid(req_2_3_2_N_v), .s_in_flit(req_2_3_2_N_f), .s_in_ready(req_2_3_2_N_r),
+        .s_out_valid(req_2_2_2_S_v), .s_out_flit(req_2_2_2_S_f), .s_out_ready(req_2_2_2_S_r),
+        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(req_1_2_2_E_v), .w_in_flit(req_1_2_2_E_f), .w_in_ready(req_1_2_2_E_r),
+        .w_out_valid(req_2_2_2_W_v), .w_out_flit(req_2_2_2_W_f), .w_out_ready(req_2_2_2_W_r),
+        .u_in_valid(req_2_2_1_D_v), .u_in_flit(req_2_2_1_D_f), .u_in_ready(req_2_2_1_D_r),
+        .u_out_valid(req_2_2_2_U_v), .u_out_flit(req_2_2_2_U_f), .u_out_ready(req_2_2_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({80{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
+        .l_in_valid(e13_req_out_valid), .l_in_flit(e13_req_out_flit), .l_in_ready(e13_req_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
+    );
+
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(2), .MY_Y(2), .MY_Z(2)) resp_r2_2_2 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(resp_2_1_2_S_v), .n_in_flit(resp_2_1_2_S_f), .n_in_ready(resp_2_1_2_S_r),
+        .n_out_valid(resp_2_2_2_N_v), .n_out_flit(resp_2_2_2_N_f), .n_out_ready(resp_2_2_2_N_r),
+        .s_in_valid(resp_2_3_2_N_v), .s_in_flit(resp_2_3_2_N_f), .s_in_ready(resp_2_3_2_N_r),
+        .s_out_valid(resp_2_2_2_S_v), .s_out_flit(resp_2_2_2_S_f), .s_out_ready(resp_2_2_2_S_r),
+        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(resp_1_2_2_E_v), .w_in_flit(resp_1_2_2_E_f), .w_in_ready(resp_1_2_2_E_r),
+        .w_out_valid(resp_2_2_2_W_v), .w_out_flit(resp_2_2_2_W_f), .w_out_ready(resp_2_2_2_W_r),
+        .u_in_valid(resp_2_2_1_D_v), .u_in_flit(resp_2_2_1_D_f), .u_in_ready(resp_2_2_1_D_r),
+        .u_out_valid(resp_2_2_2_U_v), .u_out_flit(resp_2_2_2_U_f), .u_out_ready(resp_2_2_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({38{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
+        .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
+        .l_out_valid(e13_resp_in_valid), .l_out_flit(e13_resp_in_flit), .l_out_ready(e13_resp_in_ready)
+    );
+
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(2), .MY_Y(3), .MY_Z(0)) req_r2_3_0 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(req_2_2_0_S_v), .n_in_flit(req_2_2_0_S_f), .n_in_ready(req_2_2_0_S_r),
+        .n_out_valid(req_2_3_0_N_v), .n_out_flit(req_2_3_0_N_f), .n_out_ready(req_2_3_0_N_r),
+        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(req_1_3_0_E_v), .w_in_flit(req_1_3_0_E_f), .w_in_ready(req_1_3_0_E_r),
+        .w_out_valid(req_2_3_0_W_v), .w_out_flit(req_2_3_0_W_f), .w_out_ready(req_2_3_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({80{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(req_2_3_1_U_v), .d_in_flit(req_2_3_1_U_f), .d_in_ready(req_2_3_1_U_r),
+        .d_out_valid(req_2_3_0_D_v), .d_out_flit(req_2_3_0_D_f), .d_out_ready(req_2_3_0_D_r),
+        .l_in_valid(e14_req_out_valid), .l_in_flit(e14_req_out_flit), .l_in_ready(e14_req_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
+    );
+
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(2), .MY_Y(3), .MY_Z(0)) resp_r2_3_0 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(resp_2_2_0_S_v), .n_in_flit(resp_2_2_0_S_f), .n_in_ready(resp_2_2_0_S_r),
+        .n_out_valid(resp_2_3_0_N_v), .n_out_flit(resp_2_3_0_N_f), .n_out_ready(resp_2_3_0_N_r),
+        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(resp_1_3_0_E_v), .w_in_flit(resp_1_3_0_E_f), .w_in_ready(resp_1_3_0_E_r),
+        .w_out_valid(resp_2_3_0_W_v), .w_out_flit(resp_2_3_0_W_f), .w_out_ready(resp_2_3_0_W_r),
+        .u_in_valid(1'b0), .u_in_flit({38{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(resp_2_3_1_U_v), .d_in_flit(resp_2_3_1_U_f), .d_in_ready(resp_2_3_1_U_r),
+        .d_out_valid(resp_2_3_0_D_v), .d_out_flit(resp_2_3_0_D_f), .d_out_ready(resp_2_3_0_D_r),
+        .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
+        .l_out_valid(e14_resp_in_valid), .l_out_flit(e14_resp_in_flit), .l_out_ready(e14_resp_in_ready)
+    );
+
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(2), .MY_Y(3), .MY_Z(1)) req_r2_3_1 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(req_2_2_1_S_v), .n_in_flit(req_2_2_1_S_f), .n_in_ready(req_2_2_1_S_r),
+        .n_out_valid(req_2_3_1_N_v), .n_out_flit(req_2_3_1_N_f), .n_out_ready(req_2_3_1_N_r),
+        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(req_1_3_1_E_v), .w_in_flit(req_1_3_1_E_f), .w_in_ready(req_1_3_1_E_r),
+        .w_out_valid(req_2_3_1_W_v), .w_out_flit(req_2_3_1_W_f), .w_out_ready(req_2_3_1_W_r),
+        .u_in_valid(req_2_3_0_D_v), .u_in_flit(req_2_3_0_D_f), .u_in_ready(req_2_3_0_D_r),
+        .u_out_valid(req_2_3_1_U_v), .u_out_flit(req_2_3_1_U_f), .u_out_ready(req_2_3_1_U_r),
+        .d_in_valid(req_2_3_2_U_v), .d_in_flit(req_2_3_2_U_f), .d_in_ready(req_2_3_2_U_r),
+        .d_out_valid(req_2_3_1_D_v), .d_out_flit(req_2_3_1_D_f), .d_out_ready(req_2_3_1_D_r),
+        .l_in_valid(e15_req_out_valid), .l_in_flit(e15_req_out_flit), .l_in_ready(e15_req_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
+    );
+
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(2), .MY_Y(3), .MY_Z(1)) resp_r2_3_1 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(resp_2_2_1_S_v), .n_in_flit(resp_2_2_1_S_f), .n_in_ready(resp_2_2_1_S_r),
+        .n_out_valid(resp_2_3_1_N_v), .n_out_flit(resp_2_3_1_N_f), .n_out_ready(resp_2_3_1_N_r),
+        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(resp_1_3_1_E_v), .w_in_flit(resp_1_3_1_E_f), .w_in_ready(resp_1_3_1_E_r),
+        .w_out_valid(resp_2_3_1_W_v), .w_out_flit(resp_2_3_1_W_f), .w_out_ready(resp_2_3_1_W_r),
+        .u_in_valid(resp_2_3_0_D_v), .u_in_flit(resp_2_3_0_D_f), .u_in_ready(resp_2_3_0_D_r),
+        .u_out_valid(resp_2_3_1_U_v), .u_out_flit(resp_2_3_1_U_f), .u_out_ready(resp_2_3_1_U_r),
+        .d_in_valid(resp_2_3_2_U_v), .d_in_flit(resp_2_3_2_U_f), .d_in_ready(resp_2_3_2_U_r),
+        .d_out_valid(resp_2_3_1_D_v), .d_out_flit(resp_2_3_1_D_f), .d_out_ready(resp_2_3_1_D_r),
+        .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
+        .l_out_valid(e15_resp_in_valid), .l_out_flit(e15_resp_in_flit), .l_out_ready(e15_resp_in_ready)
+    );
+
+    router #(.FLIT_WIDTH(80), .COORD_BITS(2), .MY_X(2), .MY_Y(3), .MY_Z(2)) req_r2_3_2 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(req_2_2_2_S_v), .n_in_flit(req_2_2_2_S_f), .n_in_ready(req_2_2_2_S_r),
+        .n_out_valid(req_2_3_2_N_v), .n_out_flit(req_2_3_2_N_f), .n_out_ready(req_2_3_2_N_r),
+        .s_in_valid(1'b0), .s_in_flit({80{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(1'b0), .e_in_flit({80{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(req_1_3_2_E_v), .w_in_flit(req_1_3_2_E_f), .w_in_ready(req_1_3_2_E_r),
+        .w_out_valid(req_2_3_2_W_v), .w_out_flit(req_2_3_2_W_f), .w_out_ready(req_2_3_2_W_r),
+        .u_in_valid(req_2_3_1_D_v), .u_in_flit(req_2_3_1_D_f), .u_in_ready(req_2_3_1_D_r),
+        .u_out_valid(req_2_3_2_U_v), .u_out_flit(req_2_3_2_U_f), .u_out_ready(req_2_3_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({80{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
+        .l_in_valid(e16_req_out_valid), .l_in_flit(e16_req_out_flit), .l_in_ready(e16_req_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0)
+    );
+
+    router #(.FLIT_WIDTH(38), .COORD_BITS(2), .MY_X(2), .MY_Y(3), .MY_Z(2)) resp_r2_3_2 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(resp_2_2_2_S_v), .n_in_flit(resp_2_2_2_S_f), .n_in_ready(resp_2_2_2_S_r),
+        .n_out_valid(resp_2_3_2_N_v), .n_out_flit(resp_2_3_2_N_f), .n_out_ready(resp_2_3_2_N_r),
+        .s_in_valid(1'b0), .s_in_flit({38{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .e_in_valid(1'b0), .e_in_flit({38{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .w_in_valid(resp_1_3_2_E_v), .w_in_flit(resp_1_3_2_E_f), .w_in_ready(resp_1_3_2_E_r),
+        .w_out_valid(resp_2_3_2_W_v), .w_out_flit(resp_2_3_2_W_f), .w_out_ready(resp_2_3_2_W_r),
+        .u_in_valid(resp_2_3_1_D_v), .u_in_flit(resp_2_3_1_D_f), .u_in_ready(resp_2_3_1_D_r),
+        .u_out_valid(resp_2_3_2_U_v), .u_out_flit(resp_2_3_2_U_f), .u_out_ready(resp_2_3_2_U_r),
+        .d_in_valid(1'b0), .d_in_flit({38{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
+        .l_in_valid(1'b0), .l_in_flit({38{1'b0}}), .l_in_ready(),
+        .l_out_valid(e16_resp_in_valid), .l_out_flit(e16_resp_in_flit), .l_out_ready(e16_resp_in_ready)
     );
 
     // ==================== Cores + adapters ====================
@@ -1154,7 +2001,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(0), .MY_Y(0), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(0), .MY_Y(0), .MY_Z(0), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) p0_adap (
         .clk(clk), .reset(reset),
@@ -1179,7 +2026,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(1), .MY_Y(0), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(0), .MY_Y(0), .MY_Z(1), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) p1_adap (
         .clk(clk), .reset(reset),
@@ -1204,7 +2051,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(2), .MY_Y(0), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(0), .MY_Y(0), .MY_Z(2), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) p2_adap (
         .clk(clk), .reset(reset),
@@ -1229,7 +2076,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(3), .MY_Y(0), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(0), .MY_Y(1), .MY_Z(0), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) p3_adap (
         .clk(clk), .reset(reset),
@@ -1254,7 +2101,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(4), .MY_Y(0), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(0), .MY_Y(1), .MY_Z(1), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) p4_adap (
         .clk(clk), .reset(reset),
@@ -1279,7 +2126,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(0), .MY_Y(1), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(0), .MY_Y(1), .MY_Z(2), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) p5_adap (
         .clk(clk), .reset(reset),
@@ -1304,7 +2151,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(1), .MY_Y(1), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(0), .MY_Y(2), .MY_Z(0), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) p6_adap (
         .clk(clk), .reset(reset),
@@ -1329,7 +2176,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(2), .MY_Y(1), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(0), .MY_Y(2), .MY_Z(1), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) p7_adap (
         .clk(clk), .reset(reset),
@@ -1354,7 +2201,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(3), .MY_Y(1), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(0), .MY_Y(2), .MY_Z(2), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) p8_adap (
         .clk(clk), .reset(reset),
@@ -1379,7 +2226,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(4), .MY_Y(1), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(0), .MY_Y(3), .MY_Z(0), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) p9_adap (
         .clk(clk), .reset(reset),
@@ -1404,7 +2251,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(0), .MY_Y(2), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(0), .MY_Y(3), .MY_Z(1), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) p10_adap (
         .clk(clk), .reset(reset),
@@ -1429,7 +2276,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(1), .MY_Y(2), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(0), .MY_Y(3), .MY_Z(2), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) p11_adap (
         .clk(clk), .reset(reset),
@@ -1438,6 +2285,156 @@ module soc_top #(
         .bus_grant(p11_bus_grant), .bus_read_data(p11_bus_read_data),
         .req_out_valid(p11_req_out_valid), .req_out_flit(p11_req_out_flit), .req_out_ready(p11_req_out_ready),
         .resp_in_valid(p11_resp_in_valid), .resp_in_flit(p11_resp_in_flit), .resp_in_ready(p11_resp_in_ready)
+    );
+
+    cpu_core_pipelined #(
+        .INSTR_MEM_WORDS(INSTR_MEM_WORDS), .INSTR_INIT_FILE(P12_INSTR_HEX),
+        .DATA_MEM_BYTES(DATA_MEM_BYTES),
+        .SHARED_MEM_BASE(SHARED_MEM_BASE), .SHARED_MEM_BYTES(SHARED_MEM_BYTES)
+    ) p12_core (
+        .clk(clk), .reset(reset),
+        .halted(p12_halted), .tohost_value(p12_tohost),
+        .bus_req(p12_bus_req), .bus_addr(p12_bus_addr),
+        .bus_write_data(p12_bus_write_data), .bus_mem_write(p12_bus_mem_write),
+        .bus_mem_size(p12_bus_mem_size), .bus_mem_unsigned(p12_bus_mem_unsigned),
+        .bus_grant(p12_bus_grant), .bus_read_data(p12_bus_read_data)
+    );
+
+    noc_core_adapter #(
+        .COORD_BITS(2), .MY_X(1), .MY_Y(0), .MY_Z(0), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
+        .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
+    ) p12_adap (
+        .clk(clk), .reset(reset),
+        .bus_req(p12_bus_req), .bus_addr(p12_bus_addr), .bus_write_data(p12_bus_write_data),
+        .bus_mem_write(p12_bus_mem_write), .bus_mem_size(p12_bus_mem_size), .bus_mem_unsigned(p12_bus_mem_unsigned),
+        .bus_grant(p12_bus_grant), .bus_read_data(p12_bus_read_data),
+        .req_out_valid(p12_req_out_valid), .req_out_flit(p12_req_out_flit), .req_out_ready(p12_req_out_ready),
+        .resp_in_valid(p12_resp_in_valid), .resp_in_flit(p12_resp_in_flit), .resp_in_ready(p12_resp_in_ready)
+    );
+
+    cpu_core_pipelined #(
+        .INSTR_MEM_WORDS(INSTR_MEM_WORDS), .INSTR_INIT_FILE(P13_INSTR_HEX),
+        .DATA_MEM_BYTES(DATA_MEM_BYTES),
+        .SHARED_MEM_BASE(SHARED_MEM_BASE), .SHARED_MEM_BYTES(SHARED_MEM_BYTES)
+    ) p13_core (
+        .clk(clk), .reset(reset),
+        .halted(p13_halted), .tohost_value(p13_tohost),
+        .bus_req(p13_bus_req), .bus_addr(p13_bus_addr),
+        .bus_write_data(p13_bus_write_data), .bus_mem_write(p13_bus_mem_write),
+        .bus_mem_size(p13_bus_mem_size), .bus_mem_unsigned(p13_bus_mem_unsigned),
+        .bus_grant(p13_bus_grant), .bus_read_data(p13_bus_read_data)
+    );
+
+    noc_core_adapter #(
+        .COORD_BITS(2), .MY_X(1), .MY_Y(0), .MY_Z(1), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
+        .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
+    ) p13_adap (
+        .clk(clk), .reset(reset),
+        .bus_req(p13_bus_req), .bus_addr(p13_bus_addr), .bus_write_data(p13_bus_write_data),
+        .bus_mem_write(p13_bus_mem_write), .bus_mem_size(p13_bus_mem_size), .bus_mem_unsigned(p13_bus_mem_unsigned),
+        .bus_grant(p13_bus_grant), .bus_read_data(p13_bus_read_data),
+        .req_out_valid(p13_req_out_valid), .req_out_flit(p13_req_out_flit), .req_out_ready(p13_req_out_ready),
+        .resp_in_valid(p13_resp_in_valid), .resp_in_flit(p13_resp_in_flit), .resp_in_ready(p13_resp_in_ready)
+    );
+
+    cpu_core_pipelined #(
+        .INSTR_MEM_WORDS(INSTR_MEM_WORDS), .INSTR_INIT_FILE(P14_INSTR_HEX),
+        .DATA_MEM_BYTES(DATA_MEM_BYTES),
+        .SHARED_MEM_BASE(SHARED_MEM_BASE), .SHARED_MEM_BYTES(SHARED_MEM_BYTES)
+    ) p14_core (
+        .clk(clk), .reset(reset),
+        .halted(p14_halted), .tohost_value(p14_tohost),
+        .bus_req(p14_bus_req), .bus_addr(p14_bus_addr),
+        .bus_write_data(p14_bus_write_data), .bus_mem_write(p14_bus_mem_write),
+        .bus_mem_size(p14_bus_mem_size), .bus_mem_unsigned(p14_bus_mem_unsigned),
+        .bus_grant(p14_bus_grant), .bus_read_data(p14_bus_read_data)
+    );
+
+    noc_core_adapter #(
+        .COORD_BITS(2), .MY_X(1), .MY_Y(0), .MY_Z(2), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
+        .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
+    ) p14_adap (
+        .clk(clk), .reset(reset),
+        .bus_req(p14_bus_req), .bus_addr(p14_bus_addr), .bus_write_data(p14_bus_write_data),
+        .bus_mem_write(p14_bus_mem_write), .bus_mem_size(p14_bus_mem_size), .bus_mem_unsigned(p14_bus_mem_unsigned),
+        .bus_grant(p14_bus_grant), .bus_read_data(p14_bus_read_data),
+        .req_out_valid(p14_req_out_valid), .req_out_flit(p14_req_out_flit), .req_out_ready(p14_req_out_ready),
+        .resp_in_valid(p14_resp_in_valid), .resp_in_flit(p14_resp_in_flit), .resp_in_ready(p14_resp_in_ready)
+    );
+
+    cpu_core_pipelined #(
+        .INSTR_MEM_WORDS(INSTR_MEM_WORDS), .INSTR_INIT_FILE(P15_INSTR_HEX),
+        .DATA_MEM_BYTES(DATA_MEM_BYTES),
+        .SHARED_MEM_BASE(SHARED_MEM_BASE), .SHARED_MEM_BYTES(SHARED_MEM_BYTES)
+    ) p15_core (
+        .clk(clk), .reset(reset),
+        .halted(p15_halted), .tohost_value(p15_tohost),
+        .bus_req(p15_bus_req), .bus_addr(p15_bus_addr),
+        .bus_write_data(p15_bus_write_data), .bus_mem_write(p15_bus_mem_write),
+        .bus_mem_size(p15_bus_mem_size), .bus_mem_unsigned(p15_bus_mem_unsigned),
+        .bus_grant(p15_bus_grant), .bus_read_data(p15_bus_read_data)
+    );
+
+    noc_core_adapter #(
+        .COORD_BITS(2), .MY_X(1), .MY_Y(1), .MY_Z(0), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
+        .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
+    ) p15_adap (
+        .clk(clk), .reset(reset),
+        .bus_req(p15_bus_req), .bus_addr(p15_bus_addr), .bus_write_data(p15_bus_write_data),
+        .bus_mem_write(p15_bus_mem_write), .bus_mem_size(p15_bus_mem_size), .bus_mem_unsigned(p15_bus_mem_unsigned),
+        .bus_grant(p15_bus_grant), .bus_read_data(p15_bus_read_data),
+        .req_out_valid(p15_req_out_valid), .req_out_flit(p15_req_out_flit), .req_out_ready(p15_req_out_ready),
+        .resp_in_valid(p15_resp_in_valid), .resp_in_flit(p15_resp_in_flit), .resp_in_ready(p15_resp_in_ready)
+    );
+
+    cpu_core_pipelined #(
+        .INSTR_MEM_WORDS(INSTR_MEM_WORDS), .INSTR_INIT_FILE(P16_INSTR_HEX),
+        .DATA_MEM_BYTES(DATA_MEM_BYTES),
+        .SHARED_MEM_BASE(SHARED_MEM_BASE), .SHARED_MEM_BYTES(SHARED_MEM_BYTES)
+    ) p16_core (
+        .clk(clk), .reset(reset),
+        .halted(p16_halted), .tohost_value(p16_tohost),
+        .bus_req(p16_bus_req), .bus_addr(p16_bus_addr),
+        .bus_write_data(p16_bus_write_data), .bus_mem_write(p16_bus_mem_write),
+        .bus_mem_size(p16_bus_mem_size), .bus_mem_unsigned(p16_bus_mem_unsigned),
+        .bus_grant(p16_bus_grant), .bus_read_data(p16_bus_read_data)
+    );
+
+    noc_core_adapter #(
+        .COORD_BITS(2), .MY_X(1), .MY_Y(1), .MY_Z(2), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
+        .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
+    ) p16_adap (
+        .clk(clk), .reset(reset),
+        .bus_req(p16_bus_req), .bus_addr(p16_bus_addr), .bus_write_data(p16_bus_write_data),
+        .bus_mem_write(p16_bus_mem_write), .bus_mem_size(p16_bus_mem_size), .bus_mem_unsigned(p16_bus_mem_unsigned),
+        .bus_grant(p16_bus_grant), .bus_read_data(p16_bus_read_data),
+        .req_out_valid(p16_req_out_valid), .req_out_flit(p16_req_out_flit), .req_out_ready(p16_req_out_ready),
+        .resp_in_valid(p16_resp_in_valid), .resp_in_flit(p16_resp_in_flit), .resp_in_ready(p16_resp_in_ready)
+    );
+
+    cpu_core_pipelined #(
+        .INSTR_MEM_WORDS(INSTR_MEM_WORDS), .INSTR_INIT_FILE(P17_INSTR_HEX),
+        .DATA_MEM_BYTES(DATA_MEM_BYTES),
+        .SHARED_MEM_BASE(SHARED_MEM_BASE), .SHARED_MEM_BYTES(SHARED_MEM_BYTES)
+    ) p17_core (
+        .clk(clk), .reset(reset),
+        .halted(p17_halted), .tohost_value(p17_tohost),
+        .bus_req(p17_bus_req), .bus_addr(p17_bus_addr),
+        .bus_write_data(p17_bus_write_data), .bus_mem_write(p17_bus_mem_write),
+        .bus_mem_size(p17_bus_mem_size), .bus_mem_unsigned(p17_bus_mem_unsigned),
+        .bus_grant(p17_bus_grant), .bus_read_data(p17_bus_read_data)
+    );
+
+    noc_core_adapter #(
+        .COORD_BITS(2), .MY_X(1), .MY_Y(2), .MY_Z(0), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
+        .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
+    ) p17_adap (
+        .clk(clk), .reset(reset),
+        .bus_req(p17_bus_req), .bus_addr(p17_bus_addr), .bus_write_data(p17_bus_write_data),
+        .bus_mem_write(p17_bus_mem_write), .bus_mem_size(p17_bus_mem_size), .bus_mem_unsigned(p17_bus_mem_unsigned),
+        .bus_grant(p17_bus_grant), .bus_read_data(p17_bus_read_data),
+        .req_out_valid(p17_req_out_valid), .req_out_flit(p17_req_out_flit), .req_out_ready(p17_req_out_ready),
+        .resp_in_valid(p17_resp_in_valid), .resp_in_flit(p17_resp_in_flit), .resp_in_ready(p17_resp_in_ready)
     );
 
     cpu_core #(
@@ -1454,7 +2451,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(3), .MY_Y(2), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(1), .MY_Y(2), .MY_Z(1), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) e0_adap (
         .clk(clk), .reset(reset),
@@ -1479,7 +2476,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(4), .MY_Y(2), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(1), .MY_Y(2), .MY_Z(2), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) e1_adap (
         .clk(clk), .reset(reset),
@@ -1504,7 +2501,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(0), .MY_Y(3), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(1), .MY_Y(3), .MY_Z(0), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) e2_adap (
         .clk(clk), .reset(reset),
@@ -1529,7 +2526,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(1), .MY_Y(3), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(1), .MY_Y(3), .MY_Z(1), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) e3_adap (
         .clk(clk), .reset(reset),
@@ -1554,7 +2551,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(2), .MY_Y(3), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(1), .MY_Y(3), .MY_Z(2), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) e4_adap (
         .clk(clk), .reset(reset),
@@ -1579,7 +2576,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(3), .MY_Y(3), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(2), .MY_Y(0), .MY_Z(0), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) e5_adap (
         .clk(clk), .reset(reset),
@@ -1604,7 +2601,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(4), .MY_Y(3), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(2), .MY_Y(0), .MY_Z(1), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) e6_adap (
         .clk(clk), .reset(reset),
@@ -1629,7 +2626,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(0), .MY_Y(4), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(2), .MY_Y(0), .MY_Z(2), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) e7_adap (
         .clk(clk), .reset(reset),
@@ -1654,7 +2651,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(1), .MY_Y(4), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(2), .MY_Y(1), .MY_Z(0), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) e8_adap (
         .clk(clk), .reset(reset),
@@ -1679,7 +2676,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(2), .MY_Y(4), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(2), .MY_Y(1), .MY_Z(1), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) e9_adap (
         .clk(clk), .reset(reset),
@@ -1704,7 +2701,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(3), .MY_Y(4), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(2), .MY_Y(1), .MY_Z(2), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) e10_adap (
         .clk(clk), .reset(reset),
@@ -1729,7 +2726,7 @@ module soc_top #(
     );
 
     noc_core_adapter #(
-        .COORD_BITS(3), .MY_X(4), .MY_Y(4), .MEM_X(2), .MEM_Y(2),
+        .COORD_BITS(2), .MY_X(2), .MY_Y(2), .MY_Z(0), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
         .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) e11_adap (
         .clk(clk), .reset(reset),
@@ -1740,14 +2737,138 @@ module soc_top #(
         .resp_in_valid(e11_resp_in_valid), .resp_in_flit(e11_resp_in_flit), .resp_in_ready(e11_resp_in_ready)
     );
 
-    // ==================== Memory node ====================
+    cpu_core #(
+        .INSTR_MEM_WORDS(INSTR_MEM_WORDS), .INSTR_INIT_FILE(E12_INSTR_HEX),
+        .DATA_MEM_BYTES(DATA_MEM_BYTES),
+        .SHARED_MEM_BASE(SHARED_MEM_BASE), .SHARED_MEM_BYTES(SHARED_MEM_BYTES)
+    ) e12_core (
+        .clk(clk), .reset(reset),
+        .halted(e12_halted), .tohost_value(e12_tohost),
+        .bus_req(e12_bus_req), .bus_addr(e12_bus_addr),
+        .bus_write_data(e12_bus_write_data), .bus_mem_write(e12_bus_mem_write),
+        .bus_mem_size(e12_bus_mem_size), .bus_mem_unsigned(e12_bus_mem_unsigned),
+        .bus_grant(e12_bus_grant), .bus_read_data(e12_bus_read_data)
+    );
+
+    noc_core_adapter #(
+        .COORD_BITS(2), .MY_X(2), .MY_Y(2), .MY_Z(1), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
+        .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
+    ) e12_adap (
+        .clk(clk), .reset(reset),
+        .bus_req(e12_bus_req), .bus_addr(e12_bus_addr), .bus_write_data(e12_bus_write_data),
+        .bus_mem_write(e12_bus_mem_write), .bus_mem_size(e12_bus_mem_size), .bus_mem_unsigned(e12_bus_mem_unsigned),
+        .bus_grant(e12_bus_grant), .bus_read_data(e12_bus_read_data),
+        .req_out_valid(e12_req_out_valid), .req_out_flit(e12_req_out_flit), .req_out_ready(e12_req_out_ready),
+        .resp_in_valid(e12_resp_in_valid), .resp_in_flit(e12_resp_in_flit), .resp_in_ready(e12_resp_in_ready)
+    );
+
+    cpu_core #(
+        .INSTR_MEM_WORDS(INSTR_MEM_WORDS), .INSTR_INIT_FILE(E13_INSTR_HEX),
+        .DATA_MEM_BYTES(DATA_MEM_BYTES),
+        .SHARED_MEM_BASE(SHARED_MEM_BASE), .SHARED_MEM_BYTES(SHARED_MEM_BYTES)
+    ) e13_core (
+        .clk(clk), .reset(reset),
+        .halted(e13_halted), .tohost_value(e13_tohost),
+        .bus_req(e13_bus_req), .bus_addr(e13_bus_addr),
+        .bus_write_data(e13_bus_write_data), .bus_mem_write(e13_bus_mem_write),
+        .bus_mem_size(e13_bus_mem_size), .bus_mem_unsigned(e13_bus_mem_unsigned),
+        .bus_grant(e13_bus_grant), .bus_read_data(e13_bus_read_data)
+    );
+
+    noc_core_adapter #(
+        .COORD_BITS(2), .MY_X(2), .MY_Y(2), .MY_Z(2), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
+        .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
+    ) e13_adap (
+        .clk(clk), .reset(reset),
+        .bus_req(e13_bus_req), .bus_addr(e13_bus_addr), .bus_write_data(e13_bus_write_data),
+        .bus_mem_write(e13_bus_mem_write), .bus_mem_size(e13_bus_mem_size), .bus_mem_unsigned(e13_bus_mem_unsigned),
+        .bus_grant(e13_bus_grant), .bus_read_data(e13_bus_read_data),
+        .req_out_valid(e13_req_out_valid), .req_out_flit(e13_req_out_flit), .req_out_ready(e13_req_out_ready),
+        .resp_in_valid(e13_resp_in_valid), .resp_in_flit(e13_resp_in_flit), .resp_in_ready(e13_resp_in_ready)
+    );
+
+    cpu_core #(
+        .INSTR_MEM_WORDS(INSTR_MEM_WORDS), .INSTR_INIT_FILE(E14_INSTR_HEX),
+        .DATA_MEM_BYTES(DATA_MEM_BYTES),
+        .SHARED_MEM_BASE(SHARED_MEM_BASE), .SHARED_MEM_BYTES(SHARED_MEM_BYTES)
+    ) e14_core (
+        .clk(clk), .reset(reset),
+        .halted(e14_halted), .tohost_value(e14_tohost),
+        .bus_req(e14_bus_req), .bus_addr(e14_bus_addr),
+        .bus_write_data(e14_bus_write_data), .bus_mem_write(e14_bus_mem_write),
+        .bus_mem_size(e14_bus_mem_size), .bus_mem_unsigned(e14_bus_mem_unsigned),
+        .bus_grant(e14_bus_grant), .bus_read_data(e14_bus_read_data)
+    );
+
+    noc_core_adapter #(
+        .COORD_BITS(2), .MY_X(2), .MY_Y(3), .MY_Z(0), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
+        .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
+    ) e14_adap (
+        .clk(clk), .reset(reset),
+        .bus_req(e14_bus_req), .bus_addr(e14_bus_addr), .bus_write_data(e14_bus_write_data),
+        .bus_mem_write(e14_bus_mem_write), .bus_mem_size(e14_bus_mem_size), .bus_mem_unsigned(e14_bus_mem_unsigned),
+        .bus_grant(e14_bus_grant), .bus_read_data(e14_bus_read_data),
+        .req_out_valid(e14_req_out_valid), .req_out_flit(e14_req_out_flit), .req_out_ready(e14_req_out_ready),
+        .resp_in_valid(e14_resp_in_valid), .resp_in_flit(e14_resp_in_flit), .resp_in_ready(e14_resp_in_ready)
+    );
+
+    cpu_core #(
+        .INSTR_MEM_WORDS(INSTR_MEM_WORDS), .INSTR_INIT_FILE(E15_INSTR_HEX),
+        .DATA_MEM_BYTES(DATA_MEM_BYTES),
+        .SHARED_MEM_BASE(SHARED_MEM_BASE), .SHARED_MEM_BYTES(SHARED_MEM_BYTES)
+    ) e15_core (
+        .clk(clk), .reset(reset),
+        .halted(e15_halted), .tohost_value(e15_tohost),
+        .bus_req(e15_bus_req), .bus_addr(e15_bus_addr),
+        .bus_write_data(e15_bus_write_data), .bus_mem_write(e15_bus_mem_write),
+        .bus_mem_size(e15_bus_mem_size), .bus_mem_unsigned(e15_bus_mem_unsigned),
+        .bus_grant(e15_bus_grant), .bus_read_data(e15_bus_read_data)
+    );
+
+    noc_core_adapter #(
+        .COORD_BITS(2), .MY_X(2), .MY_Y(3), .MY_Z(1), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
+        .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
+    ) e15_adap (
+        .clk(clk), .reset(reset),
+        .bus_req(e15_bus_req), .bus_addr(e15_bus_addr), .bus_write_data(e15_bus_write_data),
+        .bus_mem_write(e15_bus_mem_write), .bus_mem_size(e15_bus_mem_size), .bus_mem_unsigned(e15_bus_mem_unsigned),
+        .bus_grant(e15_bus_grant), .bus_read_data(e15_bus_read_data),
+        .req_out_valid(e15_req_out_valid), .req_out_flit(e15_req_out_flit), .req_out_ready(e15_req_out_ready),
+        .resp_in_valid(e15_resp_in_valid), .resp_in_flit(e15_resp_in_flit), .resp_in_ready(e15_resp_in_ready)
+    );
+
+    cpu_core #(
+        .INSTR_MEM_WORDS(INSTR_MEM_WORDS), .INSTR_INIT_FILE(E16_INSTR_HEX),
+        .DATA_MEM_BYTES(DATA_MEM_BYTES),
+        .SHARED_MEM_BASE(SHARED_MEM_BASE), .SHARED_MEM_BYTES(SHARED_MEM_BYTES)
+    ) e16_core (
+        .clk(clk), .reset(reset),
+        .halted(e16_halted), .tohost_value(e16_tohost),
+        .bus_req(e16_bus_req), .bus_addr(e16_bus_addr),
+        .bus_write_data(e16_bus_write_data), .bus_mem_write(e16_bus_mem_write),
+        .bus_mem_size(e16_bus_mem_size), .bus_mem_unsigned(e16_bus_mem_unsigned),
+        .bus_grant(e16_bus_grant), .bus_read_data(e16_bus_read_data)
+    );
+
+    noc_core_adapter #(
+        .COORD_BITS(2), .MY_X(2), .MY_Y(3), .MY_Z(2), .MEM_X(1), .MEM_Y(1), .MEM_Z(1),
+        .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
+    ) e16_adap (
+        .clk(clk), .reset(reset),
+        .bus_req(e16_bus_req), .bus_addr(e16_bus_addr), .bus_write_data(e16_bus_write_data),
+        .bus_mem_write(e16_bus_mem_write), .bus_mem_size(e16_bus_mem_size), .bus_mem_unsigned(e16_bus_mem_unsigned),
+        .bus_grant(e16_bus_grant), .bus_read_data(e16_bus_read_data),
+        .req_out_valid(e16_req_out_valid), .req_out_flit(e16_req_out_flit), .req_out_ready(e16_req_out_ready),
+        .resp_in_valid(e16_resp_in_valid), .resp_in_flit(e16_resp_in_flit), .resp_in_ready(e16_resp_in_ready)
+    );
+
     noc_mem_adapter #(
-        .COORD_BITS(3), .MEM_BYTES(SHARED_MEM_BYTES), .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
+        .COORD_BITS(2), .MEM_BYTES(SHARED_MEM_BYTES), .REQ_FLIT_WIDTH(80), .RESP_FLIT_WIDTH(38)
     ) mem_adap (
         .clk(clk), .reset(reset),
         .req_in_valid(mem_req_in_valid), .req_in_flit(mem_req_in_flit), .req_in_ready(mem_req_in_ready),
         .resp_out_valid(mem_resp_out_valid), .resp_out_flit(mem_resp_out_flit), .resp_out_ready(mem_resp_out_ready)
     );
 
-    assign all_halted = p0_halted && p1_halted && p2_halted && p3_halted && p4_halted && p5_halted && p6_halted && p7_halted && p8_halted && p9_halted && p10_halted && p11_halted && e0_halted && e1_halted && e2_halted && e3_halted && e4_halted && e5_halted && e6_halted && e7_halted && e8_halted && e9_halted && e10_halted && e11_halted;
+    assign all_halted = p0_halted && p1_halted && p2_halted && p3_halted && p4_halted && p5_halted && p6_halted && p7_halted && p8_halted && p9_halted && p10_halted && p11_halted && p12_halted && p13_halted && p14_halted && p15_halted && p16_halted && p17_halted && e0_halted && e1_halted && e2_halted && e3_halted && e4_halted && e5_halted && e6_halted && e7_halted && e8_halted && e9_halted && e10_halted && e11_halted && e12_halted && e13_halted && e14_halted && e15_halted && e16_halted;
 endmodule

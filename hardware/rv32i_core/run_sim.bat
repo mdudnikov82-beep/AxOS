@@ -168,17 +168,17 @@ if %errorlevel% neq 0 (echo FAILED: pipelined, hazard stress test & "%VVP%" out_
 echo   OK (tohost=119)
 
 echo.
-echo ===== Mini-SoC: 12 P-cores + 12 E-cores (soc_top.v, 5x5 NoC mesh) =====
-echo p0=hazard_test.hex(119) p1-p11=test1.hex(42) e0=test_basic.hex(110) e1-e11=test1.hex(42), all concurrent
+echo ===== Mini-SoC: 18 P-cores + 17 E-cores (soc_top.v, 3D 3x4x3 NoC mesh) =====
+echo p0=hazard_test.hex(119) p1-p17=test1.hex(42) e0=test_basic.hex(110) e1-e16=test1.hex(42), all concurrent
 "%IVERILOG%" -o out_soc.vvp rtl\alu.v rtl\regfile.v rtl\imm_gen.v rtl\control_unit.v rtl\instr_mem.v rtl\data_mem.v rtl\fp_regfile.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_div.v rtl\forward_unit.v rtl\fp_forward_unit.v rtl\hazard_unit.v rtl\mmu.v rtl\fp_sqrt.v rtl\cpu_core.v rtl\cpu_core_pipelined.v rtl\router.v rtl\noc_core_adapter.v rtl\noc_mem_adapter.v rtl\soc_top.v tb\tb_soc.v
 if %errorlevel% neq 0 goto :error
-"%VVP%" out_soc.vvp | findstr /C:"PASS: all 24 cores matched" >nul
+"%VVP%" out_soc.vvp | findstr /C:"PASS: all 35 cores matched" >nul
 if %errorlevel% neq 0 (echo FAILED: mini-SoC & "%VVP%" out_soc.vvp & goto :error)
-echo   OK (p0=119, p1-p11=42, e0=110, e1-e11=42, all 24 concurrent)
+echo   OK (p0=119, p1-p17=42, e0=110, e1-e16=42, all 35 concurrent)
 
 echo.
-echo ===== NoC: cross-core communication through the mesh (soc_top.v) =====
-echo e0 (producer) writes a payload+flag to shared mem, p0 (consumer) polls and reads it back - through several real router hops each way, not one central arbiter; p1-p11/e1-e11 run independently alongside
+echo ===== NoC: cross-core communication through the 3D mesh (soc_top.v) =====
+echo e0 (producer, at grid position adjacent to memory) writes a payload+flag to shared mem, p0 (consumer, at the grid's far corner) polls and reads it back - through several real router hops each way including the new Z axis, not one central arbiter; p1-p17/e1-e16 run independently alongside
 python sw\asm_shared_producer.py sw\shared_producer.hex
 if %errorlevel% neq 0 goto :error
 python sw\asm_shared_consumer.py sw\shared_consumer.hex
@@ -187,7 +187,7 @@ if %errorlevel% neq 0 goto :error
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_shared_soc.vvp | findstr /C:"PASS: cross-core communication verified" >nul
 if %errorlevel% neq 0 (echo FAILED: NoC cross-core test & "%VVP%" out_shared_soc.vvp & goto :error)
-echo   OK (p0=127, e0=77, p1-p11/e1-e11=42, cross-core communication verified)
+echo   OK (p0=127, e0=77, p1-p17/e1-e16=42, cross-core communication verified)
 
 echo.
 echo ===== Minimal RV32F: FLW/FSW + FADD.S/FSUB.S/FMUL.S (E-core only) =====

@@ -21,8 +21,8 @@
 module noc_mem_adapter #(
     parameter COORD_BITS = 2, // must match the router.v instances this feeds
     parameter MEM_BYTES       = 256,
-    parameter REQ_FLIT_WIDTH  = 76,
-    parameter RESP_FLIT_WIDTH = 36
+    parameter REQ_FLIT_WIDTH  = 80, // 6*COORD_BITS + 68 (2 roles [dest,src] x 3 axes + fixed payload) at COORD_BITS=2
+    parameter RESP_FLIT_WIDTH = 38  // 3*COORD_BITS + 32 (1 role [dest] x 3 axes + read_data) at COORD_BITS=2
 ) (
     input  wire clk,
     input  wire reset,
@@ -39,21 +39,31 @@ module noc_mem_adapter #(
 );
     // Request flit layout - see noc_core_adapter.v's matching comment.
     // The fixed-size payload (is_write..mem_unsigned, 68 bits) always
-    // sits at the bottom regardless of COORD_BITS; only src_x/src_y's
-    // position depends on it (they sit directly above the payload,
-    // below dest_x/dest_y - which this adapter never needs to read,
-    // since routing already happened by the time a flit gets here).
+    // sits at the bottom regardless of COORD_BITS or how many coordinate
+    // fields sit above it; only src_x/src_y/src_z's position depends on
+    // COORD_BITS (they sit directly above the payload, below dest_x/
+    // dest_y/dest_z - which this adapter never needs to read, since
+    // routing already happened by the time a flit gets here). Indexed
+    // by PAYLOAD_BITS + role*COORD_BITS (role 0=src_z, 1=src_y, 2=src_x,
+    // matching noc_core_adapter.v's {..., src_x, src_y, src_z, payload}
+    // concatenation order, LSB-most coordinate closest to the payload)
+    // rather than hand-recomputed magic numbers - this is the second
+    // time this exact offset needed re-deriving (once for the original
+    // 2-coordinate layout, now again for a 3rd axis), so making the
+    // pattern structural instead of arithmetic avoids a third repeat.
+    localparam PAYLOAD_BITS = 68;
     wire        req_is_write     = req_in_flit[67];
     wire [31:0] req_addr         = req_in_flit[66:35];
     wire [31:0] req_write_data   = req_in_flit[34:3];
     wire [1:0]  req_mem_size     = req_in_flit[2:1];
     wire        req_mem_unsigned = req_in_flit[0];
-    wire [COORD_BITS-1:0] req_src_y = req_in_flit[68 +: COORD_BITS];
-    wire [COORD_BITS-1:0] req_src_x = req_in_flit[68+COORD_BITS +: COORD_BITS];
+    wire [COORD_BITS-1:0] req_src_z = req_in_flit[PAYLOAD_BITS + 0*COORD_BITS +: COORD_BITS];
+    wire [COORD_BITS-1:0] req_src_y = req_in_flit[PAYLOAD_BITS + 1*COORD_BITS +: COORD_BITS];
+    wire [COORD_BITS-1:0] req_src_x = req_in_flit[PAYLOAD_BITS + 2*COORD_BITS +: COORD_BITS];
 
     reg        busy; // holding a not-yet-injected response
     reg [31:0] pending_read_data;
-    reg [COORD_BITS-1:0] pending_dest_x, pending_dest_y;
+    reg [COORD_BITS-1:0] pending_dest_x, pending_dest_y, pending_dest_z;
 
     assign req_in_ready = !busy;
 
@@ -69,9 +79,9 @@ module noc_mem_adapter #(
         .read_data(dm_read_data)
     );
 
-    // Response flit layout: {dest_x, dest_y, read_data[31:0]}.
+    // Response flit layout: {dest_x, dest_y, dest_z, read_data[31:0]}.
     assign resp_out_valid = busy;
-    assign resp_out_flit  = {pending_dest_x, pending_dest_y, pending_read_data};
+    assign resp_out_flit  = {pending_dest_x, pending_dest_y, pending_dest_z, pending_read_data};
 
     always @(posedge clk or posedge reset) begin
         if (reset) begin
@@ -79,6 +89,7 @@ module noc_mem_adapter #(
             pending_read_data <= 32'b0;
             pending_dest_x <= {COORD_BITS{1'b0}};
             pending_dest_y <= {COORD_BITS{1'b0}};
+            pending_dest_z <= {COORD_BITS{1'b0}};
         end else if (!busy) begin
             if (req_in_valid) begin
                 busy <= 1'b1;
@@ -89,6 +100,7 @@ module noc_mem_adapter #(
                 pending_read_data <= dm_read_data;
                 pending_dest_x    <= req_src_x;
                 pending_dest_y    <= req_src_y;
+                pending_dest_z    <= req_src_z;
             end
         end else begin
             if (resp_out_ready) busy <= 1'b0; // handed off - ready for the next request

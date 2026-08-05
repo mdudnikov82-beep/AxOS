@@ -1,46 +1,57 @@
-// XY-routed single-flit mesh router - the core building block of the
+// XYZ-routed single-flit mesh router - the core building block of the
 // NoC that replaces shared_bus.v (see [[project_noc_router]] for the
-// full design rationale). Five ports (N/E/S/W/Local), each a standard
-// valid/flit/ready handshake in BOTH directions (in_* and out_*), with
-// a 1-flit skid-buffer register per OUTPUT port - a flit takes exactly
-// one clock edge to cross one hop, and every hop has real backpressure
-// (an already-buffered-but-not-yet-accepted flit is never silently
-// overwritten by a new arrival on the same input).
+// full design rationale). Seven ports (N/E/S/W/Up/Down/Local), each a
+// standard valid/flit/ready handshake in BOTH directions (in_* and
+// out_*), with a 1-flit skid-buffer register per OUTPUT port - a flit
+// takes exactly one clock edge to cross one hop, and every hop has real
+// backpressure (an already-buffered-but-not-yet-accepted flit is never
+// silently overwritten by a new arrival on the same input).
 //
 // The flit format is fully opaque to this module except its top
-// 2*COORD_BITS bits, which MUST be {dest_x[COORD_BITS-1:0],
-// dest_y[COORD_BITS-1:0]} - everything below that (address, data,
-// control fields, whatever a specific network carries) is routed
-// through unmodified. COORD_BITS defaults to 2 (a 4x4 grid, coords
-// 0..3) - widen it for a bigger mesh (e.g. 3 bits for a 5x5..8x8
-// grid). This lets ONE module serve
-// as both the request-network router and the response-network router
-// (different FLIT_WIDTH, same logic) - a design-review recommendation
-// specifically to make "these two networks share no state" a
-// structural, build-time-checkable property instead of a code-review-
-// only one (two independent module instances, never one wider one).
+// 3*COORD_BITS bits, which MUST be {dest_x[COORD_BITS-1:0],
+// dest_y[COORD_BITS-1:0], dest_z[COORD_BITS-1:0]} - everything below
+// that (address, data, control fields, whatever a specific network
+// carries) is routed through unmodified. COORD_BITS is shared across
+// all three axes even when they're different sizes (e.g. 3x4x3) -
+// confirmed by design review to be numerically safe as long as EVERY
+// axis's real coordinate range fits, not just the largest one; widen it
+// for a bigger mesh, the same way earlier 2D scale-ups did. This lets
+// ONE module serve as both the request-network router and the
+// response-network router (different FLIT_WIDTH, same logic) - a
+// design-review recommendation specifically to make "these two
+// networks share no state" a structural, build-time-checkable property
+// instead of a code-review-only one (two independent module instances,
+// never one wider one).
 //
-// Routing: move in X first (E if dest_x>MY_X, W if <), only once
-// dest_x==MY_X switch to Y (S if dest_y>MY_Y, N if <), deliver to
-// Local once both match - classic dimension-order (XY) routing,
-// deadlock-free on a mesh (no virtual channels needed) by a standard
-// result this project is relying on rather than re-deriving. A flit
-// never needs to exit the direction it just arrived from - X/Y
-// movement is monotonic under dimension-order routing - so "the 4
-// candidates for output O are every OTHER direction" is exact, not an
-// approximation (confirmed during design review before this was
-// written). Edge/corner grid positions simply never have a real
-// neighbor wired to some directions in soc_top.v (tied to 0) - no
-// special-casing needed here, since a router whose MY_X/MY_Y sits on a
-// grid boundary can, by construction, never need to route further past
-// that boundary (destinations are always in-range for this grid).
+// Routing: move in X first (E if dest_x>MY_X, W if <), once dest_x==MY_X
+// switch to Y (S if dest_y>MY_Y, N if <), once dest_y==MY_Y switch to Z
+// (D if dest_z>MY_Z, U if <), deliver to Local once all three match -
+// classic dimension-order (XYZ) routing, deadlock-free on a mesh (no
+// virtual channels needed) by the same standard result (Dally & Seitz)
+// this project already relied on for 2D XY routing without re-deriving
+// - the proof holds for any strictly-ordered dimension count, not just
+// two, PROVIDED this stays a true mesh (no wraparound links - adding
+// one would turn this into a torus, where dimension-order routing is
+// NOT deadlock-free without extra virtual channels, a completely
+// different result). A flit never needs to exit the direction it just
+// arrived from - movement within each axis is monotonic under
+// dimension-order routing, independently per axis - so "every OTHER
+// direction is a valid candidate for output O" is exact regardless of
+// how many axes there are, not an approximation (confirmed during
+// design review before the Z axis was added). Edge/face grid positions
+// simply never have a real neighbor wired to some directions in
+// soc_top.v (tied to 0) - no special-casing needed here, since a router
+// whose MY_X/MY_Y/MY_Z sits on a grid boundary can, by construction,
+// never need to route further past that boundary (destinations are
+// always in-range for this grid).
 `timescale 1ns/1ps
 
 module router #(
-    parameter FLIT_WIDTH = 76,
-    parameter COORD_BITS = 2, // grid coords are 0..(2**COORD_BITS - 1); default of 2 fits a 4x4 grid
+    parameter FLIT_WIDTH = 80, // always overridden per-instance (request vs response network width differ) - see noc_core_adapter.v/noc_mem_adapter.v for the real formulas
+    parameter COORD_BITS = 2, // grid coords are 0..(2**COORD_BITS - 1) on EVERY axis; widen if any single axis needs more values
     parameter MY_X = 0,
-    parameter MY_Y = 0
+    parameter MY_Y = 0,
+    parameter MY_Z = 0
 ) (
     input  wire clk,
     input  wire reset,
@@ -73,6 +84,20 @@ module router #(
     output wire [FLIT_WIDTH-1:0] w_out_flit,
     input  wire                  w_out_ready,
 
+    input  wire                  u_in_valid,
+    input  wire [FLIT_WIDTH-1:0] u_in_flit,
+    output wire                  u_in_ready,
+    output wire                  u_out_valid,
+    output wire [FLIT_WIDTH-1:0] u_out_flit,
+    input  wire                  u_out_ready,
+
+    input  wire                  d_in_valid,
+    input  wire [FLIT_WIDTH-1:0] d_in_flit,
+    output wire                  d_in_ready,
+    output wire                  d_out_valid,
+    output wire [FLIT_WIDTH-1:0] d_out_flit,
+    input  wire                  d_out_ready,
+
     input  wire                  l_in_valid,
     input  wire [FLIT_WIDTH-1:0] l_in_flit,
     output wire                  l_in_ready,
@@ -80,8 +105,8 @@ module router #(
     output wire [FLIT_WIDTH-1:0] l_out_flit,
     input  wire                  l_out_ready
 );
-    localparam NDIRS = 5;
-    localparam DIR_N = 0, DIR_E = 1, DIR_S = 2, DIR_W = 3, DIR_L = 4;
+    localparam NDIRS = 7;
+    localparam DIR_N = 0, DIR_E = 1, DIR_S = 2, DIR_W = 3, DIR_U = 4, DIR_D = 5, DIR_L = 6;
 
     wire                  in_valid  [0:NDIRS-1];
     wire [FLIT_WIDTH-1:0] in_flit   [0:NDIRS-1];
@@ -94,12 +119,16 @@ module router #(
     assign in_valid[DIR_E] = e_in_valid; assign in_flit[DIR_E] = e_in_flit; assign e_in_ready = in_ready[DIR_E];
     assign in_valid[DIR_S] = s_in_valid; assign in_flit[DIR_S] = s_in_flit; assign s_in_ready = in_ready[DIR_S];
     assign in_valid[DIR_W] = w_in_valid; assign in_flit[DIR_W] = w_in_flit; assign w_in_ready = in_ready[DIR_W];
+    assign in_valid[DIR_U] = u_in_valid; assign in_flit[DIR_U] = u_in_flit; assign u_in_ready = in_ready[DIR_U];
+    assign in_valid[DIR_D] = d_in_valid; assign in_flit[DIR_D] = d_in_flit; assign d_in_ready = in_ready[DIR_D];
     assign in_valid[DIR_L] = l_in_valid; assign in_flit[DIR_L] = l_in_flit; assign l_in_ready = in_ready[DIR_L];
 
     assign n_out_valid = out_valid[DIR_N]; assign n_out_flit = out_flit[DIR_N]; assign out_ready[DIR_N] = n_out_ready;
     assign e_out_valid = out_valid[DIR_E]; assign e_out_flit = out_flit[DIR_E]; assign out_ready[DIR_E] = e_out_ready;
     assign s_out_valid = out_valid[DIR_S]; assign s_out_flit = out_flit[DIR_S]; assign out_ready[DIR_S] = s_out_ready;
     assign w_out_valid = out_valid[DIR_W]; assign w_out_flit = out_flit[DIR_W]; assign out_ready[DIR_W] = w_out_ready;
+    assign u_out_valid = out_valid[DIR_U]; assign u_out_flit = out_flit[DIR_U]; assign out_ready[DIR_U] = u_out_ready;
+    assign d_out_valid = out_valid[DIR_D]; assign d_out_flit = out_flit[DIR_D]; assign out_ready[DIR_D] = d_out_ready;
     assign l_out_valid = out_valid[DIR_L]; assign l_out_flit = out_flit[DIR_L]; assign out_ready[DIR_L] = l_out_ready;
 
     // ---- Routing decision: which output direction does each input want? ----
@@ -112,9 +141,11 @@ module router #(
         for (gi = 0; gi < NDIRS; gi = gi + 1) begin: route_calc
             wire [COORD_BITS-1:0] dest_x = in_flit[gi][FLIT_WIDTH-1 -: COORD_BITS];
             wire [COORD_BITS-1:0] dest_y = in_flit[gi][FLIT_WIDTH-1-COORD_BITS -: COORD_BITS];
+            wire [COORD_BITS-1:0] dest_z = in_flit[gi][FLIT_WIDTH-1-2*COORD_BITS -: COORD_BITS];
             assign wanted_dir[gi] =
                 (dest_x != MY_X) ? (dest_x > MY_X ? DIR_E : DIR_W) :
                 (dest_y != MY_Y) ? (dest_y > MY_Y ? DIR_S : DIR_N) :
+                (dest_z != MY_Z) ? (dest_z > MY_Z ? DIR_D : DIR_U) :
                 DIR_L;
         end
     endgenerate
@@ -122,10 +153,11 @@ module router #(
     // ---- Per-output round-robin arbitration + 1-flit skid buffer ----
     // Mirrors shared_bus.v's own last_granted/scan-and-wrap pattern
     // exactly, just applied per output DIRECTION instead of per whole
-    // bus - confirmed by design review to carry over cleanly (at most
-    // 4 of the 5 directions can ever want the same output, since a
-    // direction never wants itself, so it's just a smaller-N instance
-    // of the identical mechanism).
+    // bus - confirmed by design review to carry over cleanly regardless
+    // of NDIRS (at most NDIRS-1 of the directions can ever want the
+    // same output, since a direction never wants itself - an invariant
+    // proved per-axis by monotonicity, not a coincidence of NDIRS=5, so
+    // it holds independently and unchanged for the Z axis too).
     wire winner_valid [0:NDIRS-1];
     wire [2:0] winner_dir [0:NDIRS-1];
 

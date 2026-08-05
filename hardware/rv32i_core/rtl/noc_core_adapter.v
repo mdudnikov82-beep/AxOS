@@ -24,7 +24,7 @@
 // than one outstanding request per core - not a convention this
 // module has to enforce, a fact already guaranteed by cpu_core.v/
 // cpu_core_pipelined.v's existing structure; (2) every node has a
-// distinct (x,y), and XY routing can only ever deliver a response to
+// distinct (x,y,z), and XYZ routing can only ever deliver a response to
 // the one router whose coordinates match - so routing BY ADDRESS
 // already disambiguates every core from every other one.
 `timescale 1ns/1ps
@@ -33,10 +33,12 @@ module noc_core_adapter #(
     parameter COORD_BITS = 2, // must match the router.v instances this feeds
     parameter MY_X = 0,
     parameter MY_Y = 0,
+    parameter MY_Z = 0,
     parameter MEM_X = 1,
     parameter MEM_Y = 1,
-    parameter REQ_FLIT_WIDTH  = 76,
-    parameter RESP_FLIT_WIDTH = 36
+    parameter MEM_Z = 1,
+    parameter REQ_FLIT_WIDTH  = 80, // 6*COORD_BITS + 68 (2 roles [dest,src] x 3 axes + fixed payload) at COORD_BITS=2
+    parameter RESP_FLIT_WIDTH = 38  // 3*COORD_BITS + 32 (1 role [dest] x 3 axes + read_data) at COORD_BITS=2
 ) (
     input  wire clk,
     input  wire reset,
@@ -61,18 +63,20 @@ module noc_core_adapter #(
     input  wire [RESP_FLIT_WIDTH-1:0] resp_in_flit,
     output wire                       resp_in_ready
 );
-    // Request flit layout (top 2*COORD_BITS bits are dest_x/dest_y -
-    // router.v's only requirement - everything else below is opaque to
-    // it): {dest_x, dest_y, src_x, src_y, is_write, addr[31:0],
-    // write_data[31:0], mem_size[1:0], mem_unsigned}.
+    // Request flit layout (top 3*COORD_BITS bits are dest_x/dest_y/
+    // dest_z - router.v's only requirement - everything else below is
+    // opaque to it): {dest_x, dest_y, dest_z, src_x, src_y, src_z,
+    // is_write, addr[31:0], write_data[31:0], mem_size[1:0],
+    // mem_unsigned}.
     wire [REQ_FLIT_WIDTH-1:0] req_flit_build = {
-        MEM_X[COORD_BITS-1:0], MEM_Y[COORD_BITS-1:0], MY_X[COORD_BITS-1:0], MY_Y[COORD_BITS-1:0],
+        MEM_X[COORD_BITS-1:0], MEM_Y[COORD_BITS-1:0], MEM_Z[COORD_BITS-1:0],
+        MY_X[COORD_BITS-1:0], MY_Y[COORD_BITS-1:0], MY_Z[COORD_BITS-1:0],
         bus_mem_write, bus_addr, bus_write_data, bus_mem_size, bus_mem_unsigned
     };
 
-    // Response flit layout: {dest_x, dest_y, read_data[31:0]}
+    // Response flit layout: {dest_x, dest_y, dest_z, read_data[31:0]}
     // (no src needed - the only thing that can ever address a response
-    // to (MY_X,MY_Y) is the memory node answering THIS core's own
+    // to (MY_X,MY_Y,MY_Z) is the memory node answering THIS core's own
     // request, per the module-header reasoning above).
     wire [31:0] resp_read_data = resp_in_flit[31:0];
 

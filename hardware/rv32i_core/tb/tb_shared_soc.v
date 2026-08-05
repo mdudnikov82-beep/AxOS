@@ -1,14 +1,16 @@
-// Cross-core communication test: e0-core (sw/shared_producer.hex)
-// writes a payload + ready flag into shared memory; p0-core
-// (sw/shared_consumer.hex) polls for it, reads the payload, and
-// computes a result that can only be correct (127) if it genuinely
-// observed the OTHER core's write through the arbitrated shared_bus -
-// not just "cores ran without crashing" like tb_soc.v proves. Every
-// other core (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11) runs an independent private-memory-only
-// program alongside, proving the cross-core handshake still works
-// correctly through the mesh with 22 other cores
-// concurrently contending for the same physical network (scaled up
-// from 6P+6E's ten), not just as a 2-core degenerate case.
+// Cross-core communication test: e0-core (sw/shared_producer.hex, at grid
+// position (1,2,1)) writes a payload + ready flag into shared memory;
+// p0-core (sw/shared_consumer.hex, at (0,0,0)) polls for it, reads the
+// payload, and computes a result that can only be correct (127) if it
+// genuinely observed the OTHER core's write through the arbitrated
+// NoC - not just "cores ran without crashing" like tb_soc.v proves.
+// Both p0 and e0 need real X+Y+Z movement to reach the memory node at
+// (1,1,1), genuinely exercising the new Z-axis routing end-to-end in
+// the full mesh, not just the isolated router.v tests. Every other
+// core (33 of them) runs an independent private-memory-only program
+// alongside, proving the cross-core handshake still works correctly
+// through the mesh with 33 other cores concurrently contending for
+// the same physical network, not just as a 2-core degenerate case.
 `timescale 1ns/1ps
 
 `ifndef P0_INSTR_HEX
@@ -47,6 +49,24 @@
 `ifndef P11_INSTR_HEX
 `define P11_INSTR_HEX "sw/test1.hex"
 `endif
+`ifndef P12_INSTR_HEX
+`define P12_INSTR_HEX "sw/test1.hex"
+`endif
+`ifndef P13_INSTR_HEX
+`define P13_INSTR_HEX "sw/test1.hex"
+`endif
+`ifndef P14_INSTR_HEX
+`define P14_INSTR_HEX "sw/test1.hex"
+`endif
+`ifndef P15_INSTR_HEX
+`define P15_INSTR_HEX "sw/test1.hex"
+`endif
+`ifndef P16_INSTR_HEX
+`define P16_INSTR_HEX "sw/test1.hex"
+`endif
+`ifndef P17_INSTR_HEX
+`define P17_INSTR_HEX "sw/test1.hex"
+`endif
 `ifndef E0_INSTR_HEX
 `define E0_INSTR_HEX "sw/shared_producer.hex"
 `endif
@@ -83,14 +103,29 @@
 `ifndef E11_INSTR_HEX
 `define E11_INSTR_HEX "sw/test1.hex"
 `endif
+`ifndef E12_INSTR_HEX
+`define E12_INSTR_HEX "sw/test1.hex"
+`endif
+`ifndef E13_INSTR_HEX
+`define E13_INSTR_HEX "sw/test1.hex"
+`endif
+`ifndef E14_INSTR_HEX
+`define E14_INSTR_HEX "sw/test1.hex"
+`endif
+`ifndef E15_INSTR_HEX
+`define E15_INSTR_HEX "sw/test1.hex"
+`endif
+`ifndef E16_INSTR_HEX
+`define E16_INSTR_HEX "sw/test1.hex"
+`endif
 
 module tb_shared_soc;
     reg clk;
     reg reset;
-    wire p0_halted, p1_halted, p2_halted, p3_halted, p4_halted, p5_halted, p6_halted, p7_halted, p8_halted, p9_halted, p10_halted, p11_halted, e0_halted, e1_halted, e2_halted, e3_halted, e4_halted, e5_halted, e6_halted, e7_halted, e8_halted, e9_halted, e10_halted, e11_halted, all_halted;
-    wire [31:0] p0_tohost, p1_tohost, p2_tohost, p3_tohost, p4_tohost, p5_tohost, p6_tohost, p7_tohost, p8_tohost, p9_tohost, p10_tohost, p11_tohost, e0_tohost, e1_tohost, e2_tohost, e3_tohost, e4_tohost, e5_tohost, e6_tohost, e7_tohost, e8_tohost, e9_tohost, e10_tohost, e11_tohost;
+    wire p0_halted, p1_halted, p2_halted, p3_halted, p4_halted, p5_halted, p6_halted, p7_halted, p8_halted, p9_halted, p10_halted, p11_halted, p12_halted, p13_halted, p14_halted, p15_halted, p16_halted, p17_halted, e0_halted, e1_halted, e2_halted, e3_halted, e4_halted, e5_halted, e6_halted, e7_halted, e8_halted, e9_halted, e10_halted, e11_halted, e12_halted, e13_halted, e14_halted, e15_halted, e16_halted, all_halted;
+    wire [31:0] p0_tohost, p1_tohost, p2_tohost, p3_tohost, p4_tohost, p5_tohost, p6_tohost, p7_tohost, p8_tohost, p9_tohost, p10_tohost, p11_tohost, p12_tohost, p13_tohost, p14_tohost, p15_tohost, p16_tohost, p17_tohost, e0_tohost, e1_tohost, e2_tohost, e3_tohost, e4_tohost, e5_tohost, e6_tohost, e7_tohost, e8_tohost, e9_tohost, e10_tohost, e11_tohost, e12_tohost, e13_tohost, e14_tohost, e15_tohost, e16_tohost;
 
-    integer expect_p0, expect_p1, expect_p2, expect_p3, expect_p4, expect_p5, expect_p6, expect_p7, expect_p8, expect_p9, expect_p10, expect_p11, expect_e0, expect_e1, expect_e2, expect_e3, expect_e4, expect_e5, expect_e6, expect_e7, expect_e8, expect_e9, expect_e10, expect_e11;
+    integer expect_p0, expect_p1, expect_p2, expect_p3, expect_p4, expect_p5, expect_p6, expect_p7, expect_p8, expect_p9, expect_p10, expect_p11, expect_p12, expect_p13, expect_p14, expect_p15, expect_p16, expect_p17, expect_e0, expect_e1, expect_e2, expect_e3, expect_e4, expect_e5, expect_e6, expect_e7, expect_e8, expect_e9, expect_e10, expect_e11, expect_e12, expect_e13, expect_e14, expect_e15, expect_e16;
     integer max_cycles;
     integer cycle_count;
     integer trace_enabled;
@@ -98,7 +133,7 @@ module tb_shared_soc;
 
     soc_top #(
         .INSTR_MEM_WORDS(1024),
-        .P0_INSTR_HEX(`P0_INSTR_HEX), .P1_INSTR_HEX(`P1_INSTR_HEX), .P2_INSTR_HEX(`P2_INSTR_HEX), .P3_INSTR_HEX(`P3_INSTR_HEX), .P4_INSTR_HEX(`P4_INSTR_HEX), .P5_INSTR_HEX(`P5_INSTR_HEX), .P6_INSTR_HEX(`P6_INSTR_HEX), .P7_INSTR_HEX(`P7_INSTR_HEX), .P8_INSTR_HEX(`P8_INSTR_HEX), .P9_INSTR_HEX(`P9_INSTR_HEX), .P10_INSTR_HEX(`P10_INSTR_HEX), .P11_INSTR_HEX(`P11_INSTR_HEX), .E0_INSTR_HEX(`E0_INSTR_HEX), .E1_INSTR_HEX(`E1_INSTR_HEX), .E2_INSTR_HEX(`E2_INSTR_HEX), .E3_INSTR_HEX(`E3_INSTR_HEX), .E4_INSTR_HEX(`E4_INSTR_HEX), .E5_INSTR_HEX(`E5_INSTR_HEX), .E6_INSTR_HEX(`E6_INSTR_HEX), .E7_INSTR_HEX(`E7_INSTR_HEX), .E8_INSTR_HEX(`E8_INSTR_HEX), .E9_INSTR_HEX(`E9_INSTR_HEX), .E10_INSTR_HEX(`E10_INSTR_HEX), .E11_INSTR_HEX(`E11_INSTR_HEX),
+        .P0_INSTR_HEX(`P0_INSTR_HEX), .P1_INSTR_HEX(`P1_INSTR_HEX), .P2_INSTR_HEX(`P2_INSTR_HEX), .P3_INSTR_HEX(`P3_INSTR_HEX), .P4_INSTR_HEX(`P4_INSTR_HEX), .P5_INSTR_HEX(`P5_INSTR_HEX), .P6_INSTR_HEX(`P6_INSTR_HEX), .P7_INSTR_HEX(`P7_INSTR_HEX), .P8_INSTR_HEX(`P8_INSTR_HEX), .P9_INSTR_HEX(`P9_INSTR_HEX), .P10_INSTR_HEX(`P10_INSTR_HEX), .P11_INSTR_HEX(`P11_INSTR_HEX), .P12_INSTR_HEX(`P12_INSTR_HEX), .P13_INSTR_HEX(`P13_INSTR_HEX), .P14_INSTR_HEX(`P14_INSTR_HEX), .P15_INSTR_HEX(`P15_INSTR_HEX), .P16_INSTR_HEX(`P16_INSTR_HEX), .P17_INSTR_HEX(`P17_INSTR_HEX), .E0_INSTR_HEX(`E0_INSTR_HEX), .E1_INSTR_HEX(`E1_INSTR_HEX), .E2_INSTR_HEX(`E2_INSTR_HEX), .E3_INSTR_HEX(`E3_INSTR_HEX), .E4_INSTR_HEX(`E4_INSTR_HEX), .E5_INSTR_HEX(`E5_INSTR_HEX), .E6_INSTR_HEX(`E6_INSTR_HEX), .E7_INSTR_HEX(`E7_INSTR_HEX), .E8_INSTR_HEX(`E8_INSTR_HEX), .E9_INSTR_HEX(`E9_INSTR_HEX), .E10_INSTR_HEX(`E10_INSTR_HEX), .E11_INSTR_HEX(`E11_INSTR_HEX), .E12_INSTR_HEX(`E12_INSTR_HEX), .E13_INSTR_HEX(`E13_INSTR_HEX), .E14_INSTR_HEX(`E14_INSTR_HEX), .E15_INSTR_HEX(`E15_INSTR_HEX), .E16_INSTR_HEX(`E16_INSTR_HEX),
         .DATA_MEM_BYTES(8192)
     ) dut (
         .clk(clk), .reset(reset),
@@ -114,6 +149,12 @@ module tb_shared_soc;
         .p9_halted(p9_halted), .p9_tohost(p9_tohost),
         .p10_halted(p10_halted), .p10_tohost(p10_tohost),
         .p11_halted(p11_halted), .p11_tohost(p11_tohost),
+        .p12_halted(p12_halted), .p12_tohost(p12_tohost),
+        .p13_halted(p13_halted), .p13_tohost(p13_tohost),
+        .p14_halted(p14_halted), .p14_tohost(p14_tohost),
+        .p15_halted(p15_halted), .p15_tohost(p15_tohost),
+        .p16_halted(p16_halted), .p16_tohost(p16_tohost),
+        .p17_halted(p17_halted), .p17_tohost(p17_tohost),
         .e0_halted(e0_halted), .e0_tohost(e0_tohost),
         .e1_halted(e1_halted), .e1_tohost(e1_tohost),
         .e2_halted(e2_halted), .e2_tohost(e2_tohost),
@@ -126,6 +167,11 @@ module tb_shared_soc;
         .e9_halted(e9_halted), .e9_tohost(e9_tohost),
         .e10_halted(e10_halted), .e10_tohost(e10_tohost),
         .e11_halted(e11_halted), .e11_tohost(e11_tohost),
+        .e12_halted(e12_halted), .e12_tohost(e12_tohost),
+        .e13_halted(e13_halted), .e13_tohost(e13_tohost),
+        .e14_halted(e14_halted), .e14_tohost(e14_tohost),
+        .e15_halted(e15_halted), .e15_tohost(e15_tohost),
+        .e16_halted(e16_halted), .e16_tohost(e16_tohost),
         .all_halted(all_halted)
     );
 
@@ -148,7 +194,6 @@ module tb_shared_soc;
         $dumpvars(0, tb_shared_soc);
 
         if (!$value$plusargs("EXPECT_P0_TOHOST=%d", expect_p0)) expect_p0 = 127;
-        if (!$value$plusargs("EXPECT_E0_TOHOST=%d", expect_e0)) expect_e0 = 77;
         if (!$value$plusargs("EXPECT_P1_TOHOST=%d", expect_p1)) expect_p1 = 42;
         if (!$value$plusargs("EXPECT_P2_TOHOST=%d", expect_p2)) expect_p2 = 42;
         if (!$value$plusargs("EXPECT_P3_TOHOST=%d", expect_p3)) expect_p3 = 42;
@@ -160,6 +205,13 @@ module tb_shared_soc;
         if (!$value$plusargs("EXPECT_P9_TOHOST=%d", expect_p9)) expect_p9 = 42;
         if (!$value$plusargs("EXPECT_P10_TOHOST=%d", expect_p10)) expect_p10 = 42;
         if (!$value$plusargs("EXPECT_P11_TOHOST=%d", expect_p11)) expect_p11 = 42;
+        if (!$value$plusargs("EXPECT_P12_TOHOST=%d", expect_p12)) expect_p12 = 42;
+        if (!$value$plusargs("EXPECT_P13_TOHOST=%d", expect_p13)) expect_p13 = 42;
+        if (!$value$plusargs("EXPECT_P14_TOHOST=%d", expect_p14)) expect_p14 = 42;
+        if (!$value$plusargs("EXPECT_P15_TOHOST=%d", expect_p15)) expect_p15 = 42;
+        if (!$value$plusargs("EXPECT_P16_TOHOST=%d", expect_p16)) expect_p16 = 42;
+        if (!$value$plusargs("EXPECT_P17_TOHOST=%d", expect_p17)) expect_p17 = 42;
+        if (!$value$plusargs("EXPECT_E0_TOHOST=%d", expect_e0)) expect_e0 = 77;
         if (!$value$plusargs("EXPECT_E1_TOHOST=%d", expect_e1)) expect_e1 = 42;
         if (!$value$plusargs("EXPECT_E2_TOHOST=%d", expect_e2)) expect_e2 = 42;
         if (!$value$plusargs("EXPECT_E3_TOHOST=%d", expect_e3)) expect_e3 = 42;
@@ -171,6 +223,11 @@ module tb_shared_soc;
         if (!$value$plusargs("EXPECT_E9_TOHOST=%d", expect_e9)) expect_e9 = 42;
         if (!$value$plusargs("EXPECT_E10_TOHOST=%d", expect_e10)) expect_e10 = 42;
         if (!$value$plusargs("EXPECT_E11_TOHOST=%d", expect_e11)) expect_e11 = 42;
+        if (!$value$plusargs("EXPECT_E12_TOHOST=%d", expect_e12)) expect_e12 = 42;
+        if (!$value$plusargs("EXPECT_E13_TOHOST=%d", expect_e13)) expect_e13 = 42;
+        if (!$value$plusargs("EXPECT_E14_TOHOST=%d", expect_e14)) expect_e14 = 42;
+        if (!$value$plusargs("EXPECT_E15_TOHOST=%d", expect_e15)) expect_e15 = 42;
+        if (!$value$plusargs("EXPECT_E16_TOHOST=%d", expect_e16)) expect_e16 = 42;
         if (!$value$plusargs("MAX_CYCLES=%d", max_cycles)) max_cycles = 150;
         trace_enabled = $test$plusargs("TRACE");
 
@@ -181,27 +238,16 @@ module tb_shared_soc;
         @(posedge clk); @(posedge clk);
         reset = 0;
 
-        if (trace_enabled) begin
-            $display("cyc | p0: pc       stall | e0: pc       stall | p0_req p0_gr e0_req e0_gr");
-            $display("----+---------------------+---------------------+---------------------------");
-        end
-
         while (!all_halted && cycle_count < max_cycles) begin
             @(posedge clk);
             cycle_count = cycle_count + 1;
-            if (trace_enabled) begin
-                $display("%3d | p0: %h  %b     | e0: %h  %b     |    %b      %b      %b      %b",
-                         cycle_count, dut.p0_core.pc, dut.p0_core.mem_stall,
-                         dut.e0_core.pc, dut.e0_core.mem_stall,
-                         dut.p0_bus_req, dut.p0_bus_grant, dut.e0_bus_req, dut.e0_bus_grant);
-            end
         end
 
         if (!all_halted) begin
-            $display("FAIL: not all 24 cores halted within %0d cycles (p0=%b p1=%b p2=%b p3=%b p4=%b p5=%b p6=%b p7=%b p8=%b p9=%b p10=%b p11=%b e0=%b e1=%b e2=%b e3=%b e4=%b e5=%b e6=%b e7=%b e8=%b e9=%b e10=%b e11=%b)",
-                      max_cycles, p0_halted, p1_halted, p2_halted, p3_halted, p4_halted, p5_halted, p6_halted, p7_halted, p8_halted, p9_halted, p10_halted, p11_halted, e0_halted, e1_halted, e2_halted, e3_halted, e4_halted, e5_halted, e6_halted, e7_halted, e8_halted, e9_halted, e10_halted, e11_halted);
+            $display("FAIL: not all 35 cores halted within %0d cycles (p0=%b p1=%b p2=%b p3=%b p4=%b p5=%b p6=%b p7=%b p8=%b p9=%b p10=%b p11=%b p12=%b p13=%b p14=%b p15=%b p16=%b p17=%b e0=%b e1=%b e2=%b e3=%b e4=%b e5=%b e6=%b e7=%b e8=%b e9=%b e10=%b e11=%b e12=%b e13=%b e14=%b e15=%b e16=%b)",
+                      max_cycles, p0_halted, p1_halted, p2_halted, p3_halted, p4_halted, p5_halted, p6_halted, p7_halted, p8_halted, p9_halted, p10_halted, p11_halted, p12_halted, p13_halted, p14_halted, p15_halted, p16_halted, p17_halted, e0_halted, e1_halted, e2_halted, e3_halted, e4_halted, e5_halted, e6_halted, e7_halted, e8_halted, e9_halted, e10_halted, e11_halted, e12_halted, e13_halted, e14_halted, e15_halted, e16_halted);
         end else begin
-            $display("All 24 cores halted after %0d cycles.", cycle_count);
+            $display("All 35 cores halted after %0d cycles.", cycle_count);
             check_core(p0_tohost, expect_p0, "p0-core (consumer)");
             check_core(e0_tohost, expect_e0, "e0-core (producer)");
             check_core(p1_tohost, expect_p1, "p1-core (independent)");
@@ -215,6 +261,12 @@ module tb_shared_soc;
             check_core(p9_tohost, expect_p9, "p9-core (independent)");
             check_core(p10_tohost, expect_p10, "p10-core (independent)");
             check_core(p11_tohost, expect_p11, "p11-core (independent)");
+            check_core(p12_tohost, expect_p12, "p12-core (independent)");
+            check_core(p13_tohost, expect_p13, "p13-core (independent)");
+            check_core(p14_tohost, expect_p14, "p14-core (independent)");
+            check_core(p15_tohost, expect_p15, "p15-core (independent)");
+            check_core(p16_tohost, expect_p16, "p16-core (independent)");
+            check_core(p17_tohost, expect_p17, "p17-core (independent)");
             check_core(e1_tohost, expect_e1, "e1-core (independent)");
             check_core(e2_tohost, expect_e2, "e2-core (independent)");
             check_core(e3_tohost, expect_e3, "e3-core (independent)");
@@ -226,6 +278,11 @@ module tb_shared_soc;
             check_core(e9_tohost, expect_e9, "e9-core (independent)");
             check_core(e10_tohost, expect_e10, "e10-core (independent)");
             check_core(e11_tohost, expect_e11, "e11-core (independent)");
+            check_core(e12_tohost, expect_e12, "e12-core (independent)");
+            check_core(e13_tohost, expect_e13, "e13-core (independent)");
+            check_core(e14_tohost, expect_e14, "e14-core (independent)");
+            check_core(e15_tohost, expect_e15, "e15-core (independent)");
+            check_core(e16_tohost, expect_e16, "e16-core (independent)");
             if (!any_fail) $display("PASS: cross-core communication verified (p0 read e0's write)");
         end
 

@@ -11,8 +11,8 @@
 `timescale 1ns/1ps
 
 module tb_noc_link;
-    localparam RQW = 76;
-    localparam RSW = 36;
+    localparam RQW = 80; // 6*COORD_BITS + 68 at COORD_BITS=2 (see noc_core_adapter.v)
+    localparam RSW = 38; // 3*COORD_BITS + 32 at COORD_BITS=2
 
     reg clk, reset;
     integer errors;
@@ -33,7 +33,7 @@ module tb_noc_link;
     wire        bus_grant;
     wire [31:0] bus_read_data;
 
-    noc_core_adapter #(.MY_X(0), .MY_Y(0), .MEM_X(1), .MEM_Y(0),
+    noc_core_adapter #(.MY_X(0), .MY_Y(0), .MY_Z(0), .MEM_X(1), .MEM_Y(0), .MEM_Z(0),
                         .REQ_FLIT_WIDTH(RQW), .RESP_FLIT_WIDTH(RSW)) core_adap (
         .clk(clk), .reset(reset),
         .bus_req(bus_req), .bus_addr(bus_addr), .bus_write_data(bus_write_data),
@@ -50,7 +50,7 @@ module tb_noc_link;
     wire                core_resp_in_ready;
 
     // ---- req router (0,0) ----
-    router #(.FLIT_WIDTH(RQW), .MY_X(0), .MY_Y(0)) req_r00 (
+    router #(.FLIT_WIDTH(RQW), .MY_X(0), .MY_Y(0), .MY_Z(0)) req_r00 (
         .clk(clk), .reset(reset),
         .n_in_valid(1'b0), .n_in_flit({RQW{1'b0}}), .n_in_ready(),
         .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
@@ -60,13 +60,17 @@ module tb_noc_link;
         .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
         .w_in_valid(1'b0), .w_in_flit({RQW{1'b0}}), .w_in_ready(),
         .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(1'b0), .u_in_flit({RQW{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(1'b0), .d_in_flit({RQW{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(core_req_out_valid), .l_in_flit(core_req_out_flit), .l_in_ready(core_req_out_ready),
-        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0) // (0,0) never receives a request
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0) // (0,0,0) never receives a request
     );
     wire req_r00_e_out_valid; wire [RQW-1:0] req_r00_e_out_flit; wire req_r00_e_in_ready;
 
     // ---- req router (1,0) ----
-    router #(.FLIT_WIDTH(RQW), .MY_X(1), .MY_Y(0)) req_r10 (
+    router #(.FLIT_WIDTH(RQW), .MY_X(1), .MY_Y(0), .MY_Z(0)) req_r10 (
         .clk(clk), .reset(reset),
         .n_in_valid(1'b0), .n_in_flit({RQW{1'b0}}), .n_in_ready(),
         .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
@@ -76,13 +80,17 @@ module tb_noc_link;
         .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
         .w_in_valid(req_r00_e_out_valid), .w_in_flit(req_r00_e_out_flit), .w_in_ready(req_r10_w_in_ready),
         .w_out_valid(req_r10_w_out_valid), .w_out_flit(req_r10_w_out_flit), .w_out_ready(req_r00_e_in_ready),
+        .u_in_valid(1'b0), .u_in_flit({RQW{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(1'b0), .d_in_flit({RQW{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(1'b0), .l_in_flit({RQW{1'b0}}), .l_in_ready(),
         .l_out_valid(mem_req_in_valid), .l_out_flit(mem_req_in_flit), .l_out_ready(mem_req_in_ready)
     );
     wire req_r10_w_out_valid; wire [RQW-1:0] req_r10_w_out_flit; wire req_r10_w_in_ready;
 
     // ---- resp router (1,0) ----
-    router #(.FLIT_WIDTH(RSW), .MY_X(1), .MY_Y(0)) resp_r10 (
+    router #(.FLIT_WIDTH(RSW), .MY_X(1), .MY_Y(0), .MY_Z(0)) resp_r10 (
         .clk(clk), .reset(reset),
         .n_in_valid(1'b0), .n_in_flit({RSW{1'b0}}), .n_in_ready(),
         .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
@@ -92,13 +100,17 @@ module tb_noc_link;
         .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
         .w_in_valid(resp_r00_e_out_valid), .w_in_flit(resp_r00_e_out_flit), .w_in_ready(resp_r10_w_in_ready),
         .w_out_valid(resp_r10_w_out_valid), .w_out_flit(resp_r10_w_out_flit), .w_out_ready(resp_r00_e_in_ready),
+        .u_in_valid(1'b0), .u_in_flit({RSW{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(1'b0), .d_in_flit({RSW{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(mem_resp_out_valid), .l_in_flit(mem_resp_out_flit), .l_in_ready(mem_resp_out_ready),
-        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0) // (1,0) never RECEIVES a response
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0) // (1,0,0) never RECEIVES a response
     );
     wire resp_r10_w_out_valid; wire [RSW-1:0] resp_r10_w_out_flit; wire resp_r10_w_in_ready;
 
     // ---- resp router (0,0) ----
-    router #(.FLIT_WIDTH(RSW), .MY_X(0), .MY_Y(0)) resp_r00 (
+    router #(.FLIT_WIDTH(RSW), .MY_X(0), .MY_Y(0), .MY_Z(0)) resp_r00 (
         .clk(clk), .reset(reset),
         .n_in_valid(1'b0), .n_in_flit({RSW{1'b0}}), .n_in_ready(),
         .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
@@ -108,6 +120,10 @@ module tb_noc_link;
         .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
         .w_in_valid(1'b0), .w_in_flit({RSW{1'b0}}), .w_in_ready(),
         .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(1'b0), .u_in_flit({RSW{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(1'b0), .d_in_flit({RSW{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .l_in_valid(1'b0), .l_in_flit({RSW{1'b0}}), .l_in_ready(),
         .l_out_valid(core_resp_in_valid), .l_out_flit(core_resp_in_flit), .l_out_ready(core_resp_in_ready)
     );
