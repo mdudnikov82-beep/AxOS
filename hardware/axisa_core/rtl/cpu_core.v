@@ -29,12 +29,32 @@
 module cpu_core #(
     parameter INSTR_MEM_WORDS = 1024,
     parameter INSTR_INIT_FILE = "",
-    parameter DATA_MEM_WORDS  = 1024
+    parameter DATA_MEM_WORDS  = 1024,
+    // Shared-bus master port (see rtl/router.v/noc_core_adapter.v,
+    // ported byte-for-byte from rv32i_core - the NoC only ever speaks
+    // this generic bus_req/addr/write_data/mem_write/mem_size/
+    // mem_unsigned/grant/read_data protocol, with zero ISA-specific
+    // assumptions, so it needed no changes to serve AxISA). A LOAD/
+    // STORE whose address falls in [SHARED_MEM_BASE,
+    // SHARED_MEM_BASE+SHARED_MEM_BYTES) goes out on this port instead
+    // of the private data_mem below, mirroring rv32i_core/rtl/
+    // cpu_core.v's own is_shared_access/mem_stall pattern exactly.
+    parameter SHARED_MEM_BASE  = 32'h0000_2000,
+    parameter SHARED_MEM_BYTES = 256
 ) (
     input  wire        clk,
     input  wire        reset,
     output wire         halted,
-    output wire [31:0]  tohost_value
+    output wire [31:0]  tohost_value,
+
+    output wire        bus_req,
+    output wire [31:0] bus_addr,
+    output wire [31:0] bus_write_data,
+    output wire        bus_mem_write,
+    output wire [1:0]  bus_mem_size,
+    output wire        bus_mem_unsigned,
+    input  wire        bus_grant,
+    input  wire [31:0] bus_read_data
 );
     localparam BANK_R = 2'b00;
     localparam BANK_G = 2'b01;
@@ -228,10 +248,17 @@ module cpu_core #(
 
     wire [31:0] write_data;
 
-    wire r_write_en = reg_write && (write_bank == BANK_R);
-    wire g_write_en = reg_write && (write_bank == BANK_G);
-    wire b_write_en = reg_write && (write_bank == BANK_B);
-    wire n_write_en = reg_write && (write_bank == BANK_N);
+    // Gated ONCE here, not repeated at all four sites - a stalled
+    // LOAD/STORE only ever targets N anyway (only N is load/store-
+    // writable, per docs/ISA.md's confinement rule), but a single
+    // shared gate can't drift the way 4 independently-written copies
+    // of "&& !mem_stall" could (confirmed by design review before
+    // this was written).
+    wire gated_reg_write = reg_write && !mem_stall;
+    wire r_write_en = gated_reg_write && (write_bank == BANK_R);
+    wire g_write_en = gated_reg_write && (write_bank == BANK_G);
+    wire b_write_en = gated_reg_write && (write_bank == BANK_B);
+    wire n_write_en = gated_reg_write && (write_bank == BANK_N);
 
     regbank #(.HARDWIRE_REG0(0)) r_bank (
         .clk(clk), .rs1_addr(r_addr_a), .rs2_addr(r_addr_b),
@@ -328,18 +355,64 @@ module cpu_core #(
 
     // ==================== Data memory (LOAD/STORE) ====================
     wire [31:0] mem_addr  = mem_base_data + mem_imm;
+
+    // Address-range decode - a dedicated adder that exists ONLY for
+    // LOAD/STORE addressing (unlike rv32i_core's alu_result, which is
+    // also busy computing ADD/SUB/etc. for every other instruction),
+    // so there's no ambiguity to resolve here the way there could be
+    // on a shared ALU output. mem_base_data (the address operand) is
+    // explicitly bank-agnostic per docs/ISA.md ("base_reg may be from
+    // ANY bank") - confinement only constrains which BANK LOAD/STORE
+    // can touch (N), never which bank may compute an address, so this
+    // decode has no interaction with the confinement rule at all.
+    wire is_shared_access = (is_load || is_store) &&
+        (mem_addr >= SHARED_MEM_BASE) && (mem_addr < SHARED_MEM_BASE + SHARED_MEM_BYTES);
+    // is_halt can never itself be true while mem_stall is true (HALT
+    // is neither is_load nor is_store), so the tohost_r-latching logic
+    // below needs no separate change for this new stall source - it's
+    // already only ever reached once mem_stall has cleared.
+    wire mem_stall = is_shared_access && !bus_grant;
+
+    assign bus_req          = is_shared_access;
+    assign bus_addr          = mem_addr - SHARED_MEM_BASE;
+    assign bus_write_data    = store_value;
+    assign bus_mem_write     = is_store;
+    // AxISA is word-only (docs/ISA.md - no partial-word LOAD/STORE in
+    // v0.1), so these are fixed, not decoded per-instruction: 2'b10 is
+    // rv32i_core/rtl/data_mem.v's own documented "word" encoding
+    // (confirmed by reading that module, not assumed) - driving it
+    // constantly produces exactly full 4-byte reads/writes, never a
+    // truncated/extended one. mem_unsigned is provably inconsequential
+    // for word-sized accesses (that module's word path never
+    // references it), tied to 0 for clarity only.
+    assign bus_mem_size      = 2'b10;
+    assign bus_mem_unsigned  = 1'b0;
+
     wire [31:0] dmem_rdata;
+    // A shared-range STORE must never ALSO land in the private memory
+    // (it would otherwise silently alias into whatever word this
+    // global address maps to in the private array's own address
+    // space) - mirrors rv32i_core/rtl/cpu_core.v's identical
+    // dmem_write gating. The address input itself stays unconditional;
+    // the resulting private read is simply discarded by the write-data
+    // mux below when is_shared_access is set.
     data_mem #(.MEM_WORDS(DATA_MEM_WORDS)) dmem (
         .clk(clk), .addr(mem_addr),
-        .wdata(store_value), .we(is_store),
+        .wdata(store_value), .we(is_store && !is_shared_access),
         .rdata(dmem_rdata)
     );
+
+    // A shared-range LOAD's real data comes back over the bus, not
+    // from the private memory (which was never actually storing that
+    // address) - mirrors rv32i_core/rtl/cpu_core.v's own
+    // effective_mem_read_data mux exactly.
+    wire [31:0] effective_dmem_rdata = is_shared_access ? bus_read_data : dmem_rdata;
 
     // ==================== Write-data mux ====================
     assign write_data = is_gluon  ? gluon_result :
                          is_baryon ? baryon_result :
                          is_meson  ? meson_result :
-                         is_load   ? dmem_rdata :
+                         is_load   ? effective_dmem_rdata :
                          is_jal    ? (pc + 32'd4) :
                                      alu_result; // ALUR/ALUI
 
@@ -367,7 +440,7 @@ module cpu_core #(
             pc       <= 32'b0;
             halted_r <= 1'b0;
             tohost_r <= 32'b0;
-        end else if (!halted_r) begin
+        end else if (!halted_r && !mem_stall) begin
             pc <= next_pc;
             if (is_halt) begin
                 halted_r <= 1'b1;

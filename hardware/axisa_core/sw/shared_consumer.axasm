@@ -1,0 +1,12 @@
+# AxISA cross-core consumer: busy-waits on the ready flag (a real
+# backward branch, already proven correct in demo_collider.axasm),
+# then reads the payload the producer published and folds it into a
+# result that's only correct (127) if it genuinely observed the OTHER
+# core's write through the arbitrated NoC.
+    ADDI N1, N0, 0x2000   # n1 = shared base
+poll:
+    LOAD N2, N1, 0        # n2 = ready flag
+    BEQ  N2, N0, poll     # loop while still zero
+    LOAD N3, N1, 4        # n3 = payload (77, if the producer really ran first)
+    ADDI N4, N3, 50       # n4 = 77 + 50 = 127
+    HALT N4               # tohost = 127

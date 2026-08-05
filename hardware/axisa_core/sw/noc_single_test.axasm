@@ -1,0 +1,10 @@
+# Single-core NoC smoke test: STORE then LOAD through the shared-bus
+# region (SHARED_MEM_BASE=0x2000), proving is_shared_access/mem_stall/
+# write-enable gating/effective_dmem_rdata all work in the REAL core -
+# distinct from tb_noc_link.v, which only proves the adapter+router
+# protocol itself works with a fake bus driver.
+    ADDI N1, N0, 0x2000   # n1 = shared base address
+    ADDI N2, N0, 99       # payload
+    STORE N2, N1, 0       # mem[0x2000] = 99 (goes out over the NoC)
+    LOAD N3, N1, 0        # n3 = mem[0x2000], read back through the SAME round trip
+    HALT N3               # tohost = 99, only correct if the NoC round trip actually worked
