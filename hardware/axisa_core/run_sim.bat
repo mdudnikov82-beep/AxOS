@@ -56,17 +56,18 @@ if %errorlevel% neq 0 (echo FAILED: tb_noc_single & "%VVP%" out_nocsingle.vvp & 
 echo   OK (tohost=99 - real STORE then LOAD round trip through the NoC)
 
 echo.
-echo ===== Mini-SoC: AxISA multi-core mesh (3D 4x3x4, 47 cores + 1 memory) =====
+echo ===== Mini-SoC: AxISA multi-core mesh (3D 8x8x16, 1023 cores + 1 memory) =====
+echo NOTE: this section alone takes several minutes to compile (over 1000 core instances) - by far the slowest step in this suite
 python sw\axasm.py sw\shared_producer.axasm sw\shared_producer.hex
 if %errorlevel% neq 0 goto :error
 python sw\axasm.py sw\shared_consumer.axasm sw\shared_consumer.hex
 if %errorlevel% neq 0 goto :error
-echo c0 (consumer, busy-waits, 3 hops from memory) reads c1's (producer, 2 hops) payload through the arbitrated NoC - real X+Y+Z routing, not just X/Y - only correct (127) if it genuinely observed the other core's write; c2-c46 run independently (test1.hex) alongside
+echo c0 (consumer, busy-waits, 13 hops from memory) reads c1's (producer, 12 hops) payload through the arbitrated NoC - real X+Y+Z routing, not just X/Y - only correct (127) if it genuinely observed the other core's write; c2-c1022 run independently (test1.hex) alongside
 "%IVERILOG%" -o out_soc.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\cpu_core.v rtl\shared_mem_backing.v rtl\router.v rtl\noc_core_adapter.v rtl\noc_mem_adapter.v rtl\soc_top.v tb\tb_soc.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_soc.vvp | findstr /C:"PASS: cross-core communication verified" >nul
 if %errorlevel% neq 0 (echo FAILED: AxISA mini-SoC & "%VVP%" out_soc.vvp & goto :error)
-echo   OK (c0=127, c1=77, c2-c46=200, all 47 concurrent, cross-core communication verified through real Z-axis routing)
+echo   OK (c0=127, c1=77, c2-c1022=200, all 1023 concurrent, cross-core communication verified through real Z-axis routing)
 
 echo.
 echo ===== AxISA mini-kernel: UART console + one-command shell (real .axasm source) =====
