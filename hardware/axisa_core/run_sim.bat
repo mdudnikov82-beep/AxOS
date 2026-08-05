@@ -27,6 +27,17 @@ if %errorlevel% neq 0 (echo FAILED: tb_cpu2 & "%VVP%" out_tb_cpu2.vvp & goto :er
 echo   OK (tohost=324 - chained BARYON+MESON+GLUON+LOAD/STORE+JAL result; r3=3 - GLUON same-bank 2R+1W, direct peek)
 
 echo.
+echo ===== AxISA demo: "particle collider" (real .axasm source, sw\axasm.py) =====
+python sw\axasm.py sw\demo_collider.axasm sw\collider.hex
+if %errorlevel% neq 0 goto :error
+
+"%IVERILOG%" -o out_collider.vvp "-DINSTR_HEX=\"sw/collider.hex\"" rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\cpu_core.v tb\tb_run.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_collider.vvp +EXPECT_TOHOST=28 | findstr /C:"PASS: tohost matches expected value" >nul
+if %errorlevel% neq 0 (echo FAILED: collider demo & "%VVP%" out_collider.vvp +EXPECT_TOHOST=28 & goto :error)
+echo   OK (tohost=28 - real backward-branch loop, BARYON collisions, STORE/LOAD round-trip, all assembled from text)
+
+echo.
 echo ===== ALL SIMULATIONS PASSED =====
 exit /b 0
 

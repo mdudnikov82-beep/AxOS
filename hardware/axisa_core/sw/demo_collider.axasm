@@ -1,0 +1,27 @@
+# AxISA demo: "particle collider" (see docs/ISA.md) - real assembly
+# source for axasm.py, not hand-packed Python calls like milestone
+# 1/2's own test programs. Counts down a collision counter, BARYON-
+# combines a fresh quark triplet each iteration into a real energy
+# value, accumulates a running total, logs every collision's energy
+# to memory, and reads the LAST one back to prove the STORE/LOAD
+# round-trip actually persisted. This is also this project's first
+# BACKWARD branch (a genuine loop) - every milestone 1/2 test program
+# only ever had a forward skip.
+    ADDI R1, R0, 5      # r1 = collision counter (also this collision's R-quark energy)
+    ADDI G1, G0, 1      # g1 = fixed G-quark energy
+    ADDI B1, B0, 1      # b1 = fixed B-quark energy
+    ADDI N1, N0, 0      # n1 = running total energy
+    ADDI N3, N0, 0      # n3 = next event-log byte address
+loop:
+    BEQ R1, R0, done          # exit when the counter hits zero
+    BARYON 0, N4, R1, G1, B1  # n4 = r1+g1+b1 (this collision's energy)
+    ADD N1, N1, N4            # n1 += n4
+    STORE N4, N3, 0            # event log[n3] = n4
+    ADD N7, N3, N0             # n7 = address of the event just stored
+    ADDI N3, N3, 4              # advance the log pointer
+    SUBI R1, R1, 1                # counter -= 1
+    BEQ N0, N0, loop               # unconditional (n0 always equals n0) - jump back
+done:
+    LOAD N6, N7, 0             # n6 = event log[n7] (read back the LAST stored energy)
+    ADD N5, N1, N6              # n5 = n1 + n6 (only right if the loop AND the STORE/LOAD round-trip both worked)
+    HALT N5
