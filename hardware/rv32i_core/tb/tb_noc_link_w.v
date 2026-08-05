@@ -1,24 +1,16 @@
-// Minimal 2-node NoC integration test: one core-side adapter at
-// (0,0,0,0), one memory adapter at (1,0,0,0), connected by a single
-// E/W hop (the X axis) on each of the two (request/response) router
-// networks. Isolates "does the adapter+router round-trip protocol
-// actually work" from "was the full mesh wired correctly" - matches
-// this project's established practice of testing a new mechanism at
-// the smallest scale that exercises it before scaling up. A plain
-// reg-driven fake "core" (no real cpu_core.v instance) drives
-// bus_req/bus_addr/etc directly, exactly mirroring the port shape
-// noc_core_adapter.v expects from a real core.
-//
-// This file has always tested the X-axis hop specifically (unchanged
-// through the 2D->3D->4D extensions, each of which just widened
-// FLIT_WIDTH/COORD_BITS and tied off the newest axis's ports as
-// unused, same as done here for ana/kata) - see tb_noc_link_w.v for a
-// DEDICATED single-hop test of the new W axis specifically, per design
-// review: reusing this file's E/W case would prove nothing new about
-// the just-added ana/kata wiring.
+// Minimal 2-node NoC integration test, DEDICATED to the new W axis
+// (ana/kata) specifically - mirrors tb_noc_link.v exactly, except the
+// two nodes differ ONLY in W: a core-side adapter at (0,0,0,0), a
+// memory adapter at (0,0,0,1), connected by a single Ana/Kata hop
+// instead of an E/W hop. Design review flagged this as non-negotiable:
+// reusing tb_noc_link.v's existing X-axis case would prove nothing
+// about the just-added ana/kata wiring, since router.v's per-axis
+// routing logic is hand-written per tier (not derived generically),
+// so a bug specific to the W tier's decode/port-wiring is invisible to
+// every other axis's test.
 `timescale 1ns/1ps
 
-module tb_noc_link;
+module tb_noc_link_w;
     localparam RQW = 92; // 8*COORD_BITS + 68 at COORD_BITS=3 (see noc_core_adapter.v)
     localparam RSW = 44; // 4*COORD_BITS + 32 at COORD_BITS=3
 
@@ -32,7 +24,7 @@ module tb_noc_link;
         end
     endtask
 
-    // ---- Fake core driver ----
+    // ---- Fake core driver, at (0,0,0,0) ----
     reg         bus_req;
     reg  [31:0] bus_addr, bus_write_data;
     reg         bus_mem_write;
@@ -41,7 +33,7 @@ module tb_noc_link;
     wire        bus_grant;
     wire [31:0] bus_read_data;
 
-    noc_core_adapter #(.MY_X(0), .MY_Y(0), .MY_Z(0), .MY_W(0), .MEM_X(1), .MEM_Y(0), .MEM_Z(0), .MEM_W(0),
+    noc_core_adapter #(.MY_X(0), .MY_Y(0), .MY_Z(0), .MY_W(0), .MEM_X(0), .MEM_Y(0), .MEM_Z(0), .MEM_W(1),
                         .REQ_FLIT_WIDTH(RQW), .RESP_FLIT_WIDTH(RSW)) core_adap (
         .clk(clk), .reset(reset),
         .bus_req(bus_req), .bus_addr(bus_addr), .bus_write_data(bus_write_data),
@@ -57,13 +49,37 @@ module tb_noc_link;
     wire [RSW-1:0]      core_resp_in_flit;
     wire                core_resp_in_ready;
 
-    // ---- req router (0,0,0,0) ----
-    router #(.FLIT_WIDTH(RQW), .COORD_BITS(3), .MY_X(0), .MY_Y(0), .MY_Z(0), .MY_W(0)) req_r00 (
+    // ---- req router at (0,0,0,0) ----
+    router #(.FLIT_WIDTH(RQW), .COORD_BITS(3), .MY_X(0), .MY_Y(0), .MY_Z(0), .MY_W(0)) req_r0 (
         .clk(clk), .reset(reset),
         .n_in_valid(1'b0), .n_in_flit({RQW{1'b0}}), .n_in_ready(),
         .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(req_r10_w_out_valid), .e_in_flit(req_r10_w_out_flit), .e_in_ready(req_r00_e_in_ready),
-        .e_out_valid(req_r00_e_out_valid), .e_out_flit(req_r00_e_out_flit), .e_out_ready(req_r10_w_in_ready),
+        .e_in_valid(1'b0), .e_in_flit({RQW{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .s_in_valid(1'b0), .s_in_flit({RQW{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .w_in_valid(1'b0), .w_in_flit({RQW{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(1'b0), .u_in_flit({RQW{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(1'b0), .d_in_flit({RQW{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
+        .ana_in_valid(req_r1_kata_out_valid), .ana_in_flit(req_r1_kata_out_flit), .ana_in_ready(req_r0_ana_in_ready),
+        .ana_out_valid(req_r0_ana_out_valid), .ana_out_flit(req_r0_ana_out_flit), .ana_out_ready(req_r1_kata_in_ready),
+        .kata_in_valid(1'b0), .kata_in_flit({RQW{1'b0}}), .kata_in_ready(),
+        .kata_out_valid(), .kata_out_flit(), .kata_out_ready(1'b0),
+        .l_in_valid(core_req_out_valid), .l_in_flit(core_req_out_flit), .l_in_ready(core_req_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0) // (0,0,0,0) never receives a request
+    );
+    wire req_r0_ana_out_valid; wire [RQW-1:0] req_r0_ana_out_flit; wire req_r0_ana_in_ready;
+
+    // ---- req router at (0,0,0,1) ----
+    router #(.FLIT_WIDTH(RQW), .COORD_BITS(3), .MY_X(0), .MY_Y(0), .MY_Z(0), .MY_W(1)) req_r1 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(1'b0), .n_in_flit({RQW{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .e_in_valid(1'b0), .e_in_flit({RQW{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
         .s_in_valid(1'b0), .s_in_flit({RQW{1'b0}}), .s_in_ready(),
         .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
         .w_in_valid(1'b0), .w_in_flit({RQW{1'b0}}), .w_in_ready(),
@@ -74,68 +90,20 @@ module tb_noc_link;
         .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .ana_in_valid(1'b0), .ana_in_flit({RQW{1'b0}}), .ana_in_ready(),
         .ana_out_valid(), .ana_out_flit(), .ana_out_ready(1'b0),
-        .kata_in_valid(1'b0), .kata_in_flit({RQW{1'b0}}), .kata_in_ready(),
-        .kata_out_valid(), .kata_out_flit(), .kata_out_ready(1'b0),
-        .l_in_valid(core_req_out_valid), .l_in_flit(core_req_out_flit), .l_in_ready(core_req_out_ready),
-        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0) // (0,0,0,0) never receives a request
-    );
-    wire req_r00_e_out_valid; wire [RQW-1:0] req_r00_e_out_flit; wire req_r00_e_in_ready;
-
-    // ---- req router (1,0,0,0) ----
-    router #(.FLIT_WIDTH(RQW), .COORD_BITS(3), .MY_X(1), .MY_Y(0), .MY_Z(0), .MY_W(0)) req_r10 (
-        .clk(clk), .reset(reset),
-        .n_in_valid(1'b0), .n_in_flit({RQW{1'b0}}), .n_in_ready(),
-        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(1'b0), .e_in_flit({RQW{1'b0}}), .e_in_ready(),
-        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
-        .s_in_valid(1'b0), .s_in_flit({RQW{1'b0}}), .s_in_ready(),
-        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
-        .w_in_valid(req_r00_e_out_valid), .w_in_flit(req_r00_e_out_flit), .w_in_ready(req_r10_w_in_ready),
-        .w_out_valid(req_r10_w_out_valid), .w_out_flit(req_r10_w_out_flit), .w_out_ready(req_r00_e_in_ready),
-        .u_in_valid(1'b0), .u_in_flit({RQW{1'b0}}), .u_in_ready(),
-        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
-        .d_in_valid(1'b0), .d_in_flit({RQW{1'b0}}), .d_in_ready(),
-        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
-        .ana_in_valid(1'b0), .ana_in_flit({RQW{1'b0}}), .ana_in_ready(),
-        .ana_out_valid(), .ana_out_flit(), .ana_out_ready(1'b0),
-        .kata_in_valid(1'b0), .kata_in_flit({RQW{1'b0}}), .kata_in_ready(),
-        .kata_out_valid(), .kata_out_flit(), .kata_out_ready(1'b0),
+        .kata_in_valid(req_r0_ana_out_valid), .kata_in_flit(req_r0_ana_out_flit), .kata_in_ready(req_r1_kata_in_ready),
+        .kata_out_valid(req_r1_kata_out_valid), .kata_out_flit(req_r1_kata_out_flit), .kata_out_ready(req_r0_ana_in_ready),
         .l_in_valid(1'b0), .l_in_flit({RQW{1'b0}}), .l_in_ready(),
         .l_out_valid(mem_req_in_valid), .l_out_flit(mem_req_in_flit), .l_out_ready(mem_req_in_ready)
     );
-    wire req_r10_w_out_valid; wire [RQW-1:0] req_r10_w_out_flit; wire req_r10_w_in_ready;
+    wire req_r1_kata_out_valid; wire [RQW-1:0] req_r1_kata_out_flit; wire req_r1_kata_in_ready;
 
-    // ---- resp router (1,0,0,0) ----
-    router #(.FLIT_WIDTH(RSW), .COORD_BITS(3), .MY_X(1), .MY_Y(0), .MY_Z(0), .MY_W(0)) resp_r10 (
+    // ---- resp router at (0,0,0,1) ----
+    router #(.FLIT_WIDTH(RSW), .COORD_BITS(3), .MY_X(0), .MY_Y(0), .MY_Z(0), .MY_W(1)) resp_r1 (
         .clk(clk), .reset(reset),
         .n_in_valid(1'b0), .n_in_flit({RSW{1'b0}}), .n_in_ready(),
         .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
         .e_in_valid(1'b0), .e_in_flit({RSW{1'b0}}), .e_in_ready(),
         .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
-        .s_in_valid(1'b0), .s_in_flit({RSW{1'b0}}), .s_in_ready(),
-        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
-        .w_in_valid(resp_r00_e_out_valid), .w_in_flit(resp_r00_e_out_flit), .w_in_ready(resp_r10_w_in_ready),
-        .w_out_valid(resp_r10_w_out_valid), .w_out_flit(resp_r10_w_out_flit), .w_out_ready(resp_r00_e_in_ready),
-        .u_in_valid(1'b0), .u_in_flit({RSW{1'b0}}), .u_in_ready(),
-        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
-        .d_in_valid(1'b0), .d_in_flit({RSW{1'b0}}), .d_in_ready(),
-        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
-        .ana_in_valid(1'b0), .ana_in_flit({RSW{1'b0}}), .ana_in_ready(),
-        .ana_out_valid(), .ana_out_flit(), .ana_out_ready(1'b0),
-        .kata_in_valid(1'b0), .kata_in_flit({RSW{1'b0}}), .kata_in_ready(),
-        .kata_out_valid(), .kata_out_flit(), .kata_out_ready(1'b0),
-        .l_in_valid(mem_resp_out_valid), .l_in_flit(mem_resp_out_flit), .l_in_ready(mem_resp_out_ready),
-        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0) // (1,0,0,0) never RECEIVES a response
-    );
-    wire resp_r10_w_out_valid; wire [RSW-1:0] resp_r10_w_out_flit; wire resp_r10_w_in_ready;
-
-    // ---- resp router (0,0,0,0) ----
-    router #(.FLIT_WIDTH(RSW), .COORD_BITS(3), .MY_X(0), .MY_Y(0), .MY_Z(0), .MY_W(0)) resp_r00 (
-        .clk(clk), .reset(reset),
-        .n_in_valid(1'b0), .n_in_flit({RSW{1'b0}}), .n_in_ready(),
-        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
-        .e_in_valid(resp_r10_w_out_valid), .e_in_flit(resp_r10_w_out_flit), .e_in_ready(resp_r00_e_in_ready),
-        .e_out_valid(resp_r00_e_out_valid), .e_out_flit(resp_r00_e_out_flit), .e_out_ready(resp_r10_w_in_ready),
         .s_in_valid(1'b0), .s_in_flit({RSW{1'b0}}), .s_in_ready(),
         .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
         .w_in_valid(1'b0), .w_in_flit({RSW{1'b0}}), .w_in_ready(),
@@ -146,14 +114,38 @@ module tb_noc_link;
         .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
         .ana_in_valid(1'b0), .ana_in_flit({RSW{1'b0}}), .ana_in_ready(),
         .ana_out_valid(), .ana_out_flit(), .ana_out_ready(1'b0),
+        .kata_in_valid(resp_r0_ana_out_valid), .kata_in_flit(resp_r0_ana_out_flit), .kata_in_ready(resp_r1_kata_in_ready),
+        .kata_out_valid(resp_r1_kata_out_valid), .kata_out_flit(resp_r1_kata_out_flit), .kata_out_ready(resp_r0_ana_in_ready),
+        .l_in_valid(mem_resp_out_valid), .l_in_flit(mem_resp_out_flit), .l_in_ready(mem_resp_out_ready),
+        .l_out_valid(), .l_out_flit(), .l_out_ready(1'b0) // (0,0,0,1) never RECEIVES a response
+    );
+    wire resp_r1_kata_out_valid; wire [RSW-1:0] resp_r1_kata_out_flit; wire resp_r1_kata_in_ready;
+
+    // ---- resp router at (0,0,0,0) ----
+    router #(.FLIT_WIDTH(RSW), .COORD_BITS(3), .MY_X(0), .MY_Y(0), .MY_Z(0), .MY_W(0)) resp_r0 (
+        .clk(clk), .reset(reset),
+        .n_in_valid(1'b0), .n_in_flit({RSW{1'b0}}), .n_in_ready(),
+        .n_out_valid(), .n_out_flit(), .n_out_ready(1'b0),
+        .e_in_valid(1'b0), .e_in_flit({RSW{1'b0}}), .e_in_ready(),
+        .e_out_valid(), .e_out_flit(), .e_out_ready(1'b0),
+        .s_in_valid(1'b0), .s_in_flit({RSW{1'b0}}), .s_in_ready(),
+        .s_out_valid(), .s_out_flit(), .s_out_ready(1'b0),
+        .w_in_valid(1'b0), .w_in_flit({RSW{1'b0}}), .w_in_ready(),
+        .w_out_valid(), .w_out_flit(), .w_out_ready(1'b0),
+        .u_in_valid(1'b0), .u_in_flit({RSW{1'b0}}), .u_in_ready(),
+        .u_out_valid(), .u_out_flit(), .u_out_ready(1'b0),
+        .d_in_valid(1'b0), .d_in_flit({RSW{1'b0}}), .d_in_ready(),
+        .d_out_valid(), .d_out_flit(), .d_out_ready(1'b0),
+        .ana_in_valid(resp_r1_kata_out_valid), .ana_in_flit(resp_r1_kata_out_flit), .ana_in_ready(resp_r0_ana_in_ready),
+        .ana_out_valid(resp_r0_ana_out_valid), .ana_out_flit(resp_r0_ana_out_flit), .ana_out_ready(resp_r1_kata_in_ready),
         .kata_in_valid(1'b0), .kata_in_flit({RSW{1'b0}}), .kata_in_ready(),
         .kata_out_valid(), .kata_out_flit(), .kata_out_ready(1'b0),
         .l_in_valid(1'b0), .l_in_flit({RSW{1'b0}}), .l_in_ready(),
         .l_out_valid(core_resp_in_valid), .l_out_flit(core_resp_in_flit), .l_out_ready(core_resp_in_ready)
     );
-    wire resp_r00_e_out_valid; wire [RSW-1:0] resp_r00_e_out_flit; wire resp_r00_e_in_ready;
+    wire resp_r0_ana_out_valid; wire [RSW-1:0] resp_r0_ana_out_flit; wire resp_r0_ana_in_ready;
 
-    // ---- memory adapter at (1,0,0,0) ----
+    // ---- memory adapter at (0,0,0,1) ----
     wire                mem_req_in_valid;
     wire [RQW-1:0]      mem_req_in_flit;
     wire                mem_req_in_ready;
@@ -195,28 +187,28 @@ module tb_noc_link;
         reset = 0;
         @(posedge clk);
 
-        // Write 0xDEADBEEF to address 4, read it back through the SAME
-        // real round trip - proves actual memory persistence across the
-        // network, not just "grant eventually fired."
-        do_access(1, 32'd4, 32'hDEADBEEF, got);
+        // Write 0xCAFEF00D to address 4, read it back through the SAME
+        // real round trip over the Ana/Kata hop specifically - proves
+        // actual memory persistence through the NEW axis, not just
+        // "grant eventually fired."
+        do_access(1, 32'd4, 32'hCAFEF00D, got);
         do_access(0, 32'd4, 32'h0, got);
-        check(got == 32'hDEADBEEF, "read-back through the NoC matches what was written");
+        check(got == 32'hCAFEF00D, "read-back through the Ana/Kata hop matches what was written");
 
         // A second, different address/value - rules out "always returns
         // the first thing written" as an accidental pass.
-        do_access(1, 32'd8, 32'h12345678, got);
+        do_access(1, 32'd8, 32'h87654321, got);
         do_access(0, 32'd8, 32'h0, got);
-        check(got == 32'h12345678, "second independent write/read pair also round-trips correctly");
+        check(got == 32'h87654321, "second independent write/read pair also round-trips correctly over Ana/Kata");
 
         // Re-read the FIRST address again - confirms the second write
-        // didn't clobber unrelated memory (byte-addressed, distinct
-        // offsets) and that this node correctly serves MULTIPLE
-        // sequential transactions, not just one.
+        // didn't clobber unrelated memory and that this node correctly
+        // serves MULTIPLE sequential transactions over the W hop.
         do_access(0, 32'd4, 32'h0, got);
-        check(got == 32'hDEADBEEF, "first address unaffected by the second write, third round trip also correct");
+        check(got == 32'hCAFEF00D, "first address unaffected by the second write, third round trip also correct");
 
-        if (errors == 0) $display("ALL NOC LINK TESTS PASSED");
-        else $display("%0d NOC LINK TEST(S) FAILED", errors);
+        if (errors == 0) $display("ALL NOC LINK-W TESTS PASSED");
+        else $display("%0d NOC LINK-W TEST(S) FAILED", errors);
         $finish;
     end
 endmodule

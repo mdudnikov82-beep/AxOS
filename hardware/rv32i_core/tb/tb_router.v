@@ -1,28 +1,31 @@
 // Standalone router.v testbench - verifies routing/arbitration/
 // backpressure in isolation before any mesh integration (matches this
 // project's established practice of testing a new component alone
-// first). FLIT_WIDTH=14: top 6 bits {dest_x,dest_y,dest_z} (routing-
-// relevant, COORD_BITS=2 each), low 8 bits an opaque "tag" byte used
-// only so test output is easy to read - router.v never inspects it.
+// first). FLIT_WIDTH=20: top 12 bits {dest_x,dest_y,dest_z,dest_w}
+// (routing-relevant, COORD_BITS=3 each, matching the real mesh), low
+// 8 bits an opaque "tag" byte used only so test output is easy to
+// read - router.v never inspects it.
 `timescale 1ns/1ps
 
 module tb_router;
-    localparam FW = 14;
+    localparam FW = 20;
     reg clk, reset;
     integer errors;
     reg n_seen, w_seen;
 
-    // Router under test at (1,1,1) - an interior node, so all 6 real
-    // output directions plus Local are meaningfully reachable from some
-    // dest.
-    reg           n_in_valid, e_in_valid, s_in_valid, w_in_valid, u_in_valid, d_in_valid, l_in_valid;
-    reg  [FW-1:0] n_in_flit,  e_in_flit,  s_in_flit,  w_in_flit,  u_in_flit,  d_in_flit,  l_in_flit;
-    wire          n_in_ready, e_in_ready, s_in_ready, w_in_ready, u_in_ready, d_in_ready, l_in_ready;
-    wire          n_out_valid, e_out_valid, s_out_valid, w_out_valid, u_out_valid, d_out_valid, l_out_valid;
-    wire [FW-1:0] n_out_flit,  e_out_flit,  s_out_flit,  w_out_flit,  u_out_flit,  d_out_flit,  l_out_flit;
-    reg           n_out_ready, e_out_ready, s_out_ready, w_out_ready, u_out_ready, d_out_ready, l_out_ready;
+    // Router under test at (1,1,1,1) - an interior node on every axis
+    // (for THIS isolated unit test's purposes - it doesn't need to
+    // match the real mesh's actual W-axis size of 2), so all 8 real
+    // output directions plus Local are meaningfully reachable from
+    // some dest.
+    reg           n_in_valid, e_in_valid, s_in_valid, w_in_valid, u_in_valid, d_in_valid, ana_in_valid, kata_in_valid, l_in_valid;
+    reg  [FW-1:0] n_in_flit,  e_in_flit,  s_in_flit,  w_in_flit,  u_in_flit,  d_in_flit,  ana_in_flit,  kata_in_flit,  l_in_flit;
+    wire          n_in_ready, e_in_ready, s_in_ready, w_in_ready, u_in_ready, d_in_ready, ana_in_ready, kata_in_ready, l_in_ready;
+    wire          n_out_valid, e_out_valid, s_out_valid, w_out_valid, u_out_valid, d_out_valid, ana_out_valid, kata_out_valid, l_out_valid;
+    wire [FW-1:0] n_out_flit,  e_out_flit,  s_out_flit,  w_out_flit,  u_out_flit,  d_out_flit,  ana_out_flit,  kata_out_flit,  l_out_flit;
+    reg           n_out_ready, e_out_ready, s_out_ready, w_out_ready, u_out_ready, d_out_ready, ana_out_ready, kata_out_ready, l_out_ready;
 
-    router #(.FLIT_WIDTH(FW), .MY_X(1), .MY_Y(1), .MY_Z(1)) dut (
+    router #(.FLIT_WIDTH(FW), .COORD_BITS(3), .MY_X(1), .MY_Y(1), .MY_Z(1), .MY_W(1)) dut (
         .clk(clk), .reset(reset),
         .n_in_valid(n_in_valid), .n_in_flit(n_in_flit), .n_in_ready(n_in_ready),
         .n_out_valid(n_out_valid), .n_out_flit(n_out_flit), .n_out_ready(n_out_ready),
@@ -36,22 +39,26 @@ module tb_router;
         .u_out_valid(u_out_valid), .u_out_flit(u_out_flit), .u_out_ready(u_out_ready),
         .d_in_valid(d_in_valid), .d_in_flit(d_in_flit), .d_in_ready(d_in_ready),
         .d_out_valid(d_out_valid), .d_out_flit(d_out_flit), .d_out_ready(d_out_ready),
+        .ana_in_valid(ana_in_valid), .ana_in_flit(ana_in_flit), .ana_in_ready(ana_in_ready),
+        .ana_out_valid(ana_out_valid), .ana_out_flit(ana_out_flit), .ana_out_ready(ana_out_ready),
+        .kata_in_valid(kata_in_valid), .kata_in_flit(kata_in_flit), .kata_in_ready(kata_in_ready),
+        .kata_out_valid(kata_out_valid), .kata_out_flit(kata_out_flit), .kata_out_ready(kata_out_ready),
         .l_in_valid(l_in_valid), .l_in_flit(l_in_flit), .l_in_ready(l_in_ready),
         .l_out_valid(l_out_valid), .l_out_flit(l_out_flit), .l_out_ready(l_out_ready)
     );
 
     always #5 clk = ~clk;
 
-    function [FW-1:0] mkflit(input [1:0] dx, input [1:0] dy, input [1:0] dz, input [7:0] tag);
-        mkflit = {dx, dy, dz, tag};
+    function [FW-1:0] mkflit(input [2:0] dx, input [2:0] dy, input [2:0] dz, input [2:0] dw, input [7:0] tag);
+        mkflit = {dx, dy, dz, dw, tag};
     endfunction
 
     task clear_inputs;
         begin
             n_in_valid = 0; e_in_valid = 0; s_in_valid = 0; w_in_valid = 0;
-            u_in_valid = 0; d_in_valid = 0; l_in_valid = 0;
+            u_in_valid = 0; d_in_valid = 0; ana_in_valid = 0; kata_in_valid = 0; l_in_valid = 0;
             n_in_flit = 0; e_in_flit = 0; s_in_flit = 0; w_in_flit = 0;
-            u_in_flit = 0; d_in_flit = 0; l_in_flit = 0;
+            u_in_flit = 0; d_in_flit = 0; ana_in_flit = 0; kata_in_flit = 0; l_in_flit = 0;
         end
     endtask
 
@@ -70,68 +77,99 @@ module tb_router;
         clk = 0; reset = 1; errors = 0;
         clear_inputs;
         n_out_ready = 1; e_out_ready = 1; s_out_ready = 1; w_out_ready = 1;
-        u_out_ready = 1; d_out_ready = 1; l_out_ready = 1;
+        u_out_ready = 1; d_out_ready = 1; ana_out_ready = 1; kata_out_ready = 1; l_out_ready = 1;
         @(posedge clk); @(posedge clk);
         reset = 0;
         @(posedge clk);
 
-        // ---- Test 1: basic XYZ routing, one direction at a time ----
+        // ---- Test 1: basic XYZW routing, one direction at a time ----
         // dest_x > MY_X(1) -> must exit East.
-        l_in_valid = 1; l_in_flit = mkflit(2'd2, 2'd1, 2'd1, 8'hAA);
+        l_in_valid = 1; l_in_flit = mkflit(3'd2, 3'd1, 3'd1, 3'd1, 8'hAA);
         @(posedge clk);
         #1;
-        check(e_out_valid && e_out_flit == mkflit(2'd2,2'd1,2'd1,8'hAA), "dest_x>MY_X routes East");
-        check(!n_out_valid && !s_out_valid && !w_out_valid && !u_out_valid && !d_out_valid && !l_out_valid, "no OTHER output fired for the East case");
+        check(e_out_valid && e_out_flit == mkflit(3'd2,3'd1,3'd1,3'd1,8'hAA), "dest_x>MY_X routes East");
+        check(!n_out_valid && !s_out_valid && !w_out_valid && !u_out_valid && !d_out_valid && !ana_out_valid && !kata_out_valid && !l_out_valid, "no OTHER output fired for the East case");
         l_in_valid = 0;
         e_out_ready = 1; @(posedge clk); // drain
 
         // dest_x < MY_X -> West.
-        l_in_valid = 1; l_in_flit = mkflit(2'd0, 2'd1, 2'd1, 8'hBB);
+        l_in_valid = 1; l_in_flit = mkflit(3'd0, 3'd1, 3'd1, 3'd1, 8'hBB);
         @(posedge clk); #1;
-        check(w_out_valid && w_out_flit == mkflit(2'd0,2'd1,2'd1,8'hBB), "dest_x<MY_X routes West");
+        check(w_out_valid && w_out_flit == mkflit(3'd0,3'd1,3'd1,3'd1,8'hBB), "dest_x<MY_X routes West");
         l_in_valid = 0; @(posedge clk);
 
         // dest_x==MY_X, dest_y>MY_Y -> South.
-        l_in_valid = 1; l_in_flit = mkflit(2'd1, 2'd2, 2'd1, 8'hCC);
+        l_in_valid = 1; l_in_flit = mkflit(3'd1, 3'd2, 3'd1, 3'd1, 8'hCC);
         @(posedge clk); #1;
-        check(s_out_valid && s_out_flit == mkflit(2'd1,2'd2,2'd1,8'hCC), "dest_y>MY_Y (dest_x match) routes South");
+        check(s_out_valid && s_out_flit == mkflit(3'd1,3'd2,3'd1,3'd1,8'hCC), "dest_y>MY_Y (dest_x match) routes South");
         l_in_valid = 0; @(posedge clk);
 
         // dest_x==MY_X, dest_y<MY_Y -> North.
-        l_in_valid = 1; l_in_flit = mkflit(2'd1, 2'd0, 2'd1, 8'hDD);
+        l_in_valid = 1; l_in_flit = mkflit(3'd1, 3'd0, 3'd1, 3'd1, 8'hDD);
         @(posedge clk); #1;
-        check(n_out_valid && n_out_flit == mkflit(2'd1,2'd0,2'd1,8'hDD), "dest_y<MY_Y (dest_x match) routes North");
+        check(n_out_valid && n_out_flit == mkflit(3'd1,3'd0,3'd1,3'd1,8'hDD), "dest_y<MY_Y (dest_x match) routes North");
         l_in_valid = 0; @(posedge clk);
 
         // dest_x==MY_X, dest_y==MY_Y, dest_z>MY_Z -> Down.
-        l_in_valid = 1; l_in_flit = mkflit(2'd1, 2'd1, 2'd2, 8'hFF);
+        l_in_valid = 1; l_in_flit = mkflit(3'd1, 3'd1, 3'd2, 3'd1, 8'hFF);
         @(posedge clk); #1;
-        check(d_out_valid && d_out_flit == mkflit(2'd1,2'd1,2'd2,8'hFF), "dest_z>MY_Z (dest_x,dest_y match) routes Down");
+        check(d_out_valid && d_out_flit == mkflit(3'd1,3'd1,3'd2,3'd1,8'hFF), "dest_z>MY_Z (dest_x,dest_y match) routes Down");
         l_in_valid = 0; @(posedge clk);
 
         // dest_x==MY_X, dest_y==MY_Y, dest_z<MY_Z -> Up.
-        l_in_valid = 1; l_in_flit = mkflit(2'd1, 2'd1, 2'd0, 8'h55);
+        l_in_valid = 1; l_in_flit = mkflit(3'd1, 3'd1, 3'd0, 3'd1, 8'h55);
         @(posedge clk); #1;
-        check(u_out_valid && u_out_flit == mkflit(2'd1,2'd1,2'd0,8'h55), "dest_z<MY_Z (dest_x,dest_y match) routes Up");
+        check(u_out_valid && u_out_flit == mkflit(3'd1,3'd1,3'd0,3'd1,8'h55), "dest_z<MY_Z (dest_x,dest_y match) routes Up");
         l_in_valid = 0; @(posedge clk);
 
-        // dest == self -> Local.
-        w_in_valid = 1; w_in_flit = mkflit(2'd1, 2'd1, 2'd1, 8'hEE);
+        // dest_x==MY_X, dest_y==MY_Y, dest_z==MY_Z, dest_w>MY_W -> Ana.
+        l_in_valid = 1; l_in_flit = mkflit(3'd1, 3'd1, 3'd1, 3'd2, 8'h77);
         @(posedge clk); #1;
-        check(l_out_valid && l_out_flit == mkflit(2'd1,2'd1,2'd1,8'hEE), "dest==self routes to Local");
+        check(ana_out_valid && ana_out_flit == mkflit(3'd1,3'd1,3'd1,3'd2,8'h77), "dest_w>MY_W (X,Y,Z match) routes Ana");
+        l_in_valid = 0; @(posedge clk);
+
+        // dest_x==MY_X, dest_y==MY_Y, dest_z==MY_Z, dest_w<MY_W -> Kata.
+        l_in_valid = 1; l_in_flit = mkflit(3'd1, 3'd1, 3'd1, 3'd0, 8'h88);
+        @(posedge clk); #1;
+        check(kata_out_valid && kata_out_flit == mkflit(3'd1,3'd1,3'd1,3'd0,8'h88), "dest_w<MY_W (X,Y,Z match) routes Kata");
+        l_in_valid = 0; @(posedge clk);
+
+        // dest == self -> Local. This specifically exercises DIR_L=8,
+        // the case the design review flagged as breaking at NDIRS=9
+        // with a hardcoded 3-bit wanted_dir/winner_dir (8 truncates to
+        // 0, aliasing Local delivery onto North's arbitration state) -
+        // the DIRBITS=$clog2(NDIRS) fix must make this pass.
+        w_in_valid = 1; w_in_flit = mkflit(3'd1, 3'd1, 3'd1, 3'd1, 8'hEE);
+        @(posedge clk); #1;
+        check(l_out_valid && l_out_flit == mkflit(3'd1,3'd1,3'd1,3'd1,8'hEE), "dest==self routes to Local (exercises DIR_L=8 at NDIRS=9)");
         w_in_valid = 0; @(posedge clk);
 
         // ---- Test 2: straight-through (arrived from W, continues East) ----
-        w_in_valid = 1; w_in_flit = mkflit(2'd3, 2'd1, 2'd1, 8'h11); // dest further east than MY_X
+        w_in_valid = 1; w_in_flit = mkflit(3'd3, 3'd1, 3'd1, 3'd1, 8'h11); // dest further east than MY_X
         @(posedge clk); #1;
-        check(e_out_valid && e_out_flit == mkflit(2'd3,2'd1,2'd1,8'h11), "arrived-from-W continues East (straight through, not blocked)");
+        check(e_out_valid && e_out_flit == mkflit(3'd3,3'd1,3'd1,3'd1,8'h11), "arrived-from-W continues East (straight through, not blocked)");
         w_in_valid = 0; @(posedge clk);
 
         // ---- Test 2b: arrived from Up, still needs to continue East (X not yet resolved) ----
-        u_in_valid = 1; u_in_flit = mkflit(2'd3, 2'd1, 2'd1, 8'h66);
+        u_in_valid = 1; u_in_flit = mkflit(3'd3, 3'd1, 3'd1, 3'd1, 8'h66);
         @(posedge clk); #1;
-        check(e_out_valid && e_out_flit == mkflit(2'd3,2'd1,2'd1,8'h66), "arrived-from-Up still routes East (X not yet resolved, dimension order preserved)");
+        check(e_out_valid && e_out_flit == mkflit(3'd3,3'd1,3'd1,3'd1,8'h66), "arrived-from-Up still routes East (X not yet resolved, dimension order preserved)");
         u_in_valid = 0; @(posedge clk);
+
+        // ---- Test 2c: arrived from Ana, still needs to continue East (X/Y/Z not yet resolved) ----
+        // Proves the 4th (W) tier doesn't disturb dimension-order
+        // precedence for a flit that happens to enter from the NEW
+        // direction but still has earlier-axis work outstanding.
+        ana_in_valid = 1; ana_in_flit = mkflit(3'd3, 3'd1, 3'd1, 3'd1, 8'h99);
+        @(posedge clk); #1;
+        check(e_out_valid && e_out_flit == mkflit(3'd3,3'd1,3'd1,3'd1,8'h99), "arrived-from-Ana still routes East (X/Y/Z not yet resolved, dimension order preserved)");
+        ana_in_valid = 0; @(posedge clk);
+
+        // ---- Test 2d: arrived from Down, still needs to continue to Ana (Z resolved, W is not) ----
+        d_in_valid = 1; d_in_flit = mkflit(3'd1, 3'd1, 3'd1, 3'd2, 8'hA1);
+        @(posedge clk); #1;
+        check(ana_out_valid && ana_out_flit == mkflit(3'd1,3'd1,3'd1,3'd2,8'hA1), "arrived-from-Down still routes Ana (Z resolved, W not yet)");
+        d_in_valid = 0; @(posedge clk);
 
         // ---- Test 3: contention + round-robin fairness ----
         // N and W BOTH want to go East at the same time - only one can
@@ -145,8 +183,8 @@ module tb_router;
         clear_inputs;
         e_out_ready = 0; // hold East's output empty so the FIRST arbitration below is a genuine tie
         @(posedge clk);
-        n_in_valid = 1; n_in_flit = mkflit(2'd3, 2'd1, 2'd1, 8'h21);
-        w_in_valid = 1; w_in_flit = mkflit(2'd3, 2'd1, 2'd1, 8'h22);
+        n_in_valid = 1; n_in_flit = mkflit(3'd3, 3'd1, 3'd1, 3'd1, 8'h21);
+        w_in_valid = 1; w_in_flit = mkflit(3'd3, 3'd1, 3'd1, 3'd1, 8'h22);
         #1; // sample in_ready in THIS cycle, before the edge consumes it -
             // right after the edge, East's register has already latched
             // the winner and can_accept drops, so BOTH in_ready would
@@ -165,32 +203,53 @@ module tb_router;
         e_out_ready = 1;
         @(posedge clk);
 
+        // ---- Test 3b: contention on the NEW Ana output, round-robin fairness ----
+        clear_inputs;
+        ana_out_ready = 0;
+        @(posedge clk);
+        n_in_valid = 1; n_in_flit = mkflit(3'd1, 3'd1, 3'd1, 3'd2, 8'h31);
+        w_in_valid = 1; w_in_flit = mkflit(3'd1, 3'd1, 3'd1, 3'd2, 8'h32);
+        #1;
+        check((n_in_ready ^ w_in_ready), "exactly one of {N,W} wins arbitration for contended Ana output");
+        @(posedge clk); #1;
+
+        ana_out_ready = 1;
+        n_seen = n_in_ready; w_seen = w_in_ready;
+        @(posedge clk); #1;
+        n_seen = n_seen || n_in_ready; w_seen = w_seen || w_in_ready;
+        @(posedge clk); #1;
+        n_seen = n_seen || n_in_ready; w_seen = w_seen || w_in_ready;
+        check(n_seen && w_seen, "both N and W contenders eventually won arbitration for Ana (neither starved)");
+        clear_inputs;
+        ana_out_ready = 1;
+        @(posedge clk);
+
         // ---- Test 4: real backpressure - output register holds its
         // flit unchanged across MULTIPLE cycles while out_ready=0, and
         // does not accept (or corrupt) a different flit meanwhile. ----
         clear_inputs;
         e_out_ready = 0;
-        l_in_valid = 1; l_in_flit = mkflit(2'd3, 2'd1, 2'd1, 8'h33);
+        l_in_valid = 1; l_in_flit = mkflit(3'd3, 3'd1, 3'd1, 3'd1, 8'h33);
         @(posedge clk); #1;
-        check(e_out_valid && e_out_flit == mkflit(2'd3,2'd1,2'd1,8'h33), "backpressure test: flit captured into East's register");
+        check(e_out_valid && e_out_flit == mkflit(3'd3,3'd1,3'd1,3'd1,8'h33), "backpressure test: flit captured into East's register");
         l_in_valid = 0;
         // Hold out_ready low for several cycles - flit must NOT change.
         @(posedge clk); #1;
-        check(e_out_valid && e_out_flit == mkflit(2'd3,2'd1,2'd1,8'h33), "held flit unchanged after 1 extra cycle of backpressure");
+        check(e_out_valid && e_out_flit == mkflit(3'd3,3'd1,3'd1,3'd1,8'h33), "held flit unchanged after 1 extra cycle of backpressure");
         @(posedge clk); #1;
-        check(e_out_valid && e_out_flit == mkflit(2'd3,2'd1,2'd1,8'h33), "held flit unchanged after 2 extra cycles of backpressure");
+        check(e_out_valid && e_out_flit == mkflit(3'd3,3'd1,3'd1,3'd1,8'h33), "held flit unchanged after 2 extra cycles of backpressure");
         // Try to inject a DIFFERENT flit wanting East while blocked - must not be accepted.
-        w_in_valid = 1; w_in_flit = mkflit(2'd3, 2'd1, 2'd1, 8'h44);
+        w_in_valid = 1; w_in_flit = mkflit(3'd3, 3'd1, 3'd1, 3'd1, 8'h44);
         @(posedge clk); #1;
         check(!w_in_ready, "new East-bound flit NOT accepted while East's register is still full and undrained");
-        check(e_out_flit == mkflit(2'd3,2'd1,2'd1,8'h33), "East's register still holds the ORIGINAL flit, not overwritten");
+        check(e_out_flit == mkflit(3'd3,3'd1,3'd1,3'd1,8'h33), "East's register still holds the ORIGINAL flit, not overwritten");
         w_in_valid = 0;
         // Finally drain - the waiting flit must now get through.
         e_out_ready = 1;
-        w_in_valid = 1; w_in_flit = mkflit(2'd3, 2'd1, 2'd1, 8'h44);
+        w_in_valid = 1; w_in_flit = mkflit(3'd3, 3'd1, 3'd1, 3'd1, 8'h44);
         @(posedge clk); #1;
         check(w_in_ready, "waiting flit accepted once East drains");
-        check(e_out_flit == mkflit(2'd3,2'd1,2'd1,8'h44), "East's register now holds the NEW flit after drain+refill");
+        check(e_out_flit == mkflit(3'd3,3'd1,3'd1,3'd1,8'h44), "East's register now holds the NEW flit after drain+refill");
         w_in_valid = 0;
 
         if (errors == 0) $display("ALL ROUTER TESTS PASSED");
