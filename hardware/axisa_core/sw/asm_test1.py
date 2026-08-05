@@ -11,7 +11,13 @@ BEQ, BNE, BLT, BGE, BLTU, BGEU = range(6)
 
 OP_ALUR = 0b00000
 OP_ALUI = 0b00001
+OP_GLUON = 0b00010
+OP_BARYON = 0b00011
+OP_MESON = 0b00100
+OP_LOAD = 0b00101
+OP_STORE = 0b00110
 OP_BRANCH = 0b00111
+OP_JAL = 0b01000
 OP_HALT = 0b01001
 
 
@@ -43,6 +49,37 @@ def beq(bank, rs1, rs2, imm):
 
 def halt(tohost_reg):
     return (OP_HALT << 27) | (tohost_reg << 24)
+
+
+# ==================== Milestone 2 (see docs/ISA.md) ====================
+
+def gluon(funct, rd_bank, rd_reg, rs1_bank, rs1_reg, rs2_bank, rs2_reg):
+    return ((OP_GLUON << 27) | (funct << 24) | (rd_bank << 22) | (rd_reg << 19) |
+            (rs1_bank << 17) | (rs1_reg << 14) | (rs2_bank << 12) | (rs2_reg << 9))
+
+
+def baryon(funct, nd, rr, gg, bb):
+    return (OP_BARYON << 27) | (funct << 24) | (nd << 21) | (rr << 18) | (gg << 15) | (bb << 12)
+
+
+def meson(funct, nd, q1_bank, q1_reg, q2_bank, q2_reg):
+    return ((OP_MESON << 27) | (funct << 25) | (nd << 22) |
+            (q1_bank << 20) | (q1_reg << 17) | (q2_bank << 15) | (q2_reg << 12))
+
+
+def load(nd, base_bank, base_reg, imm):
+    imm &= 0x7FFFF
+    return (OP_LOAD << 27) | (nd << 24) | (base_bank << 22) | (base_reg << 19) | imm
+
+
+def store(ns, base_bank, base_reg, imm):
+    imm &= 0x7FFFF
+    return (OP_STORE << 27) | (ns << 24) | (base_bank << 22) | (base_reg << 19) | imm
+
+
+def jal(nd, imm):
+    imm &= 0xFFFFFF
+    return (OP_JAL << 27) | (nd << 24) | imm
 
 
 def write_hex(program, out_path):

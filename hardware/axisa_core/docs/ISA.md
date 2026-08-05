@@ -159,6 +159,19 @@ Stop; the testbench convention's `tohost` value is `N` bank register
 convention, generalized to a named register instead of a fixed one
 specifically because `n0` is hardwired zero and can't serve that role).
 
+## Reserved `funct` behavior (decided ahead of RTL, per design review)
+
+A reserved `funct` value on ALUR/ALUI (`4'b1010`-`4'b1111`), BARYON
+(`3'b001`-`3'b111`), or MESON (`2'b01`-`2'b11`) is decoded as
+`illegal` and blocks `reg_write` entirely - this is an explicit,
+written decision, not left to "whatever the combinational logic's
+`default` arm happens to compute" (an earlier version of this project
+had a comment on `alu.v` claiming `control_unit` already covered this
+for ALUR/ALUI when it actually didn't - fixed by adding the real
+check, not by softening the comment). GLUON has no reserved `funct` -
+all 8 codes are defined (real QCD has exactly 8 gluons), so there is
+nothing to reject.
+
 ## Explicitly deferred to v0.2+ (not blocking a first working core)
 
 - Additional BARYON/MESON `funct` combine rules beyond the one each

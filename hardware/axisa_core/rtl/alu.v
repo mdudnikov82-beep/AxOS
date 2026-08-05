@@ -36,7 +36,9 @@ module alu (
             FUNCT_SRA:  result_r = $signed(a) >>> b[4:0];
             FUNCT_SLT:  result_r = ($signed(a) < $signed(b)) ? 32'd1 : 32'd0;
             FUNCT_SLTU: result_r = (a < b) ? 32'd1 : 32'd0;
-            default:    result_r = 32'b0; // reserved funct - control_unit.v's `illegal` output covers this
+            default:    result_r = 32'b0; // reserved funct (4'b1010-4'b1111) - control_unit.v explicitly checks
+                                           // alu_funct>=4'b1010 and asserts illegal+blocks reg_write for both
+                                           // ALUR/ALUI before this default can ever actually be written anywhere
         endcase
     end
 endmodule
