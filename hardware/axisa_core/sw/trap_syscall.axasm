@@ -1,0 +1,40 @@
+# AxISA traps, step 2 of 3 (see docs/ISA.md's "Traps" section):
+# SYSCALL (the user->kernel door) plus a REAL first-ever user-mode
+# transition (bootstrapped via MTSMODE+MTEPC+RFT, since RFT is the
+# only way to ever reach user mode and the first time, nothing has
+# actually trapped yet - see docs/ISA.md's MVSR EPC field
+# documentation for why EPC must be software-writable). Also proves
+# PRIV_VIOLATION: once back in user mode, user code deliberately
+# executes a privileged MVSR instruction, which must trap immediately.
+# ONE shared handler at TRAP_VECTOR_ADDR dispatches on CAUSE (a real
+# trap handler would do exactly this) rather than having two separate
+# entry points.
+    ADDI N1, N0, 0          # n1 = 0 (USER)
+    MTSMODE N1              # saved_mode = USER (for the bootstrap RFT below)
+    MTSIE N1                # saved_ie = 0 (interrupts stay disabled - not tested here)
+    ADDI N1, N0, 0x18       # n1 = address of user_code (0x18 = 24 = word index 6)
+    MTEPC N1
+    RFT                     # bootstrap: "return" into user mode for the first time
+
+user_code:
+    ADDI N2, N0, 55         # user's live value - must survive BOTH trap round trips below
+    SYSCALL                 # the user->kernel door - traps unconditionally, any mode
+    MFCAUSE N4              # PRIVILEGED - executed here in USER mode (RFT restored it) -> traps again (PRIV_VIOLATION)
+    ADD N7, N2, N2          # 2nd resumption point - n7 = 55+55 = 110 (proves n2 survived both round trips)
+    HALT N7
+
+.org 0x200
+handler:
+    MFCAUSE N1              # n1 = current cause
+    ADDI N6, N0, 1          # n6 = 1 (SYSCALL's cause code, for comparison)
+    BEQ N1, N6, do_syscall
+    ADD N4, N1, N0          # priv-violation path: n4 = cause (expect 3), copy via add-with-zero
+    BEQ N0, N0, fix_epc
+do_syscall:
+    ADD N3, N1, N0          # n3 = cause (expect 1)
+    MFSMODE N5              # n5 = saved_mode at trap time (expect 0=USER - the interrupted context)
+fix_epc:
+    MFEPC N6                # n6 = epc of the trapping instruction
+    ADDI N6, N6, 4          # skip past it - don't re-execute SYSCALL/the privileged MVSR
+    MTEPC N6
+    RFT

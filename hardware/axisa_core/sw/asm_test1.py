@@ -82,6 +82,28 @@ def jal(nd, imm):
     return (OP_JAL << 27) | (nd << 24) | imm
 
 
+# ==================== Traps / privilege (see docs/ISA.md's "Traps"
+# section) ====================
+
+OP_RFT = 0b01010
+OP_SYSCALL = 0b01011
+OP_MVSR = 0b01100
+
+SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE = range(4)
+
+
+def rft():
+    return OP_RFT << 27
+
+
+def syscall():
+    return OP_SYSCALL << 27
+
+
+def mvsr(direction, selreg, nreg):
+    return (OP_MVSR << 27) | (direction << 26) | (selreg << 24) | (nreg << 21)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

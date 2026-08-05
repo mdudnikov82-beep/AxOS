@@ -1,0 +1,32 @@
+# AxISA traps, step 1 of 3 (see docs/ISA.md's "Traps" section):
+# illegal-instruction trap. Proves entry+EPC-capture+CAUSE+RFT with the
+# CHEAPEST possible trigger - `illegal` already existed in
+# control_unit.v (reserved opcode/funct detection) but was previously
+# computed and silently dropped; this is the first thing to actually
+# wire it into a real trap.
+#
+# Sets live values in R/G/B/N first (11/22/33/44) to prove they
+# survive the whole round trip untouched - not just a final tohost
+# value. Deliberately executes a reserved opcode (.word 0x78000000,
+# opcode=01111, undefined), which must trap to TRAP_VECTOR_ADDR
+# (0x200 by default). The handler reads CAUSE (expect 0=ILLEGAL) and
+# EPC (expect the .word instruction's OWN address), advances EPC by 4
+# (to resume AFTER the bad instruction, not re-execute it), then RFTs.
+# Execution resumes at illegal_instr+4 and computes a value (n1+n1)
+# that can only be correct if the whole round trip actually worked.
+    ADDI R1, R0, 11
+    ADDI G1, G0, 22
+    ADDI B1, B0, 33
+    ADDI N1, N0, 44
+illegal_instr:
+    .word 0x78000000
+    ADD N2, N1, N1        # resumption point (illegal_instr+4) - n2 = 44+44 = 88
+    HALT N2
+
+.org 0x200
+handler:
+    MFCAUSE N3            # n3 = cause (expect 0 = illegal instruction)
+    MFEPC N5              # n5 = epc (expect illegal_instr's own address, 0x10)
+    ADDI N6, N5, 4        # n6 = epc+4 (skip the bad instruction, don't re-execute it)
+    MTEPC N6
+    RFT

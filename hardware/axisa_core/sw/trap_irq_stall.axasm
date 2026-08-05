@@ -1,0 +1,37 @@
+# AxISA traps: external IRQ arriving WHILE a STORE is stalled waiting
+# for bus_grant (see docs/ISA.md's "Traps" section, and cpu_core.v's
+# own `any_trap` comment for a real same-cycle race self-found while
+# building this feature: an IRQ must never preempt a LOAD/STORE on the
+# exact cycle it completes, or RFT would re-execute - and for STORE,
+# double-commit - an access that already happened for real).
+#
+# The STORE at word index 9 (byte address 0x24) is deliberately held
+# stalled by the testbench, with irq_in pulsed mid-stall. If the fix
+# is correct, EPC must capture word index 10's address (0x28) - the
+# instruction AFTER the store, not yet executed - proving the store
+# was allowed to complete first and the IRQ was correctly deferred by
+# exactly one instruction, not taken instead of the store.
+    ADDI N1, N0, 1
+    MTSIE N1
+    ADDI N1, N0, 1
+    MTSMODE N1
+    ADDI N1, N0, 0x1C       # continue's address (word index 7)
+    MTEPC N1
+    RFT
+
+continue:
+    ADDI N1, N0, 0x2000     # shared base
+    ADDI N2, N0, 77         # payload
+    STORE N2, N1, 0         # word index 9, addr 0x24 - STALLS (testbench holds bus_grant low)
+    ADDI N6, N0, 1          # word index 10, addr 0x28 - must NOT execute yet when the deferred IRQ fires
+finish:
+    ADDI N7, N0, 55
+    HALT N7
+
+.org 0x200
+handler:
+    MFCAUSE N3              # n3 = cause (expect 2 = external IRQ)
+    MFEPC N4                # n4 = epc (expect 0x28 - proves the STORE completed first)
+    ADDI N5, N0, 0x2C       # n5 = finish's address (word index 11)
+    MTEPC N5
+    RFT

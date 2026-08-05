@@ -1,0 +1,31 @@
+# AxISA traps, step 3 of 3 (see docs/ISA.md's "Traps" section):
+# external interrupt. Bootstraps ie=1 (there is no direct "enable
+# interrupts now" instruction in v0.1 - ie only ever changes via RFT
+# restoring saved_ie, an explicit, documented gap - so this re-enters
+# itself via RFT specifically to pick up ie=1), then spins in a real
+# infinite loop until the testbench's irq_in pulse preempts it. The
+# handler deliberately redirects EPC to `finish` (breaking out of the
+# loop) rather than resuming exactly where the loop was interrupted -
+# proving RFT genuinely honors whatever EPC currently holds, not just
+# a hardware-fixed "resume here" address.
+    ADDI N1, N0, 1          # n1 = 1
+    MTSIE N1                # saved_ie = 1
+    ADDI N1, N0, 1          # n1 = 1 (KERNEL)
+    MTSMODE N1              # saved_mode = KERNEL (stay in kernel for this test)
+    ADDI N1, N0, 0x1C       # n1 = address of loop (0x1C = 28 = word index 7)
+    MTEPC N1
+    RFT                     # re-enter with ie=1
+
+loop:
+    BEQ N0, N0, loop        # spin forever - preempted by the testbench's irq_in pulse
+finish:
+    ADDI N7, N0, 42         # proves the handler's EPC redirect actually worked
+    HALT N7
+
+.org 0x200
+handler:
+    MFCAUSE N3              # n3 = cause (expect 2 = external IRQ)
+    MFEPC N4                # n4 = epc (expect loop's own address, 0x1C - the not-yet-executed instruction)
+    ADDI N5, N0, 0x20       # n5 = address of finish (0x20 = 32 = word index 8)
+    MTEPC N5
+    RFT

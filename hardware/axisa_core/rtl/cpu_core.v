@@ -60,12 +60,22 @@ module cpu_core #(
     // shared-bus path outside cpu_core.v too (in shared_mem_backing.v).
     parameter UART_TX_ADDR       = 32'h0000_1000,
     parameter UART_RX_DATA_ADDR  = 32'h0000_1004,
-    parameter UART_RX_READY_ADDR = 32'h0000_1008
+    parameter UART_RX_READY_ADDR = 32'h0000_1008,
+    // Traps + privilege modes (design review before this was written -
+    // see docs/ISA.md's "Traps" section for the full design). A FIXED
+    // address, not a configurable vector register, for v0.1 - there is
+    // only ever one thing that would want to reprogram it.
+    parameter TRAP_VECTOR_ADDR = 32'h0000_0200
 ) (
     input  wire        clk,
     input  wire        reset,
     output wire         halted,
     output wire [31:0]  tohost_value,
+
+    // External interrupt request - asynchronous to the current
+    // instruction, masked by `ie_r`, latched (see irq_pending below)
+    // so a brief pulse is never missed even if it arrives mid-stall.
+    input  wire        irq_in,
 
     output wire        bus_req,
     output wire [31:0] bus_addr,
@@ -144,6 +154,11 @@ module cpu_core #(
     wire        is_jal;
     wire [31:0] jal_imm;
 
+    wire        is_rft, is_syscall, is_mvsr;
+    wire        mvsr_dir;
+    wire [1:0]  mvsr_selreg;
+    wire [2:0]  mvsr_nreg;
+
     wire [1:0]  write_bank;
     wire [2:0]  write_addr;
     wire        reg_write, illegal;
@@ -164,6 +179,8 @@ module cpu_core #(
         .is_load(is_load), .is_store(is_store), .mem_nd_ns(mem_nd_ns),
         .mem_base_bank(mem_base_bank), .mem_base_reg(mem_base_reg), .mem_imm(mem_imm),
         .is_jal(is_jal), .jal_imm(jal_imm),
+        .is_rft(is_rft), .is_syscall(is_syscall), .is_mvsr(is_mvsr),
+        .mvsr_dir(mvsr_dir), .mvsr_selreg(mvsr_selreg), .mvsr_nreg(mvsr_nreg),
         .write_bank(write_bank), .write_addr(write_addr),
         .reg_write(reg_write), .illegal(illegal)
     );
@@ -194,7 +211,7 @@ module cpu_core #(
             endcase
         end else if (is_load || is_store) begin
             if (mem_base_bank == BANK_R) begin r_addr_a = mem_base_reg; r_addr_b = mem_base_reg; end
-        end else if (!is_halt && !is_jal) begin // ALUR/ALUI/BRANCH (and illegal/default, harmlessly)
+        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr) begin // ALUR/ALUI/BRANCH (and illegal/default, harmlessly)
             if (bank == BANK_R) begin r_addr_a = rs1_addr; r_addr_b = rs2_addr; end
         end
     end
@@ -219,7 +236,7 @@ module cpu_core #(
             endcase
         end else if (is_load || is_store) begin
             if (mem_base_bank == BANK_G) begin g_addr_a = mem_base_reg; g_addr_b = mem_base_reg; end
-        end else if (!is_halt && !is_jal) begin
+        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr) begin
             if (bank == BANK_G) begin g_addr_a = rs1_addr; g_addr_b = rs2_addr; end
         end
     end
@@ -244,7 +261,7 @@ module cpu_core #(
             endcase
         end else if (is_load || is_store) begin
             if (mem_base_bank == BANK_B) begin b_addr_a = mem_base_reg; b_addr_b = mem_base_reg; end
-        end else if (!is_halt && !is_jal) begin
+        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr) begin
             if (bank == BANK_B) begin b_addr_a = rs1_addr; b_addr_b = rs2_addr; end
         end
     end
@@ -275,7 +292,14 @@ module cpu_core #(
             n_addr_b = (mem_base_bank == BANK_N) ? mem_base_reg : mem_nd_ns;
         end else if (is_halt) begin
             n_addr_a = tohost_reg; n_addr_b = tohost_reg;
-        end else if (!is_jal) begin // ALUR/ALUI/BRANCH (BARYON has no N read - falls through harmlessly, bank stays 0!=BANK_N)
+        end else if (is_mvsr) begin
+            // dir=1 (write, N->special): read mvsr_nreg's value to
+            // capture into the target special register (see the
+            // trap-entry always block below). dir=0 (read, special->N):
+            // no N read needed at all - the result is written via the
+            // normal write_data/write_bank broadcast, same as LOAD.
+            if (mvsr_dir) begin n_addr_a = mvsr_nreg; n_addr_b = mvsr_nreg; end
+        end else if (!is_jal && !is_rft && !is_syscall) begin // ALUR/ALUI/BRANCH (BARYON has no N read - falls through harmlessly, bank stays 0!=BANK_N)
             if (bank == BANK_N) begin n_addr_a = rs1_addr; n_addr_b = rs2_addr; end
         end
     end
@@ -477,12 +501,83 @@ module cpu_core #(
         (mem_addr == UART_TX_ADDR) ? 32'b0 :
                                        dmem_rdata;
 
+    // ==================== Traps / privilege (design review before this
+    // was written - see docs/ISA.md's "Traps" section) ====================
+    localparam MODE_USER   = 1'b0;
+    localparam MODE_KERNEL = 1'b1;
+    localparam CAUSE_ILLEGAL = 3'b000;
+    localparam CAUSE_SYSCALL = 3'b001;
+    localparam CAUSE_IRQ     = 3'b010;
+    localparam CAUSE_PRIV    = 3'b011;
+
+    reg [31:0] epc_r;
+    reg [2:0]  cause_r;
+    reg        mode_r, saved_mode_r;
+    reg        ie_r, saved_ie_r;
+
+    // RFT/MVSR are runtime-privileged (mode-dependent), so this check
+    // lives HERE, not in control_unit.v - keeps that module a pure
+    // function of `instr` alone (confirmed by design review: no other
+    // module needs to know the CPU's runtime state just to decode).
+    wire priv_violation = (is_rft || is_mvsr) && (mode_r == MODE_USER);
+    // Exceptions are never maskable by ie_r (a real bug in kernel code
+    // shouldn't be silently swallowed) - only the external-IRQ cause
+    // below is gated by ie_r. A synchronous double-fault (the handler
+    // itself trapping again before its own RFT) is an explicit,
+    // documented v0.1 policy gap (see docs/ISA.md), not a silently-
+    // assumed invariant.
+    wire sync_trap = illegal || is_syscall || priv_violation;
+
+    // Latched, not a live level - a brief irq_in pulse must never be
+    // missed even if it arrives mid-mem_stall (see below), and clearing
+    // only once the trap is actually TAKEN (not merely pending) means a
+    // pulse that arrives while ie_r=0 correctly stays pending until
+    // interrupts are re-enabled, rather than being silently dropped.
+    reg irq_pending;
+    wire irq_taken = irq_pending && ie_r && !sync_trap;
+    // An external IRQ must never preempt a LOAD/STORE on the exact
+    // cycle it completes - whether it just finished stalling, or never
+    // stalled at all - because the underlying access has already
+    // happened for real by then (a STORE's write already landed at
+    // the real memory the instant bus_grant fires; an ordinary
+    // private-memory access is likewise unstoppable once it reaches
+    // this cycle). Taking the trap on that SAME cycle instead of
+    // letting pc advance past it would make RFT re-execute (and for
+    // STORE, double-commit) an instruction that already happened -
+    // found live while working through this specific same-cycle race,
+    // a case the general "nothing has committed yet while mem_stall
+    // is still high" reasoning doesn't cover (it's true for every
+    // cycle mem_stall stays high, but not for the one cycle it just
+    // cleared). Deferring by exactly one cycle (irq_pending stays
+    // latched) is safe and needs no special-casing for whether this
+    // particular LOAD/STORE actually stalled at all.
+    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store);
+
+    wire [2:0] next_cause = illegal        ? CAUSE_ILLEGAL :
+                             is_syscall     ? CAUSE_SYSCALL :
+                             priv_violation ? CAUSE_PRIV :
+                                              CAUSE_IRQ; // the only remaining way any_trap can be set
+
+    // MVSR read direction (special -> N, via the normal write_data/
+    // write_bank broadcast - control_unit.v already set write_bank=N/
+    // write_addr=mvsr_nreg/reg_write=1 for this case, see its OP_MVSR
+    // arm) and write direction (N -> special, captured into the new
+    // registers above by the trap-entry always block below).
+    wire [31:0] mvsr_read_data = (mvsr_selreg == 2'b00) ? epc_r :
+                                  (mvsr_selreg == 2'b01) ? {29'b0, cause_r} :
+                                  (mvsr_selreg == 2'b10) ? {31'b0, saved_mode_r} :
+                                                            {31'b0, saved_ie_r}; // 2'b11 = SAVED_IE
+    // Always N's port A when is_mvsr && mvsr_dir (write direction) -
+    // see the N read-routing mux above.
+    wire [31:0] mvsr_write_value = n_porta_data;
+
     // ==================== Write-data mux ====================
     assign write_data = is_gluon  ? gluon_result :
                          is_baryon ? baryon_result :
                          is_meson  ? meson_result :
                          is_load   ? effective_dmem_rdata :
                          is_jal    ? (pc + 32'd4) :
+                         (is_mvsr && !mvsr_dir) ? mvsr_read_data :
                                      alu_result; // ALUR/ALUI
 
     // ==================== Branch ====================
@@ -504,16 +599,75 @@ module cpu_core #(
                             is_jal                      ? (pc + jal_imm) :
                                                            pc_plus4;
 
+    // Latching (irq_in itself) is independent of mem_stall/halted_r - a
+    // brief pulse must be caught even mid-stall. CLEARING is gated by
+    // !halted_r to stay exactly consistent with the main trap block
+    // below, which never acts on any_trap once halted - without this
+    // gate, irq_pending could clear here even though the main block
+    // never actually took the trap (a real, if minor, inconsistency
+    // found while double-checking this against the main block's own
+    // gating, not just assumed consistent).
     always @(posedge clk or posedge reset) begin
         if (reset) begin
-            pc       <= 32'b0;
-            halted_r <= 1'b0;
-            tohost_r <= 32'b0;
+            irq_pending <= 1'b0;
+        end else if (!halted_r && any_trap && irq_taken) begin
+            irq_pending <= 1'b0; // consumed
+        end else if (irq_in) begin
+            irq_pending <= 1'b1;
+        end
+    end
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            pc           <= 32'b0;
+            halted_r     <= 1'b0;
+            tohost_r     <= 32'b0;
+            epc_r        <= 32'b0;
+            cause_r      <= 3'b0;
+            mode_r       <= MODE_KERNEL;
+            saved_mode_r <= MODE_KERNEL;
+            ie_r         <= 1'b0;
+            saved_ie_r   <= 1'b0;
         end else if (!halted_r && !mem_stall) begin
-            pc <= next_pc;
-            if (is_halt) begin
-                halted_r <= 1'b1;
-                tohost_r <= n_porta_data;
+            if (any_trap) begin
+                // Hardware-latched EPC, not a general register - see
+                // docs/ISA.md's "Traps" section for why AxISA needs
+                // this specific primitive instead of a general
+                // indirect-jump instruction (it has neither, by
+                // design). `pc` (not yet advanced this cycle) is
+                // exactly right for BOTH cases: for a synchronous trap
+                // it's the trapping instruction's own address; for an
+                // external IRQ it's the address of the NOT-yet-executed
+                // instruction that got preempted - RFT jumps to
+                // EXACTLY epc (no automatic +4), so a synchronous
+                // handler must advance EPC itself (via MVSR) to skip
+                // the trapping instruction, while an IRQ handler
+                // correctly needs no adjustment at all.
+                epc_r        <= pc;
+                cause_r      <= next_cause;
+                saved_mode_r <= mode_r;
+                mode_r       <= MODE_KERNEL;
+                saved_ie_r   <= ie_r;
+                ie_r         <= 1'b0;
+                pc           <= TRAP_VECTOR_ADDR;
+            end else if (is_rft) begin
+                mode_r <= saved_mode_r;
+                ie_r   <= saved_ie_r;
+                pc     <= epc_r;
+            end else begin
+                pc <= next_pc;
+                if (is_halt) begin
+                    halted_r <= 1'b1;
+                    tohost_r <= n_porta_data;
+                end
+                if (is_mvsr && mvsr_dir) begin
+                    case (mvsr_selreg)
+                        2'b00: epc_r        <= mvsr_write_value;
+                        2'b01: cause_r      <= mvsr_write_value[2:0];
+                        2'b10: saved_mode_r <= mvsr_write_value[0];
+                        2'b11: saved_ie_r   <= mvsr_write_value[0];
+                    endcase
+                end
             end
         end
     end

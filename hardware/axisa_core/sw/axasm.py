@@ -20,7 +20,9 @@ from asm_test1 import (
     R, G, B, N,
     ADD, SUB, AND, OR, XOR, SLL, SRL, SRA, SLT, SLTU,
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
+    SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
+    rft, syscall, mvsr,
     write_hex,
 )
 
@@ -69,6 +71,14 @@ def parse_imm(tok):
 
 def encode_one(mnemonic, ops, iaddr, labels):
     m = mnemonic.upper()
+
+    if m == '.WORD':
+        # A raw 32-bit word, not a real mnemonic - the only way to
+        # place a deliberately-illegal instruction (a reserved opcode
+        # this ISA has no real mnemonic for) into a test program.
+        if len(ops) != 1:
+            raise AsmError(".word: expected 1 operand (raw 32-bit value)")
+        return parse_imm(ops[0]) & 0xFFFFFFFF
 
     if m in ALU_FUNCT:
         if len(ops) != 3:
@@ -167,6 +177,37 @@ def encode_one(mnemonic, ops, iaddr, labels):
         require_bank(nd_bank, nd, N, m, "tohost_reg")
         return halt(nd)
 
+    if m == 'RFT':
+        if len(ops) != 0:
+            raise AsmError("RFT: expected 0 operands")
+        return rft()
+
+    if m == 'SYSCALL':
+        if len(ops) != 0:
+            raise AsmError("SYSCALL: expected 0 operands")
+        return syscall()
+
+    # MVSR mnemonics (see docs/ISA.md's "Traps" section) - 8 distinct
+    # single-operand mnemonics (MF*=read special->N, MT*=write N->
+    # special) rather than one generic "MVSR dir,selreg,reg" - matches
+    # this ISA's existing style of separate mnemonics per real operation
+    # (ALUR/ALUI are separate, not one generic "ALU") and needs no new
+    # operand-parsing code (each is just HALT's own single-N-register
+    # shape).
+    MVSR_MNEMONICS = {
+        'MFEPC':   (0, SEL_EPC),   'MTEPC':   (1, SEL_EPC),
+        'MFCAUSE': (0, SEL_CAUSE), 'MTCAUSE': (1, SEL_CAUSE),
+        'MFSMODE': (0, SEL_SMODE), 'MTSMODE': (1, SEL_SMODE),
+        'MFSIE':   (0, SEL_SIE),   'MTSIE':   (1, SEL_SIE),
+    }
+    if m in MVSR_MNEMONICS:
+        if len(ops) != 1:
+            raise AsmError(f"{m}: expected 1 operand (N register)")
+        direction, selreg = MVSR_MNEMONICS[m]
+        nreg_bank, nreg = parse_reg(ops[0])
+        require_bank(nreg_bank, nreg, N, m, "operand")
+        return mvsr(direction, selreg, nreg)
+
     raise AsmError(f"unknown mnemonic '{mnemonic}'")
 
 
@@ -208,6 +249,29 @@ def assemble(lines):
         mnemonic = parts[0]
         operand_str = parts[1] if len(parts) > 1 else ''
         operands = [o.strip() for o in operand_str.split(',')] if operand_str else []
+
+        if mnemonic.upper() == '.ORG':
+            # Pad with real NOP instructions (ADDI n0,n0,0 - n0 is
+            # hardwired zero, so the write is silently dropped by
+            # regbank.v) up to the target address - there is no sparse/
+            # hole-filling mechanism in write_hex(), every word in the
+            # output must be a real instruction. Needed to place a trap
+            # handler at a fixed hardware address (TRAP_VECTOR_ADDR)
+            # without hand-counting NOPs, the same off-by-one-prone
+            # exercise this project has already been bitten by once
+            # (register indices) - let the assembler count instead.
+            if len(operands) != 1:
+                raise AsmError(f"line {lineno}: .org expects 1 operand (target address)")
+            target = parse_imm(operands[0])
+            if target < addr:
+                raise AsmError(f"line {lineno}: .org target 0x{target:x} is before the current address 0x{addr:x} (already passed)")
+            if (target - addr) % 4 != 0:
+                raise AsmError(f"line {lineno}: .org target 0x{target:x} is not word-aligned relative to current address 0x{addr:x}")
+            while addr < target:
+                instrs.append((addr, 'ADDI', ['N0', 'N0', '0'], lineno))
+                addr += 4
+            continue
+
         instrs.append((addr, mnemonic, operands, lineno))
         addr += 4
 

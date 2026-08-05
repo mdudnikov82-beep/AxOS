@@ -86,6 +86,44 @@ if %errorlevel% neq 0 (echo FAILED: tb_uart_shell_nomatch & "%VVP%" out_shell_no
 echo   OK ("xy" correctly NOT recognized - prompt+echo+"?" byte-exact)
 
 echo.
+echo ===== AxISA traps 1/3: illegal-instruction (entry+EPC+CAUSE+RFT) =====
+python sw\axasm.py sw\trap_illegal.axasm sw\trap_illegal.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_trap1.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\cpu_core.v tb\tb_trap_illegal.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_trap1.vvp | findstr /C:"ALL AXISA TRAP-ILLEGAL TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_trap_illegal & "%VVP%" out_trap1.vvp & goto :error)
+echo   OK (tohost=88, R/G/B/N survived the round trip, CAUSE/EPC captured correctly)
+
+echo.
+echo ===== AxISA traps 2/3: SYSCALL + real user-mode transition + PRIV_VIOLATION =====
+python sw\axasm.py sw\trap_syscall.axasm sw\trap_syscall.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_trap2.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\cpu_core.v tb\tb_trap_syscall.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_trap2.vvp | findstr /C:"ALL AXISA TRAP-SYSCALL TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_trap_syscall & "%VVP%" out_trap2.vvp & goto :error)
+echo   OK (tohost=110, bootstrap into user mode, SYSCALL cause=1, PRIV_VIOLATION cause=3, both round trips verified)
+
+echo.
+echo ===== AxISA traps 3/3: external interrupt =====
+python sw\axasm.py sw\trap_irq.axasm sw\trap_irq.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_trap3.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\cpu_core.v tb\tb_trap_irq.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_trap3.vvp | findstr /C:"ALL AXISA TRAP-IRQ TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_trap_irq & "%VVP%" out_trap3.vvp & goto :error)
+echo   OK (tohost=42, IRQ preempted a real spin loop, handler's EPC redirect honored exactly)
+
+python sw\axasm.py sw\trap_irq_stall.axasm sw\trap_irq_stall.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_trap4.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\cpu_core.v tb\tb_trap_irq_stall.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_trap4.vvp | findstr /C:"ALL AXISA TRAP-IRQ-STALL TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_trap_irq_stall & "%VVP%" out_trap4.vvp & goto :error)
+echo   OK (tohost=55, IRQ arriving mid-mem_stall correctly deferred until the STORE completed - EPC=0x28, not the store's own address)
+
+echo.
 echo ===== ALL SIMULATIONS PASSED =====
 exit /b 0
 

@@ -56,6 +56,9 @@ bit range across classes, to keep decode simple).
 | `00111`          | BRANCH   | conditional branch (same-bank compare)    |
 | `01000`          | JAL      | jump and link (link written to N)         |
 | `01001`          | HALT     | stop, report tohost from a named N reg    |
+| `01010`          | RFT      | return from trap (privileged)             |
+| `01011`          | SYSCALL  | deliberate trap (user→kernel door)        |
+| `01100`          | MVSR     | move to/from trap state (privileged)      |
 | others           | —        | reserved for v0.2+                        |
 
 ### ALUR — `opcode[31:27] bank[26:25] funct[24:21] rd[20:18] rs1[17:15] rs2[14:12] (unused[11:0])`
@@ -158,6 +161,117 @@ Stop; the testbench convention's `tohost` value is `N` bank register
 `tohost_reg`'s current value (matches rv32i_core's own `ECALL`/`a0`
 convention, generalized to a named register instead of a fixed one
 specifically because `n0` is hardwired zero and can't serve that role).
+`halted_r` is sticky forever once set - structurally unrelated to the
+trap mechanism below, which is definitely-resumable by design.
+
+### RFT — `opcode[31:27] (unused[26:0])`
+
+Return from trap. **Privileged** (traps with `cause=PRIV_VIOLATION` if
+executed in user mode). Restores `mode <= saved_mode`, `ie <= saved_ie`,
+and jumps to EXACTLY `epc` (no automatic +4) - matching real
+precedent (RISC-V's `mret`/`mepc`): a synchronous trap's own handler
+is responsible for advancing `EPC` past the faulting/`SYSCALL`
+instruction itself (via `MVSR` read-modify-write on `EPC`) if it wants
+to skip it, which also leaves room for a future fault a handler wants
+to *retry* (by leaving `EPC` unchanged) rather than skip - baking a
+fixed `+4` into hardware would foreclose that for no benefit today. An
+external interrupt's `EPC` already holds the address of the
+NOT-yet-executed instruction that was preempted (see "Traps" below),
+so its handler correctly needs no adjustment at all before `RFT`. This
+is the smallest possible instruction this
+ISA can encode - there is nothing to encode, since the target comes
+from the hardware-latched `epc` register, not the instruction word.
+AxISA has no indirect-jump instruction (`JAL`'s target is always a
+fixed PC-relative offset baked in at assemble time - see `JAL` above),
+so a dedicated hardware-latched return address is the only way this
+ISA can express "return to wherever execution was interrupted,"
+confirmed by design review before this was written.
+
+### SYSCALL — `opcode[31:27] (unused[26:0])`
+
+Deliberate, in-band trap request - the user→kernel door. **Not**
+privileged (it must work in both modes; it's the *only* way user code
+can ever enter kernel mode short of an actual fault). Traps with
+`cause=SYSCALL`. Software convention for passing a syscall number/
+arguments (e.g. a fixed N register) is left to the OS, not the ISA.
+
+### MVSR — `opcode[31:27] dir[26] selreg[25:24] n_reg[23:21] (unused[20:0])`
+
+Move to/from trap state. **Privileged** (traps with
+`cause=PRIV_VIOLATION` if executed in user mode). `dir=0`: read a
+special register's value into N-bank register `n_reg`. `dir=1`: write
+N-bank register `n_reg`'s value into the special register. `n_reg` is
+a bare 3-bit N-bank index, same structural shape as `LOAD`'s `nd`/
+`STORE`'s `ns` - only the `N` bank can ever be the operand, matching
+every other memory/control-touching instruction in this ISA.
+
+`selreg` (2 bits): `00`=`EPC` (the trap return address - software-
+writable, not just hardware-latched-and-read-only, specifically to
+bootstrap the very first drop into user mode: the kernel can never
+reach user mode via `RFT` until *something* has staged `EPC`+
+`SAVED_MODE`, and the first time, nothing has actually trapped yet);
+`01`=`CAUSE` (why the most recent trap fired - see the cause table
+below; writable for symmetry, though only ever meaningfully read);
+`10`=`SAVED_MODE` (the privilege mode `RFT` will restore - 1 bit,
+`0`=user `1`=kernel); `11`=`SAVED_IE` (the interrupt-enable state
+`RFT` will restore). There is deliberately no way to write the *live*
+`mode`/`ie` directly outside of `RFT` consuming `SAVED_MODE`/
+`SAVED_IE` - kernel code that wants interrupts enabled while staying
+in kernel mode (e.g. an idle loop) is an explicit v0.2+ gap, not an
+oversight.
+
+## Traps (interrupts + privileged/user mode)
+
+AxISA v0.1's second execution mode: a single hardware `mode` bit
+(`0`=user, `1`=kernel - NOT a register-bank value, exactly like `pc`/
+`halted_r` are CPU-control state rather than data), reset to kernel.
+On any trap, hardware atomically: latches `epc <= pc` (the trapping
+instruction's own address for synchronous causes), `cause <= <code>`,
+`saved_mode <= mode`, `mode <= kernel`, `saved_ie <= ie`, `ie <= 0`,
+then jumps to a **fixed** hardware address, `TRAP_VECTOR_ADDR` (a
+build-time constant for v0.1, not a configurable register - there is
+only ever one thing that would want to reprogram it, so a writable
+vector is deferred until that stops being true).
+
+Cause codes (3 bits, in the `CAUSE` special register):
+`000`=illegal instruction, `001`=`SYSCALL`, `010`=external interrupt,
+`011`=privilege violation (`RFT`/`MVSR` executed in user mode),
+`100`-`111` reserved.
+
+**Illegal instruction** reuses the ALREADY-EXISTING `illegal` decode
+signal (reserved ALUR/ALUI funct, reserved BARYON/MESON funct, or an
+unrecognized opcode) - previously computed and silently dropped
+(`reg_write` just stayed 0, PC advanced as if it were a NOP, with zero
+observable signal anything unusual happened). This is the cheapest
+possible trap cause to wire up, since it needs no new instruction
+encoding, and the first one this project actually implemented/tested.
+
+**External interrupt** (`irq_in`, a new top-level `cpu_core` input) is
+masked by `ie` (cleared on trap entry, restored by `RFT`) - required,
+not just sufficient: without it, a second external IRQ arriving while
+a handler is still running would clobber `epc`/`cause` before `RFT`
+consumes them, silently losing the first trap's return address. This
+does **not** protect against a **synchronous** double-fault (the
+handler itself executing a reserved opcode or another `SYSCALL` before
+its own `RFT`) - exceptions are conventionally never maskable by `ie`,
+so handler code must not itself trigger a synchronous trap before
+`RFT`. This is an explicit v0.1 policy, not a silently-assumed
+invariant - real hardware would need nested-trap support (a trap
+stack, or at minimum a second EPC/CAUSE pair) to handle this safely,
+deferred to v0.2+.
+
+A pending external IRQ that arrives while a `LOAD`/`STORE` is stalled
+waiting for `bus_grant` (see `SHARED_MEM_BASE`) is held pending and
+only actually redirects `pc` once the stall clears - the stalled
+access is never aborted mid-flight, so interrupt latency is bounded by
+stall duration rather than needing a new "abort a grant" concept.
+
+**No memory protection in v0.1** - the mode bit and 2 privileged
+instructions (`RFT`, `MVSR`) prove the trap/privilege *mechanism*,
+they do not yet provide real isolation: user-mode code can `LOAD`/
+`STORE` anywhere kernel-mode code can, including the UART and
+shared-bus ranges. An MMU/page-table concept is a real, separate,
+much larger v0.2+ project, not a small follow-on to this one.
 
 ## Reserved `funct` behavior (decided ahead of RTL, per design review)
 

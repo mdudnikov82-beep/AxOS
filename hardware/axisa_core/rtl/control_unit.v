@@ -1,6 +1,10 @@
 // Pure combinational instruction decode for AxISA (see docs/ISA.md) -
 // milestone 2: full ALUR/ALUI/BRANCH/HALT (milestone 1) plus GLUON/
-// BARYON/MESON/LOAD/STORE/JAL.
+// BARYON/MESON/LOAD/STORE/JAL. Plus RFT/SYSCALL/MVSR (traps/privilege
+// modes) - this module stays a PURE function of `instr` alone even for
+// the privilege check (mode-dependent trap decisions are made in
+// cpu_core.v instead, deliberately, so no other module ever needs to
+// know the CPU's runtime state just to decode an instruction).
 //
 // Every field is assigned ONLY inside its own opcode's case arm (a
 // design-review requirement before this was written): several classes
@@ -77,6 +81,17 @@ module control_unit (
     output reg          is_jal,
     output reg  [31:0] jal_imm,     // sign-extended 24-bit PC-relative offset
 
+    // RFT / SYSCALL / MVSR (traps + privilege) - see docs/ISA.md's
+    // "Traps" section. is_rft/is_mvsr are PRIVILEGED (cpu_core.v traps
+    // them with cause=PRIV_VIOLATION if mode==user, since that check
+    // needs runtime state this module deliberately doesn't have).
+    output reg          is_rft,
+    output reg          is_syscall,
+    output reg          is_mvsr,
+    output reg          mvsr_dir,     // 0=read (special->N), 1=write (N->special)
+    output reg  [1:0]  mvsr_selreg,  // 00=EPC 01=CAUSE 10=SAVED_MODE 11=SAVED_IE
+    output reg  [2:0]  mvsr_nreg,    // bare N-bank index, same shape as LOAD's nd/STORE's ns
+
     // Resolved write target (valid whenever reg_write=1)
     output reg  [1:0]  write_bank,
     output reg  [2:0]  write_addr,
@@ -94,6 +109,9 @@ module control_unit (
     localparam OP_BRANCH = 5'b00111;
     localparam OP_JAL    = 5'b01000;
     localparam OP_HALT   = 5'b01001;
+    localparam OP_RFT    = 5'b01010;
+    localparam OP_SYSCALL = 5'b01011;
+    localparam OP_MVSR   = 5'b01100;
 
     localparam BANK_N = 2'b11;
 
@@ -140,6 +158,13 @@ module control_unit (
 
         is_jal         = 1'b0;
         jal_imm        = 32'b0;
+
+        is_rft         = 1'b0;
+        is_syscall     = 1'b0;
+        is_mvsr        = 1'b0;
+        mvsr_dir       = 1'b0;
+        mvsr_selreg    = 2'b0;
+        mvsr_nreg      = 3'b0;
 
         write_bank     = 2'b0;
         write_addr     = 3'b0;
@@ -262,6 +287,26 @@ module control_unit (
             OP_HALT: begin
                 tohost_reg = instr[26:24];
                 is_halt    = 1'b1;
+            end
+
+            OP_RFT: begin
+                is_rft = 1'b1; // privilege check + trap-entry mechanics live in cpu_core.v
+            end
+
+            OP_SYSCALL: begin
+                is_syscall = 1'b1; // never privileged - the user->kernel door
+            end
+
+            OP_MVSR: begin
+                is_mvsr     = 1'b1;
+                mvsr_dir    = instr[26];
+                mvsr_selreg = instr[25:24];
+                mvsr_nreg   = instr[23:21];
+                if (!mvsr_dir) begin // read: special -> N (write: N -> special, no bank write)
+                    write_bank = BANK_N;
+                    write_addr = mvsr_nreg;
+                    reg_write  = 1'b1;
+                end
             end
 
             default: begin
