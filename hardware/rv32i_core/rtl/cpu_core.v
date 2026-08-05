@@ -66,9 +66,10 @@ module cpu_core #(
     wire [3:0]  alu_op;
     wire [1:0]  mem_size;
 
-    // Minimal RV32F (see fp_regfile.v/fp_addsub.v/fp_mul.v/fp_div.v).
-    localparam FP_MUL = 3'b010;
-    localparam FP_DIV = 3'b011;
+    // Minimal RV32F (see fp_regfile.v/fp_addsub.v/fp_mul.v/fp_div.v/fp_sqrt.v).
+    localparam FP_MUL  = 3'b010;
+    localparam FP_DIV  = 3'b011;
+    localparam FP_SQRT = 3'b100;
 
     wire        fp_reg_write, is_fp_mem;
     wire [2:0]  fp_op;
@@ -234,7 +235,7 @@ module cpu_core #(
     // already keeps the integer regfile's reg_write=0 for every
     // RV32F instruction, since rd's 5-bit number aliases between the
     // two register files).
-    wire [31:0] fpu_addsub_result, fpu_mul_result, fpu_div_result;
+    wire [31:0] fpu_addsub_result, fpu_mul_result, fpu_div_result, fpu_sqrt_result;
 
     // FDIV.S is a genuine multi-cycle operation (see fp_div.v) - a new
     // functional-unit-latency stall, distinct from mem_stall (shared-
@@ -247,13 +248,25 @@ module cpu_core #(
     wire fpu_div_start = is_fdiv_instr && !fpu_div_busy;
     wire fpu_div_stall = is_fdiv_instr && !fpu_div_done;
 
+    // FSQRT.S mirrors FDIV.S exactly - a second, independent multi-cycle
+    // functional unit. Only one of the two can ever be "the current
+    // instruction" at a time (fp_op selects exactly one), so there's no
+    // need for the two units' busy/stall signals to know about each
+    // other beyond being OR'd together wherever something needs "is ANY
+    // multi-cycle FP op still in flight".
+    wire is_fsqrt_instr = fp_reg_write && !is_fp_mem && (fp_op == FP_SQRT);
+    wire fpu_sqrt_busy, fpu_sqrt_done;
+    wire fpu_sqrt_start = is_fsqrt_instr && !fpu_sqrt_busy;
+    wire fpu_sqrt_stall = is_fsqrt_instr && !fpu_sqrt_done;
+
     // Same !mem_stall gating as the integer regfile's write enable -
     // a stalled FLW (targeting the shared-bus region) must not commit
     // garbage into fp_regfile on a losing arbitration cycle, the exact
     // bug class mem_stall already exists to prevent on the integer side.
-    // fpu_div_stall gets the identical treatment: a division result
-    // only commits on the one cycle it's actually done.
-    wire fp_regfile_write_en = fp_reg_write && !mem_stall && !fpu_div_stall && !mmu_stall;
+    // fpu_div_stall/fpu_sqrt_stall get the identical treatment: a
+    // division or sqrt result only commits on the one cycle it's
+    // actually done.
+    wire fp_regfile_write_en = fp_reg_write && !mem_stall && !fpu_div_stall && !fpu_sqrt_stall && !mmu_stall;
 
     fp_regfile fprf (
         .clk(clk), .rs1_addr(rs1), .rs2_addr(rs2),
@@ -277,19 +290,31 @@ module cpu_core #(
         .busy(fpu_div_busy), .done(fpu_div_done), .result(fpu_div_result)
     );
 
+    // FSQRT.S is architecturally ONE-OPERAND - only rs1's data is wired
+    // in, unlike every other FPU unit here (fp_fwd_rs2 is genuinely
+    // unused for this op, not "computed but harmlessly discarded" the
+    // way the other units' cross-op operands are).
+    fp_sqrt fpsqrt (
+        .clk(clk), .reset(reset), .start(fpu_sqrt_start),
+        .a(fp_rs1_data),
+        .busy(fpu_sqrt_busy), .done(fpu_sqrt_done), .result(fpu_sqrt_result)
+    );
+
     // FLW's write-back is the loaded memory data; FADD.S/FSUB.S write
     // fp_addsub's result (op_sub selects which); FMUL.S writes
-    // fp_mul's; FDIV.S writes fp_div's (an explicit branch - falling
-    // through to the addsub default here would silently compute the
-    // wrong operation instead of dividing, the same "silent wrong
-    // branch" bug class already documented in control_unit.v's own
-    // LUI comment) - a dedicated mux kept independent of the integer
-    // path's mem_to_reg mux, per this feature's design review.
+    // fp_mul's; FDIV.S writes fp_div's; FSQRT.S writes fp_sqrt's (each
+    // an explicit branch - falling through to the addsub default here
+    // would silently compute the wrong operation instead, the same
+    // "silent wrong branch" bug class already documented in
+    // control_unit.v's own LUI comment) - a dedicated mux kept
+    // independent of the integer path's mem_to_reg mux, per this
+    // feature's design review.
     always @(*) begin
-        if (is_fp_mem)           fp_rd_data = effective_mem_read_data;
-        else if (fp_op == FP_MUL) fp_rd_data = fpu_mul_result;
-        else if (fp_op == FP_DIV) fp_rd_data = fpu_div_result;
-        else                       fp_rd_data = fpu_addsub_result;
+        if (is_fp_mem)             fp_rd_data = effective_mem_read_data;
+        else if (fp_op == FP_MUL)  fp_rd_data = fpu_mul_result;
+        else if (fp_op == FP_DIV)  fp_rd_data = fpu_div_result;
+        else if (fp_op == FP_SQRT) fp_rd_data = fpu_sqrt_result;
+        else                        fp_rd_data = fpu_addsub_result;
     end
 
     // Branch comparison - funct3 selects which relation BEQ/BNE/BLT/
@@ -334,7 +359,7 @@ module cpu_core #(
         if (reset) begin
             pc       <= 32'b0;
             halted_r <= 1'b0;
-        end else if (!halted_r && !mem_stall && !fpu_div_stall && !mmu_stall) begin
+        end else if (!halted_r && !mem_stall && !fpu_div_stall && !fpu_sqrt_stall && !mmu_stall) begin
             pc <= next_pc;
             // SFENCE.VMA also decodes as OP_SYSTEM but must NOT halt the
             // core - is_sfence excludes it here (mmu_inst below is what

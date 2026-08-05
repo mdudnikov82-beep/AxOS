@@ -262,8 +262,9 @@ module cpu_core_pipelined #(
         .result(fpu_mul_result)
     );
 
-    localparam FP_MUL = 3'b010;
-    localparam FP_DIV = 3'b011;
+    localparam FP_MUL  = 3'b010;
+    localparam FP_DIV  = 3'b011;
+    localparam FP_SQRT = 3'b100;
 
     // FDIV.S is a genuine multi-cycle op (see fp_div.v) - unlike
     // fp_addsub/fp_mul above (single-cycle combinational, always
@@ -335,8 +336,55 @@ module cpu_core_pipelined #(
         end
     end
 
-    wire [31:0] ex_fpu_result = (id_ex_fp_op == FP_MUL) ? fpu_mul_result :
-                                (id_ex_fp_op == FP_DIV) ? fpu_div_result_out : fpu_addsub_result;
+    // FSQRT.S mirrors FDIV.S's entire structure - own busy/done/ready-
+    // buffer/capture signals, same !mem_stall && !mmu_stall capture
+    // guard built in from day one (per the design review that predicted
+    // this exact race before any RTL existed, rather than needing to be
+    // found live the way FDIV.S's own version of this bug originally
+    // was). is_fdiv_instr and is_fsqrt_instr are mutually exclusive by
+    // construction (id_ex_fp_op selects exactly one value), so the two
+    // units' start signals can never race each other, and only ONE of
+    // fpu_div_stall/fpu_sqrt_stall is ever asserted at a time - but
+    // every SITE that gates on fpu_div_stall still needs fpu_sqrt_stall
+    // OR'd in too, since which one it is varies per instruction.
+    //
+    // FSQRT.S is architecturally ONE-OPERAND (rs2's field is a reserved
+    // sub-opcode selector in the real encoding, not a real second
+    // operand) - only fp_fwd_rs1 is wired into fp_sqrt below, unlike
+    // every other FPU unit here.
+    wire is_fsqrt_instr = id_ex_fp_reg_write && !id_ex_is_fp_mem && (id_ex_fp_op == FP_SQRT);
+    wire fpu_sqrt_busy, fpu_sqrt_done;
+    wire [31:0] fpu_sqrt_result;
+
+    reg        fpu_sqrt_result_ready_r;
+    reg [31:0] fpu_sqrt_result_r;
+
+    wire fsqrt_capture  = is_fsqrt_instr && (fpu_sqrt_done || fpu_sqrt_result_ready_r) && !mem_stall && !mmu_stall;
+    wire fpu_sqrt_start = is_fsqrt_instr && !fpu_sqrt_busy && !fpu_sqrt_result_ready_r && !halted_r;
+    wire fpu_sqrt_stall = is_fsqrt_instr && !fsqrt_capture;
+    wire [31:0] fpu_sqrt_result_out = fpu_sqrt_result_ready_r ? fpu_sqrt_result_r : fpu_sqrt_result;
+
+    fp_sqrt fpsqrt (
+        .clk(clk), .reset(reset), .start(fpu_sqrt_start),
+        .a(fp_fwd_rs1),
+        .busy(fpu_sqrt_busy), .done(fpu_sqrt_done), .result(fpu_sqrt_result)
+    );
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            fpu_sqrt_result_ready_r <= 1'b0;
+            fpu_sqrt_result_r       <= 32'b0;
+        end else if (fpu_sqrt_done && !fsqrt_capture) begin
+            fpu_sqrt_result_ready_r <= 1'b1;
+            fpu_sqrt_result_r       <= fpu_sqrt_result;
+        end else if (fsqrt_capture) begin
+            fpu_sqrt_result_ready_r <= 1'b0;
+        end
+    end
+
+    wire [31:0] ex_fpu_result = (id_ex_fp_op == FP_MUL)  ? fpu_mul_result :
+                                (id_ex_fp_op == FP_DIV)  ? fpu_div_result_out :
+                                (id_ex_fp_op == FP_SQRT) ? fpu_sqrt_result_out : fpu_addsub_result;
 
     wire [31:0] ex_alu_a = id_ex_auipc ? id_ex_pc : (id_ex_lui ? 32'b0 : fwd_rs1);
     wire [31:0] ex_alu_b = id_ex_alu_src ? id_ex_imm : fwd_rs2;
@@ -459,7 +507,7 @@ module cpu_core_pipelined #(
     // the one incidental time (SFENCE reaching ID/EX at all requires
     // nothing ahead of it to currently be stalling) - never a sustained
     // collision.
-    wire tlb_flush = id_is_sfence && !(mem_stall || fpu_div_stall || mmu_stall) && !(ex_taken || stall);
+    wire tlb_flush = id_is_sfence && !(mem_stall || fpu_div_stall || fpu_sqrt_stall || mmu_stall) && !(ex_taken || stall);
 
     mmu #(
         .MMU_ENABLE(MMU_ENABLE), .TLB_ENTRIES(MMU_TLB_ENTRIES), .DATA_MEM_BYTES(DATA_MEM_BYTES)
@@ -533,7 +581,7 @@ module cpu_core_pipelined #(
             pc       <= 32'b0;
             halted_r <= 1'b0;
         end else if (!halted_r) begin
-            if (!(stall || mem_stall || fpu_div_stall || mmu_stall)) pc <= next_pc;
+            if (!(stall || mem_stall || fpu_div_stall || fpu_sqrt_stall || mmu_stall)) pc <= next_pc;
             if (mem_wb_is_system) halted_r <= 1'b1;
             else if (page_fault) halted_r <= 1'b1;
         end
@@ -544,11 +592,11 @@ module cpu_core_pipelined #(
             if_id_pc    <= 32'b0;
             if_id_instr <= 32'b0;
         end else if (!halted_r) begin
-            if (mem_stall || fpu_div_stall || mmu_stall) begin
+            if (mem_stall || fpu_div_stall || fpu_sqrt_stall || mmu_stall) begin
                 // Hold unconditionally - PC is frozen too (above), so
                 // if_instr/pc wouldn't have changed anyway. A pending
                 // ex_taken flush is simply deferred until mem_stall/
-                // fpu_div_stall/mmu_stall clears (see the ID/EX block:
+                // fpu_div_stall/fpu_sqrt_stall/mmu_stall clears (see the ID/EX block:
                 // whatever's driving ex_taken is ALSO held frozen every
                 // cycle either stall lasts, so nothing is lost by
                 // waiting).
@@ -578,18 +626,18 @@ module cpu_core_pipelined #(
             id_ex_fp_rs1_data <= 32'b0; id_ex_fp_rs2_data <= 32'b0;
             id_ex_fp_reg_write_r <= 1'b0;
         end else if (!halted_r) begin
-            if (mem_stall || fpu_div_stall || mmu_stall) begin
+            if (mem_stall || fpu_div_stall || fpu_sqrt_stall || mmu_stall) begin
                 // Hold entirely (not a bubble) - either the instruction
                 // here is itself waiting on the older memory op stuck in
                 // EX/MEM (a structural resource conflict: EX/MEM
                 // physically can't accept a new value this cycle,
                 // whether that's shared-bus arbitration or an MMU page-
-                // table walk), or it's the FDIV.S instruction still
-                // being divided (must keep holding its own decoded
+                // table walk), or it's the FDIV.S/FSQRT.S instruction
+                // still computing (must keep holding its own decoded
                 // fields stable for fp_fwd_rs1/rs2 and id_ex_fp_op,
-                // which fpu_div_start above still needs each cycle) -
-                // either way it must stay put rather than be silently
-                // discarded like a normal hazard bubble would discard it.
+                // which fpu_div_start/fpu_sqrt_start above still need
+                // each cycle) - either way it must stay put rather than
+                // be silently discarded like a normal hazard bubble would.
             end else if (ex_taken || stall) begin
                 // Bubble: either flushing a wrong-path instruction, or
                 // holding back a load-use-hazardous one for one cycle.
@@ -640,7 +688,7 @@ module cpu_core_pipelined #(
             // need) one cycle after the main id_ex_* register correctly
             // stays frozen at 1 - a drift between the two mirrors that
             // this identical gating avoids entirely.
-            if (mem_stall || fpu_div_stall || mmu_stall) begin
+            if (mem_stall || fpu_div_stall || fpu_sqrt_stall || mmu_stall) begin
                 // hold (no assignment)
             end else if (ex_taken || stall) begin
                 id_ex_mem_read_r <= 1'b0;
@@ -672,17 +720,18 @@ module cpu_core_pipelined #(
                 // themselves), structurally identical to mem_stall, NOT
                 // like fpu_div_stall where the stuck resource is one
                 // stage earlier in ID/EX.
-            end else if (fpu_div_stall) begin
+            end else if (fpu_div_stall || fpu_sqrt_stall) begin
                 // Bubble, NOT hold - unlike mem_stall (where EX/MEM's
-                // OWN content is genuinely stuck), fpu_div_stall means
-                // id_ex_* (one stage EARLIER) is still dividing. EX/MEM
-                // isn't blocked: whatever instruction was already here
-                // when FDIV entered ID/EX already drained to MEM/WB on
-                // its own next cycle via the unconditional (mem_stall-
-                // only-gated) MEM/WB register below - so EX/MEM must
-                // not keep re-presenting stale content to it. Zeroing
-                // just the write/enable signals is enough (matches the
-                // ID/EX bubble branch's own style above) - everything
+                // OWN content is genuinely stuck), fpu_div_stall/
+                // fpu_sqrt_stall means id_ex_* (one stage EARLIER) is
+                // still computing. EX/MEM isn't blocked: whatever
+                // instruction was already here when FDIV.S/FSQRT.S
+                // entered ID/EX already drained to MEM/WB on its own
+                // next cycle via the unconditional (mem_stall-only-
+                // gated) MEM/WB register below - so EX/MEM must not
+                // keep re-presenting stale content to it. Zeroing just
+                // the write/enable signals is enough (matches the ID/EX
+                // bubble branch's own style above) - everything
                 // downstream that matters (is_shared_access, dmem
                 // write, WB register writes, halted_r) keys off these.
                 ex_mem_reg_write    <= 1'b0;

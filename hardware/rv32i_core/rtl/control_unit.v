@@ -66,10 +66,11 @@ module control_unit (
     localparam OP_STORE_FP = 7'b0100111;
     localparam OP_FP       = 7'b1010011;
 
-    localparam FP_ADD = 3'b000;
-    localparam FP_SUB = 3'b001;
-    localparam FP_MUL = 3'b010;
-    localparam FP_DIV = 3'b011;
+    localparam FP_ADD  = 3'b000;
+    localparam FP_SUB  = 3'b001;
+    localparam FP_MUL  = 3'b010;
+    localparam FP_DIV  = 3'b011;
+    localparam FP_SQRT = 3'b100;
 
     // ALU op encoding shared with alu.v.
     localparam ALU_ADD  = 4'b0000;
@@ -196,16 +197,22 @@ module control_unit (
                 // ignored here since this project only implements
                 // single precision).
                 case (funct7[6:2])
-                    5'b00000: begin fp_op = FP_ADD; fp_reg_write = 1'b1; end // FADD.S
-                    5'b00001: begin fp_op = FP_SUB; fp_reg_write = 1'b1; end // FSUB.S
-                    5'b00010: begin fp_op = FP_MUL; fp_reg_write = 1'b1; end // FMUL.S
-                    5'b00011: begin fp_op = FP_DIV; fp_reg_write = 1'b1; end // FDIV.S
-                    // unimplemented RV32F op (sqrt/etc - out of
-                    // scope): fp_reg_write stays 0 (its default),
-                    // deliberately NOT set here, so an unrecognized op
-                    // can never sneak a garbage FP register write
-                    // through - same principle as the top-level
-                    // default case below for entirely unknown opcodes.
+                    5'b00000: begin fp_op = FP_ADD;  fp_reg_write = 1'b1; end // FADD.S
+                    5'b00001: begin fp_op = FP_SUB;  fp_reg_write = 1'b1; end // FSUB.S
+                    5'b00010: begin fp_op = FP_MUL;  fp_reg_write = 1'b1; end // FMUL.S
+                    5'b00011: begin fp_op = FP_DIV;  fp_reg_write = 1'b1; end // FDIV.S
+                    // FSQRT.S - architecturally ONE-OPERAND (rs2's field
+                    // is a reserved sub-opcode selector in the real
+                    // encoding, not a real second register); cpu_core.v/
+                    // cpu_core_pipelined.v's fp_sqrt instantiation only
+                    // ever wires up rs1's data, matching this.
+                    5'b01011: begin fp_op = FP_SQRT; fp_reg_write = 1'b1; end // FSQRT.S
+                    // unimplemented RV32F op: fp_reg_write stays 0 (its
+                    // default), deliberately NOT set here, so an
+                    // unrecognized op can never sneak a garbage FP
+                    // register write through - same principle as the
+                    // top-level default case below for entirely unknown
+                    // opcodes.
                     default:  illegal = 1'b1;
                 endcase
             end
