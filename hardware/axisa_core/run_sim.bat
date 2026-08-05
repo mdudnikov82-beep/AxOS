@@ -69,6 +69,22 @@ if %errorlevel% neq 0 (echo FAILED: AxISA mini-SoC & "%VVP%" out_soc.vvp & goto 
 echo   OK (c0=127, c1=77, c2-c46=200, all 47 concurrent, cross-core communication verified through real Z-axis routing)
 
 echo.
+echo ===== AxISA mini-kernel: UART console + one-command shell (real .axasm source) =====
+python sw\axasm.py sw\mini_shell.axasm sw\mini_shell.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_shell.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\cpu_core.v tb\tb_uart_shell.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_shell.vvp | findstr /C:"ALL AXISA UART SHELL TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_uart_shell & "%VVP%" out_shell.vvp & goto :error)
+echo   OK ("hi" recognized - prompt+echo+"OK" byte-exact through the simulated console)
+
+"%IVERILOG%" -o out_shell_nomatch.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\cpu_core.v tb\tb_uart_shell_nomatch.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_shell_nomatch.vvp | findstr /C:"ALL AXISA UART SHELL NOMATCH TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_uart_shell_nomatch & "%VVP%" out_shell_nomatch.vvp & goto :error)
+echo   OK ("xy" correctly NOT recognized - prompt+echo+"?" byte-exact)
+
+echo.
 echo ===== ALL SIMULATIONS PASSED =====
 exit /b 0
 

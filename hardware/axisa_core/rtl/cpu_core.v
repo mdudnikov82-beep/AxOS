@@ -29,7 +29,13 @@
 module cpu_core #(
     parameter INSTR_MEM_WORDS = 1024,
     parameter INSTR_INIT_FILE = "",
-    parameter DATA_MEM_WORDS  = 1024,
+    // Bumped 1024->2048 (design review, before adding the UART below):
+    // the private array must stay big enough to keep UART_TX_ADDR's
+    // word index safely IN-RANGE, so a stray LOAD from it hits the
+    // explicit read-mux tier below (defined as reading 0) rather than
+    // an out-of-range array index (Icarus returns X for that, which
+    // would silently poison whatever register the LOAD targets).
+    parameter DATA_MEM_WORDS  = 2048,
     // Shared-bus master port (see rtl/router.v/noc_core_adapter.v,
     // ported byte-for-byte from rv32i_core - the NoC only ever speaks
     // this generic bus_req/addr/write_data/mem_write/mem_size/
@@ -40,7 +46,21 @@ module cpu_core #(
     // of the private data_mem below, mirroring rv32i_core/rtl/
     // cpu_core.v's own is_shared_access/mem_stall pattern exactly.
     parameter SHARED_MEM_BASE  = 32'h0000_2000,
-    parameter SHARED_MEM_BYTES = 256
+    parameter SHARED_MEM_BYTES = 256,
+    // Minimal UART-like console (design review before this was
+    // written - AxISA's first real peripheral of any kind). Picked
+    // deliberately inside the dead gap between the private memory's
+    // old top (0xFFF) and SHARED_MEM_BASE (0x2000), so this can never
+    // collide with either existing decoded range. TX needs no
+    // persisted state (a fire-and-forget one-cycle pulse); RX DOES
+    // need state that persists across many polling cycles, which is
+    // why it's driven from OUTSIDE this module (uart_rx_data_in/
+    // uart_rx_ready_in) rather than a register in here - mirrors the
+    // existing precedent of keeping all real memory state for the
+    // shared-bus path outside cpu_core.v too (in shared_mem_backing.v).
+    parameter UART_TX_ADDR       = 32'h0000_1000,
+    parameter UART_RX_DATA_ADDR  = 32'h0000_1004,
+    parameter UART_RX_READY_ADDR = 32'h0000_1008
 ) (
     input  wire        clk,
     input  wire        reset,
@@ -54,7 +74,27 @@ module cpu_core #(
     output wire [1:0]  bus_mem_size,
     output wire        bus_mem_unsigned,
     input  wire        bus_grant,
-    input  wire [31:0] bus_read_data
+    input  wire [31:0] bus_read_data,
+
+    // UART TX: one-cycle pulse per STORE to UART_TX_ADDR - a testbench
+    // (or eventually real hardware) watches this to actually emit the
+    // character.
+    output wire        uart_tx_valid,
+    output wire [7:0]  uart_tx_data,
+
+    // UART RX: whatever the testbench is CURRENTLY presenting, read
+    // purely combinationally on LOAD - no internal latch here. Ready-
+    // clear is software-explicit (a STORE to UART_RX_READY_ADDR, value
+    // ignored), not hardware auto-clear-on-read: a LOAD from
+    // UART_RX_DATA_ADDR must stay a pure, repeatable, side-effect-free
+    // read like every other LOAD in this ISA - auto-clear would make
+    // it the one address where re-issuing the same instruction twice
+    // silently loses a byte with no assembly-visible signal that
+    // anything unusual happened. uart_rx_ack tells the testbench
+    // "software just consumed this, you may advance."
+    input  wire [7:0]  uart_rx_data_in,
+    input  wire        uart_rx_ready_in,
+    output wire        uart_rx_ack
 );
     localparam BANK_R = 2'b00;
     localparam BANK_G = 2'b01;
@@ -373,6 +413,20 @@ module cpu_core #(
     // already only ever reached once mem_stall has cleared.
     wire mem_stall = is_shared_access && !bus_grant;
 
+    // UART decode (design review before this was written) - picked
+    // deliberately inside the dead gap below SHARED_MEM_BASE, so this
+    // can never be simultaneously true with is_shared_access; no
+    // priority-encoding is needed between the two decodes.
+    wire is_uart_tx        = is_store && (mem_addr == UART_TX_ADDR);
+    wire is_uart_rx_data    = (mem_addr == UART_RX_DATA_ADDR);
+    wire is_uart_rx_ready   = (mem_addr == UART_RX_READY_ADDR);
+    wire is_uart_rx_clear   = is_store && is_uart_rx_ready;
+    wire is_uart_addr       = (mem_addr == UART_TX_ADDR) || is_uart_rx_data || is_uart_rx_ready;
+
+    assign uart_tx_valid = is_uart_tx;
+    assign uart_tx_data  = store_value[7:0];
+    assign uart_rx_ack   = is_uart_rx_clear;
+
     assign bus_req          = is_shared_access;
     assign bus_addr          = mem_addr - SHARED_MEM_BASE;
     assign bus_write_data    = store_value;
@@ -389,24 +443,39 @@ module cpu_core #(
     assign bus_mem_unsigned  = 1'b0;
 
     wire [31:0] dmem_rdata;
-    // A shared-range STORE must never ALSO land in the private memory
-    // (it would otherwise silently alias into whatever word this
-    // global address maps to in the private array's own address
-    // space) - mirrors rv32i_core/rtl/cpu_core.v's identical
-    // dmem_write gating. The address input itself stays unconditional;
-    // the resulting private read is simply discarded by the write-data
-    // mux below when is_shared_access is set.
+    // A shared-range or UART-range STORE must never ALSO land in the
+    // private memory (it would otherwise silently alias into whatever
+    // word this global address maps to in the private array's own
+    // address space) - mirrors rv32i_core/rtl/cpu_core.v's identical
+    // dmem_write gating, extended with the UART term (design review:
+    // this is a package deal with the DATA_MEM_WORDS bump above - an
+    // ungated STORE here would have been harmless only by accident,
+    // while the array was too small to actually reach that address;
+    // bumping the array without ALSO adding this gate would turn that
+    // latent bug into a live one). The address input itself stays
+    // unconditional; the resulting private read is simply discarded by
+    // the read-data mux below whenever is_shared_access/is_uart_addr
+    // is set.
     data_mem #(.MEM_WORDS(DATA_MEM_WORDS)) dmem (
         .clk(clk), .addr(mem_addr),
-        .wdata(store_value), .we(is_store && !is_shared_access),
+        .wdata(store_value), .we(is_store && !is_shared_access && !is_uart_addr),
         .rdata(dmem_rdata)
     );
 
     // A shared-range LOAD's real data comes back over the bus, not
     // from the private memory (which was never actually storing that
     // address) - mirrors rv32i_core/rtl/cpu_core.v's own
-    // effective_mem_read_data mux exactly.
-    wire [31:0] effective_dmem_rdata = is_shared_access ? bus_read_data : dmem_rdata;
+    // effective_mem_read_data mux exactly. UART_TX_ADDR is write-only
+    // (a stray LOAD reads a DEFINED 0, per design review, rather than
+    // relying on DATA_MEM_WORDS sizing alone); UART_RX_DATA_ADDR/
+    // UART_RX_READY_ADDR read whatever the testbench is CURRENTLY
+    // presenting, purely combinationally.
+    wire [31:0] effective_dmem_rdata =
+        is_shared_access  ? bus_read_data :
+        is_uart_rx_data   ? {24'b0, uart_rx_data_in} :
+        is_uart_rx_ready  ? {31'b0, uart_rx_ready_in} :
+        (mem_addr == UART_TX_ADDR) ? 32'b0 :
+                                       dmem_rdata;
 
     // ==================== Write-data mux ====================
     assign write_data = is_gluon  ? gluon_result :

@@ -186,6 +186,16 @@ nothing to reject.
   4-byte-aligned target are always zero anyway - not done in v0.1
   since the current range is already generous and this isn't fixing
   anything broken.
+- UART RX (see `cpu_core.v`'s `UART_RX_DATA_ADDR`/`UART_RX_READY_ADDR`)
+  has NO real FIFO or overrun flag - the testbench driving it is
+  currently the sole, fully-cooperative source of RX stimulus, and it
+  waits for software's ready-clear (`uart_rx_ack`) before ever
+  presenting the next byte. This is honest and sufficient for
+  Icarus-only, script-driven testing, but stops being true the moment
+  input becomes genuinely asynchronous (a real keyboard/PTY bridge, or
+  real hardware where the serial line runs on its own clock) - a real
+  FIFO with an overrun flag is a real v0.2+ requirement, not an
+  oversight, the day this needs to run interactively.
 
 ## Implementation notes (register file design, decided ahead of RTL)
 

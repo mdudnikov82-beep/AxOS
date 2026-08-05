@@ -1,0 +1,78 @@
+# AxISA mini-kernel: minimal console + one-command shell - the first
+# real "software" for AxISA's new UART peripheral (see cpu_core.v's
+# UART_TX_ADDR/UART_RX_DATA_ADDR/UART_RX_READY_ADDR).
+#
+# Reads one line from the simulated UART RX (echoing each character
+# back out TX as it arrives, terminated by CR or LF), recognizes
+# exactly one command ("hi"), prints "OK" or "?", and HALTs with
+# n6=1 (matched) or n6=0 (unmatched) - the smallest real "shell":
+# read -> recognize -> act, proving the full round trip. A real
+# interactive build would loop back to the prompt instead of halting.
+#
+# Every fixed string here is printed via INLINE ADDI+STORE pairs, one
+# per character, not a callable "print string" routine - AxISA has no
+# indirect-jump instruction (no JALR equivalent; JAL's target is a
+# fixed PC-relative offset), so there is no way to return to more than
+# one call site from a shared subroutine. This isn't a workaround for
+# a missing feature, it's the only thing the current ISA can express.
+    ADDI N1, N0, 0x1000    # n1 = UART base
+    ADDI N4, N0, 0x1100    # n4 = command buffer base
+    ADDI N3, N0, 0         # n3 = buffer write offset (bytes... really "words", 4 per char)
+
+    # print prompt "> "
+    ADDI N2, N0, 62        # '>'
+    STORE N2, N1, 0
+    ADDI N2, N0, 32        # ' '
+    STORE N2, N1, 0
+
+readloop:
+    LOAD N5, N1, 8         # n5 = ready flag
+    BEQ  N5, N0, readloop  # busy-wait for a byte (same idiom as shared_consumer.axasm)
+    LOAD N2, N1, 4         # n2 = received byte
+    STORE N0, N1, 8        # ack/clear ready (value stored doesn't matter, only that a STORE happened)
+    STORE N2, N1, 0        # echo it back - a real terminal expects this
+
+    ADDI N5, N0, 13        # CR
+    BEQ  N2, N5, gotline
+    ADDI N5, N0, 10        # LF
+    BEQ  N2, N5, gotline
+
+    ADD  N5, N4, N3        # n5 = buffer_base + offset
+    STORE N2, N5, 0        # store this char into the command buffer
+    ADDI N3, N3, 4         # advance offset by one word
+    BEQ  N0, N0, readloop  # unconditional - keep reading (n0 always equals n0)
+
+gotline:
+    ADDI N6, N0, 8
+    BNE  N3, N6, nomatch   # must be exactly 2 characters ("hi") - 2*4=8 bytes of offset
+
+    LOAD N5, N4, 0         # first char
+    ADDI N2, N0, 104       # 'h'
+    BNE  N5, N2, nomatch
+    LOAD N5, N4, 4         # second char
+    ADDI N2, N0, 105       # 'i'
+    BNE  N5, N2, nomatch
+
+    # matched - print "OK\r\n"
+    ADDI N2, N0, 79        # 'O'
+    STORE N2, N1, 0
+    ADDI N2, N0, 75        # 'K'
+    STORE N2, N1, 0
+    ADDI N2, N0, 13
+    STORE N2, N1, 0
+    ADDI N2, N0, 10
+    STORE N2, N1, 0
+    ADDI N6, N0, 1
+    BEQ  N0, N0, done
+
+nomatch:
+    ADDI N2, N0, 63        # '?'
+    STORE N2, N1, 0
+    ADDI N2, N0, 13
+    STORE N2, N1, 0
+    ADDI N2, N0, 10
+    STORE N2, N1, 0
+    ADDI N6, N0, 0
+
+done:
+    HALT N6                # tohost = 1 if "hi" was recognized, 0 otherwise
