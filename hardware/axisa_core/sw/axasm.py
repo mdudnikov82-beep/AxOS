@@ -22,7 +22,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr,
+    rft, syscall, mvsr, ptb,
     write_hex,
 )
 
@@ -207,6 +207,18 @@ def encode_one(mnemonic, ops, iaddr, labels):
         nreg_bank, nreg = parse_reg(ops[0])
         require_bank(nreg_bank, nreg, N, m, "operand")
         return mvsr(direction, selreg, nreg)
+
+    # PTB mnemonics (see docs/ISA.md's "Virtual memory" section) - same
+    # MF*/MT* read/write shape as MVSR's own mnemonics, just one
+    # register instead of a selreg-picked one.
+    PTB_MNEMONICS = {'MFPTB': 0, 'MTPTB': 1}
+    if m in PTB_MNEMONICS:
+        if len(ops) != 1:
+            raise AsmError(f"{m}: expected 1 operand (N register)")
+        direction = PTB_MNEMONICS[m]
+        nreg_bank, nreg = parse_reg(ops[0])
+        require_bank(nreg_bank, nreg, N, m, "operand")
+        return ptb(direction, nreg)
 
     raise AsmError(f"unknown mnemonic '{mnemonic}'")
 

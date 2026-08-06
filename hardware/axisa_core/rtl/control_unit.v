@@ -92,6 +92,14 @@ module control_unit (
     output reg  [1:0]  mvsr_selreg,  // 00=EPC 01=CAUSE 10=SAVED_MODE 11=SAVED_IE
     output reg  [2:0]  mvsr_nreg,    // bare N-bank index, same shape as LOAD's nd/STORE's ns
 
+    // PTB (page table base) - split out from MVSR because mvsr_selreg's
+    // 2-bit field is already fully populated (see docs/ISA.md's Traps
+    // section - all 4 encodings assigned) - a brand-new privileged
+    // opcode, same read/write shape as MVSR but with only one register.
+    output reg          is_ptb,
+    output reg          ptb_dir,      // 0=read (PTB->N), 1=write (N->PTB)
+    output reg  [2:0]  ptb_nreg,
+
     // Resolved write target (valid whenever reg_write=1)
     output reg  [1:0]  write_bank,
     output reg  [2:0]  write_addr,
@@ -112,6 +120,7 @@ module control_unit (
     localparam OP_RFT    = 5'b01010;
     localparam OP_SYSCALL = 5'b01011;
     localparam OP_MVSR   = 5'b01100;
+    localparam OP_PTB    = 5'b01101;
 
     localparam BANK_N = 2'b11;
 
@@ -165,6 +174,10 @@ module control_unit (
         mvsr_dir       = 1'b0;
         mvsr_selreg    = 2'b0;
         mvsr_nreg      = 3'b0;
+
+        is_ptb         = 1'b0;
+        ptb_dir        = 1'b0;
+        ptb_nreg       = 3'b0;
 
         write_bank     = 2'b0;
         write_addr     = 3'b0;
@@ -305,6 +318,17 @@ module control_unit (
                 if (!mvsr_dir) begin // read: special -> N (write: N -> special, no bank write)
                     write_bank = BANK_N;
                     write_addr = mvsr_nreg;
+                    reg_write  = 1'b1;
+                end
+            end
+
+            OP_PTB: begin
+                is_ptb   = 1'b1; // privileged - cpu_core.v traps with CAUSE_PRIV if mode==user
+                ptb_dir  = instr[26];
+                ptb_nreg = instr[25:23];
+                if (!ptb_dir) begin // read: PTB -> N (write: N -> PTB, no bank write)
+                    write_bank = BANK_N;
+                    write_addr = ptb_nreg;
                     reg_write  = 1'b1;
                 end
             end

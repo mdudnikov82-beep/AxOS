@@ -1,0 +1,64 @@
+# AxISA virtual memory (see rtl/mmu.v and docs/ISA.md's "Virtual
+# memory" section). Requires MMU_ENABLE=1 (tb/tb_mmu.v instantiates
+# cpu_core with it on - every OTHER test in this project leaves it at
+# its default-off/bypass value, so this is the one place real
+# translation is actually exercised).
+#
+# Page table (16 entries, PT_INDEX_BITS=4) placed at physical 0x1040 -
+# deliberately NOT at 0x1000 (that's UART_TX_ADDR - a kernel STORE
+# there would be diverted to the peripheral and never reach data_mem's
+# real array at all, so the table itself must live somewhere that
+# collides with neither the UART trio (0x1000/0x1004/0x1008) nor
+# SHARED_MEM_BASE, 0x2000).
+#
+# Only 2 of the table's 16 entries are usable via a plain ADDI-loaded
+# base immediate in this test (ADDI's imm is 15-bit signed, so a
+# virtual page BASE beyond 0x3000 doesn't fit) - and of those, index 1
+# (vaddr 0x1000) and index 2 (vaddr 0x2000) themselves collide with
+# UART/shared-bus decode on the RAW (pre-translation) address, so only
+# index 0 (vaddr 0x0000-0x0FFF) and index 3 (vaddr 0x3000-0x3FFF) are
+# actually clean to use here:
+#   - index 0 -> PPN=1 (a deliberately NON-identity mapping - vaddr
+#     0x0000 range lands on PHYSICAL page 1, 0x1000-0x1FFF - proves a
+#     real translation happened, not a coincidental no-op). Used for
+#     the successful STORE-then-LOAD round trip.
+#   - index 3 -> PTE=0 (V=0, explicitly invalid) - deliberately
+#     triggers a real page fault (CAUSE=4), proving AxISA's virtual
+#     memory delivers it as a genuine RECOVERABLE trap (unlike
+#     rv32i_core's own MMU, which has no way back from one at all) -
+#     the handler skips past the faulting LOAD (advances EPC by 4,
+#     same "skip don't retry" pattern as sw/trap_illegal.axasm) and
+#     RFTs, and execution provably continues correctly afterward.
+    ADDI N1, N0, 0x1040      # n1 = PTB value
+    MTPTB N1
+    ADDI N2, N0, 0x1040      # n2 = &PTE[0] (ptb + 0*4)
+    ADDI N3, N0, 0x1007      # n3 = PTE[0]: PPN=1, R=1, W=1, V=1
+    STORE N3, N2, 0          # kernel-mode direct store - bypasses the MMU entirely
+    ADDI N4, N0, 0x104C      # n4 = &PTE[3] (ptb + 3*4)
+    STORE N0, N4, 0          # PTE[3] = 0 (invalid - deliberately unmapped)
+
+    ADDI N5, N0, 0           # n5 = 0 (USER)
+    MTSMODE N5               # saved_mode = USER (for the bootstrap RFT below)
+    MTSIE N5                 # saved_ie = 0 (interrupts stay disabled - not tested here)
+    ADDI N5, N0, 0x34        # n5 = address of user_code (0x34 = 52 = word index 13)
+    MTEPC N5
+    RFT                      # bootstrap: "return" into user mode for the first time
+
+user_code:
+    ADDI N1, N0, 0x0100      # n1 = vaddr 0x0100 (page index 0, offset 0x100)
+    ADDI N2, N0, 0xAB        # n2 = test value (171)
+    STORE N2, N1, 0          # translated STORE - first touch of page 0: walk+fill (a few extra stall cycles), lands at PHYSICAL 0x1100 (PPN=1<<12 + 0x100)
+    LOAD N3, N1, 0           # translated LOAD - same page, same cached translation (hit path, no extra stall) - n3 must == 0xAB
+
+    ADDI N4, N0, 0x3000      # n4 = vaddr 0x3000 (page index 3 - deliberately unmapped)
+    LOAD N6, N4, 0           # TRAPS - real page fault (CAUSE=4), EPC=this instruction's own address
+    ADD N7, N3, N3           # resumption point after the handler skips the faulting LOAD - n7 = 0xAB+0xAB = 342 (proves n3 survived AND execution genuinely continued past a real page fault)
+    HALT N7
+
+.org 0x200
+handler:
+    MFCAUSE N5               # n5 = cause (expect 4 = CAUSE_PAGE_FAULT)
+    MFEPC N6                 # n6 = epc of the faulting LOAD
+    ADDI N6, N6, 4           # skip past it - don't retry (this test just proves recoverability, not demand-paging)
+    MTEPC N6
+    RFT

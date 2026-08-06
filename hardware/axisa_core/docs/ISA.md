@@ -59,6 +59,7 @@ bit range across classes, to keep decode simple).
 | `01010`          | RFT      | return from trap (privileged)             |
 | `01011`          | SYSCALL  | deliberate trap (user→kernel door)        |
 | `01100`          | MVSR     | move to/from trap state (privileged)      |
+| `01101`          | PTB      | move to/from page table base (privileged) |
 | others           | —        | reserved for v0.2+                        |
 
 ### ALUR — `opcode[31:27] bank[26:25] funct[24:21] rd[20:18] rs1[17:15] rs2[14:12] (unused[11:0])`
@@ -220,6 +221,17 @@ below; writable for symmetry, though only ever meaningfully read);
 in kernel mode (e.g. an idle loop) is an explicit v0.2+ gap, not an
 oversight.
 
+### PTB — `opcode[31:27] dir[26] n_reg[25:23] (unused[22:0])`
+
+Move to/from the page table base register (see "Virtual memory"
+below). **Privileged**, same rule as `MVSR`. Split into its own opcode
+rather than a third `MVSR` selreg value because `MVSR`'s 2-bit
+`selreg` field is already fully populated (all 4 encodings assigned
+above) - `PTB` has exactly one register to move, so it needs no
+selreg field at all, just `dir` (`0`=read `PTB`→`n_reg`, `1`=write
+`n_reg`→`PTB`) and a bare 3-bit `n_reg`, the same shape as `MVSR`'s own
+`n_reg`.
+
 ## Traps (interrupts + privileged/user mode)
 
 AxISA v0.1's second execution mode: a single hardware `mode` bit
@@ -235,8 +247,8 @@ vector is deferred until that stops being true).
 
 Cause codes (3 bits, in the `CAUSE` special register):
 `000`=illegal instruction, `001`=`SYSCALL`, `010`=external interrupt,
-`011`=privilege violation (`RFT`/`MVSR` executed in user mode),
-`100`-`111` reserved.
+`011`=privilege violation (`RFT`/`MVSR`/`PTB` executed in user mode),
+`100`=page fault (see "Virtual memory" below), `101`-`111` reserved.
 
 **Illegal instruction** reuses the ALREADY-EXISTING `illegal` decode
 signal (reserved ALUR/ALUI funct, reserved BARYON/MESON funct, or an
@@ -266,12 +278,70 @@ only actually redirects `pc` once the stall clears - the stalled
 access is never aborted mid-flight, so interrupt latency is bounded by
 stall duration rather than needing a new "abort a grant" concept.
 
-**No memory protection in v0.1** - the mode bit and 2 privileged
-instructions (`RFT`, `MVSR`) prove the trap/privilege *mechanism*,
-they do not yet provide real isolation: user-mode code can `LOAD`/
-`STORE` anywhere kernel-mode code can, including the UART and
-shared-bus ranges. An MMU/page-table concept is a real, separate,
-much larger v0.2+ project, not a small follow-on to this one.
+## Virtual memory
+
+AxISA now translates a user-mode `LOAD`/`STORE`'s address against a
+page table (`rtl/mmu.v`) instead of using it directly - the first real
+memory *isolation* this ISA has, layered on top of the trap/privilege
+*mechanism* above (a genuine improvement possible only because that
+mechanism already exists: a page fault is delivered as an ordinary
+synchronous trap, `CAUSE`=`100`, recoverable via the handler's own
+`RFT` - unlike `rv32i_core`'s own MMU, built before that project had
+any trap infrastructure, whose page faults freeze the core forever
+with no way back).
+
+**Scope** - only the core's own **private** `data_mem` is translated.
+Kernel mode (`mode`=`1`) **always** bypasses translation entirely, not
+just by convention: the kernel would otherwise need its own page table
+correctly mapped before it could ever build one, a bootstrap problem
+with no clean answer. The shared-bus window (`SHARED_MEM_BASE`) and
+the UART addresses are decoded on the **raw** address before the MMU
+is ever consulted, exactly as before - a translated access can never
+alias either one.
+
+**Page table** - a single flat, single-level table (not a 2-level
+walk: AxISA's private memory is currently only 2 pages, so a second
+level would be solving a problem this address space doesn't have),
+`2^PT_INDEX_BITS` (default 16) 32-bit PTEs, indexed by
+`vaddr[PT_INDEX_BITS+11:12]`. Any virtual address whose bits *above*
+that index field are nonzero faults immediately - it can never
+silently wrap or alias into the table's own first entries. PTE format
+(byte layout identical to `rv32i_core/rtl/mmu.v`'s own, deliberately,
+for zero new design cost): `[31:12]`=PPN (physical page number),
+`[2]`=W (writable), `[1]`=R (readable), `[0]`=V (valid).
+
+**No TLB** - a single-level table is only a 1-cycle-extra walk away,
+so a real associative cache buys little a "fill once, use it, forget
+it" single scratch entry doesn't already give for free. A fresh
+translation costs a few extra stall cycles (walk + fill); re-touching
+the *same* page on the very next access is free (folded into the
+current instruction's own single cycle); touching a *different* page
+re-walks from scratch every time - a deliberate v0.1 simplification,
+not an oversight, and cheap to add real caching to later without any
+ISA-visible change.
+
+**Page fault** (`CAUSE`=`100`) fires on: a translation miss with
+`V`=`0`, a permission mismatch (a `STORE` against a read-only page, or
+a `LOAD`/`STORE` against a page whose target PPN maps outside the
+private memory's real size), or a virtual address whose upper bits
+exceed the table's own index range. `EPC` captures the faulting
+`LOAD`/`STORE`'s own address (not yet advanced), exactly like every
+other synchronous trap - the handler must itself advance `EPC` (via
+`MVSR`) before `RFT` if it wants to skip rather than retry the
+instruction (e.g. after fixing up the page table for a legitimate
+lazily-mapped page).
+
+Changing `PTB` (a `PTB` write) invalidates the single cached
+translation - the table it points at may no longer agree with
+whatever was last cached.
+
+**Still no protection against a kernel-mode access** - `PTB`
+write access is privileged, but kernel code, once running, can address
+its own private memory directly with no page table at all (by design -
+see "Scope" above). Multiple independent address spaces (one page
+table per process) are possible today by swapping `PTB` on a context
+switch, but there is no process/scheduler concept in v0.1 to drive
+that - a real v0.2+ project, not a small follow-on to this one.
 
 ## Reserved `funct` behavior (decided ahead of RTL, per design review)
 

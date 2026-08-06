@@ -65,7 +65,16 @@ module cpu_core #(
     // see docs/ISA.md's "Traps" section for the full design). A FIXED
     // address, not a configurable vector register, for v0.1 - there is
     // only ever one thing that would want to reprogram it.
-    parameter TRAP_VECTOR_ADDR = 32'h0000_0200
+    parameter TRAP_VECTOR_ADDR = 32'h0000_0200,
+    // Virtual memory (design review before this was written - see
+    // docs/ISA.md's "Virtual memory" section). Default OFF (bypass,
+    // rtl/mmu.v's own MMU_ENABLE=0 path: paddr=vaddr, zero added
+    // latency) so every existing test that never sets up a page table
+    // keeps its exact prior behavior with zero risk - mirrors
+    // rv32i_core/rtl/mmu.v's own precedent exactly. Only a test that
+    // deliberately wants to exercise translation passes MMU_ENABLE=1.
+    parameter MMU_ENABLE    = 0,
+    parameter PT_INDEX_BITS = 4
 ) (
     input  wire        clk,
     input  wire        reset,
@@ -159,6 +168,10 @@ module cpu_core #(
     wire [1:0]  mvsr_selreg;
     wire [2:0]  mvsr_nreg;
 
+    wire        is_ptb;
+    wire        ptb_dir;
+    wire [2:0]  ptb_nreg;
+
     wire [1:0]  write_bank;
     wire [2:0]  write_addr;
     wire        reg_write, illegal;
@@ -181,6 +194,7 @@ module cpu_core #(
         .is_jal(is_jal), .jal_imm(jal_imm),
         .is_rft(is_rft), .is_syscall(is_syscall), .is_mvsr(is_mvsr),
         .mvsr_dir(mvsr_dir), .mvsr_selreg(mvsr_selreg), .mvsr_nreg(mvsr_nreg),
+        .is_ptb(is_ptb), .ptb_dir(ptb_dir), .ptb_nreg(ptb_nreg),
         .write_bank(write_bank), .write_addr(write_addr),
         .reg_write(reg_write), .illegal(illegal)
     );
@@ -211,7 +225,7 @@ module cpu_core #(
             endcase
         end else if (is_load || is_store) begin
             if (mem_base_bank == BANK_R) begin r_addr_a = mem_base_reg; r_addr_b = mem_base_reg; end
-        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr) begin // ALUR/ALUI/BRANCH (and illegal/default, harmlessly)
+        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr && !is_ptb) begin // ALUR/ALUI/BRANCH (and illegal/default, harmlessly)
             if (bank == BANK_R) begin r_addr_a = rs1_addr; r_addr_b = rs2_addr; end
         end
     end
@@ -236,7 +250,7 @@ module cpu_core #(
             endcase
         end else if (is_load || is_store) begin
             if (mem_base_bank == BANK_G) begin g_addr_a = mem_base_reg; g_addr_b = mem_base_reg; end
-        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr) begin
+        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr && !is_ptb) begin
             if (bank == BANK_G) begin g_addr_a = rs1_addr; g_addr_b = rs2_addr; end
         end
     end
@@ -261,7 +275,7 @@ module cpu_core #(
             endcase
         end else if (is_load || is_store) begin
             if (mem_base_bank == BANK_B) begin b_addr_a = mem_base_reg; b_addr_b = mem_base_reg; end
-        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr) begin
+        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr && !is_ptb) begin
             if (bank == BANK_B) begin b_addr_a = rs1_addr; b_addr_b = rs2_addr; end
         end
     end
@@ -299,6 +313,14 @@ module cpu_core #(
             // no N read needed at all - the result is written via the
             // normal write_data/write_bank broadcast, same as LOAD.
             if (mvsr_dir) begin n_addr_a = mvsr_nreg; n_addr_b = mvsr_nreg; end
+        end else if (is_ptb) begin
+            // Same shape as MVSR's write direction just above: dir=1
+            // (write, N->PTB) needs ptb_nreg's value read to capture
+            // into ptb_r (trap-entry always block below); dir=0 (read,
+            // PTB->N) needs no N read at all - control_unit.v already
+            // routed that case via the normal write_data/write_bank
+            // broadcast, same as MVSR's own read direction.
+            if (ptb_dir) begin n_addr_a = ptb_nreg; n_addr_b = ptb_nreg; end
         end else if (!is_jal && !is_rft && !is_syscall) begin // ALUR/ALUI/BRANCH (BARYON has no N read - falls through harmlessly, bank stays 0!=BANK_N)
             if (bank == BANK_N) begin n_addr_a = rs1_addr; n_addr_b = rs2_addr; end
         end
@@ -431,11 +453,6 @@ module cpu_core #(
     // decode has no interaction with the confinement rule at all.
     wire is_shared_access = (is_load || is_store) &&
         (mem_addr >= SHARED_MEM_BASE) && (mem_addr < SHARED_MEM_BASE + SHARED_MEM_BYTES);
-    // is_halt can never itself be true while mem_stall is true (HALT
-    // is neither is_load nor is_store), so the tohost_r-latching logic
-    // below needs no separate change for this new stall source - it's
-    // already only ever reached once mem_stall has cleared.
-    wire mem_stall = is_shared_access && !bus_grant;
 
     // UART decode (design review before this was written) - picked
     // deliberately inside the dead gap below SHARED_MEM_BASE, so this
@@ -450,6 +467,64 @@ module cpu_core #(
     assign uart_tx_valid = is_uart_tx;
     assign uart_tx_data  = store_value[7:0];
     assign uart_rx_ack   = is_uart_rx_clear;
+
+    // ==================== Virtual memory (design review before this was
+    // written - see rtl/mmu.v's own header comment and docs/ISA.md's
+    // "Virtual memory" section) ====================
+    // Only a user-mode private-data_mem LOAD/STORE ever gets translated
+    // - kernel mode ALWAYS bypasses (avoids the bootstrap chicken-and-
+    // egg problem of the kernel needing its own page table just to set
+    // one up), and the shared-bus/UART tiers are already fully decoded
+    // above on the RAW address, before this point, exactly like
+    // rv32i_core/rtl/cpu_core.v's own equivalent scope decision.
+    wire mmu_is_access = (is_load || is_store) && !is_shared_access &&
+                          !is_uart_addr && (mode_r == MODE_USER);
+
+    reg [31:0] ptb_r;
+    // One-cycle pulse the exact cycle a PTB write instruction actually
+    // retires (mirrors the trap-entry always block's own !mem_stall/
+    // !any_trap gating below - a PTB write that instead traps for
+    // privilege violation must NOT be treated as "PTB changed").
+    wire ptb_changed = is_ptb && ptb_dir && !mem_stall && !any_trap;
+    wire [31:0] ptb_write_value = n_porta_data;
+
+    wire [31:0] mmu_paddr;
+    wire        mmu_stall;
+    wire        mmu_fault;
+    wire        mmu_walk_active;
+    wire [31:0] mmu_walk_addr;
+
+    mmu #(.MMU_ENABLE(MMU_ENABLE), .PT_INDEX_BITS(PT_INDEX_BITS), .DATA_MEM_WORDS(DATA_MEM_WORDS)) mmu_inst (
+        .clk(clk), .reset(reset),
+        .vaddr(mem_addr),
+        .is_access(mmu_is_access),
+        .is_write(is_store),
+        .ptb(ptb_r),
+        .ptb_changed(ptb_changed),
+        .paddr(mmu_paddr),
+        .mmu_stall(mmu_stall),
+        .mmu_fault(mmu_fault),
+        .walk_active(mmu_walk_active),
+        .walk_addr(mmu_walk_addr),
+        .walk_read_data(dmem_rdata)
+    );
+
+    // is_halt can never itself be true while mem_stall is true (HALT
+    // is neither is_load nor is_store), so the tohost_r-latching logic
+    // below needs no separate change for this new stall source - it's
+    // already only ever reached once mem_stall has cleared.
+    wire mem_stall = (is_shared_access && !bus_grant) || mmu_stall;
+
+    // Walker's own PTE fetch takes priority (its read must land on
+    // data_mem's shared port); otherwise a translated user-mode access
+    // uses the MMU's resolved physical address; everything else (kernel
+    // mode, or the shared-bus/UART tiers whose real transfer happens
+    // elsewhere and whose private-array read here is simply discarded
+    // below) passes the raw address through unchanged - identical to
+    // rv32i_core/rtl/cpu_core.v's own dmem_addr muxing.
+    wire [31:0] dmem_addr_final = mmu_walk_active ? mmu_walk_addr :
+                                   mmu_is_access   ? mmu_paddr    :
+                                                      mem_addr;
 
     assign bus_req          = is_shared_access;
     assign bus_addr          = mem_addr - SHARED_MEM_BASE;
@@ -481,8 +556,16 @@ module cpu_core #(
     // the read-data mux below whenever is_shared_access/is_uart_addr
     // is set.
     data_mem #(.MEM_WORDS(DATA_MEM_WORDS)) dmem (
-        .clk(clk), .addr(mem_addr),
-        .wdata(store_value), .we(is_store && !is_shared_access && !is_uart_addr),
+        .clk(clk), .addr(dmem_addr_final),
+        .wdata(store_value),
+        // !mmu_walk_active blocks a STORE's write from landing during
+        // the walker's own PTE-fetch cycle; !mmu_stall additionally
+        // blocks it during S_FILL (mmu.v's walk_active has already
+        // dropped there, but `paddr` isn't valid yet either - a stalled
+        // pending STORE's we must not fire against that stale address,
+        // exactly the subtlety rv32i_core/rtl/mmu.v's own module header
+        // documents as a real historical bug there).
+        .we(is_store && !is_shared_access && !is_uart_addr && !mmu_walk_active && !mmu_stall),
         .rdata(dmem_rdata)
     );
 
@@ -509,6 +592,7 @@ module cpu_core #(
     localparam CAUSE_SYSCALL = 3'b001;
     localparam CAUSE_IRQ     = 3'b010;
     localparam CAUSE_PRIV    = 3'b011;
+    localparam CAUSE_PAGE_FAULT = 3'b100;
 
     reg [31:0] epc_r;
     reg [2:0]  cause_r;
@@ -519,14 +603,18 @@ module cpu_core #(
     // lives HERE, not in control_unit.v - keeps that module a pure
     // function of `instr` alone (confirmed by design review: no other
     // module needs to know the CPU's runtime state just to decode).
-    wire priv_violation = (is_rft || is_mvsr) && (mode_r == MODE_USER);
+    wire priv_violation = (is_rft || is_mvsr || is_ptb) && (mode_r == MODE_USER);
     // Exceptions are never maskable by ie_r (a real bug in kernel code
     // shouldn't be silently swallowed) - only the external-IRQ cause
     // below is gated by ie_r. A synchronous double-fault (the handler
     // itself trapping again before its own RFT) is an explicit,
     // documented v0.1 policy gap (see docs/ISA.md), not a silently-
-    // assumed invariant.
-    wire sync_trap = illegal || is_syscall || priv_violation;
+    // assumed invariant. mmu_fault is likewise a precise, synchronous,
+    // non-maskable exception - mutually exclusive with the other three
+    // by construction (it can only ever coincide with is_load/is_store,
+    // which illegal/is_syscall/priv_violation's own opcode classes
+    // never are).
+    wire sync_trap = illegal || is_syscall || priv_violation || mmu_fault;
 
     // Latched, not a live level - a brief irq_in pulse must never be
     // missed even if it arrives mid-mem_stall (see below), and clearing
@@ -556,6 +644,7 @@ module cpu_core #(
     wire [2:0] next_cause = illegal        ? CAUSE_ILLEGAL :
                              is_syscall     ? CAUSE_SYSCALL :
                              priv_violation ? CAUSE_PRIV :
+                             mmu_fault      ? CAUSE_PAGE_FAULT :
                                               CAUSE_IRQ; // the only remaining way any_trap can be set
 
     // MVSR read direction (special -> N, via the normal write_data/
@@ -578,6 +667,7 @@ module cpu_core #(
                          is_load   ? effective_dmem_rdata :
                          is_jal    ? (pc + 32'd4) :
                          (is_mvsr && !mvsr_dir) ? mvsr_read_data :
+                         (is_ptb && !ptb_dir)   ? ptb_r :
                                      alu_result; // ALUR/ALUI
 
     // ==================== Branch ====================
@@ -628,6 +718,7 @@ module cpu_core #(
             saved_mode_r <= MODE_KERNEL;
             ie_r         <= 1'b0;
             saved_ie_r   <= 1'b0;
+            ptb_r        <= 32'b0;
         end else if (!halted_r && !mem_stall) begin
             if (any_trap) begin
                 // Hardware-latched EPC, not a general register - see
@@ -667,6 +758,9 @@ module cpu_core #(
                         2'b10: saved_mode_r <= mvsr_write_value[0];
                         2'b11: saved_ie_r   <= mvsr_write_value[0];
                     endcase
+                end
+                if (is_ptb && ptb_dir) begin
+                    ptb_r <= ptb_write_value;
                 end
             end
         end

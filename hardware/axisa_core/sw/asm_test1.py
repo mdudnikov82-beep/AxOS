@@ -104,6 +104,17 @@ def mvsr(direction, selreg, nreg):
     return (OP_MVSR << 27) | (direction << 26) | (selreg << 24) | (nreg << 21)
 
 
+# ==================== Virtual memory (see docs/ISA.md's "Virtual
+# memory" section) - split out from MVSR since its 2-bit selreg field
+# is already fully populated (all 4 encodings assigned) ====================
+
+OP_PTB = 0b01101
+
+
+def ptb(direction, nreg):
+    return (OP_PTB << 27) | (direction << 26) | (nreg << 23)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:
