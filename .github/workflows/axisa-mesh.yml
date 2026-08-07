@@ -1,0 +1,82 @@
+name: AxISA NoC Mesh Scale Test
+
+# Manual-only (workflow_dispatch) - this compiles a generated N-core
+# Verilog mesh (see hardware/axisa_core/tools/gen_soc_top.py) which can
+# take well over an hour at larger sizes, so it must never run on
+# every push/PR the way ci.yml's jobs do. Runs unattended on GitHub's
+# own runner (no browser tab to keep open, no local machine RAM ceiling,
+# no free-tier compute-unit exhaustion the way Google Colab's free tier
+# has) - see [[project_axisa_mesh_scale_ceiling]] for the history of
+# attempts elsewhere.
+on:
+  workflow_dispatch:
+    inputs:
+      x_size:
+        description: "Mesh X size"
+        required: true
+        default: "14"
+      y_size:
+        description: "Mesh Y size"
+        required: true
+        default: "14"
+      z_size:
+        description: "Mesh Z size"
+        required: true
+        default: "14"
+
+jobs:
+  compile-and-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog
+        run: sudo apt-get update -qq && sudo apt-get install -y iverilog
+
+      - name: Show runner resources
+        run: |
+          free -h
+          nproc
+          df -h .
+
+      - name: Build test programs (.hex files are gitignored build output)
+        working-directory: hardware/axisa_core
+        run: |
+          python3 sw/axasm.py sw/shared_consumer.axasm sw/shared_consumer.hex
+          python3 sw/axasm.py sw/shared_producer.axasm sw/shared_producer.hex
+          python3 sw/asm_test1.py sw/test1.hex
+          ls -la sw/*.hex
+
+      - name: Generate mesh RTL + testbench
+        working-directory: hardware/axisa_core
+        run: |
+          python3 tools/gen_soc_top.py ${{ inputs.x_size }} ${{ inputs.y_size }} ${{ inputs.z_size }} rtl/soc_top.v
+          python3 tools/gen_tb_soc.py ${{ inputs.x_size }} ${{ inputs.y_size }} ${{ inputs.z_size }} tb/tb_soc.v
+          ls -la rtl/soc_top.v tb/tb_soc.v
+
+      - name: Compile
+        working-directory: hardware/axisa_core
+        run: |
+          time iverilog -o out_soc_mesh.vvp \
+            rtl/alu.v rtl/regbank.v rtl/instr_mem.v rtl/data_mem.v rtl/control_unit.v \
+            rtl/cpu_core.v rtl/mmu.v rtl/shared_mem_backing.v rtl/router.v \
+            rtl/noc_core_adapter.v rtl/noc_mem_adapter.v rtl/soc_top.v tb/tb_soc.v
+
+      - name: Run simulation
+        working-directory: hardware/axisa_core
+        run: |
+          vvp out_soc_mesh.vvp | tee sim_output.log
+          echo "---"
+          tail -5 sim_output.log
+          grep -q "PASS: cross-core communication verified" sim_output.log
+
+      - name: Upload simulation log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-output-${{ inputs.x_size }}x${{ inputs.y_size }}x${{ inputs.z_size }}
+          path: hardware/axisa_core/sim_output.log
+          if-no-files-found: ignore
