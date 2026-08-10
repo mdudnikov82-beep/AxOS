@@ -62,7 +62,7 @@ jobs:
       - name: Yosys generic synthesis check (structural only, no target device)
         working-directory: hardware/axisa_core
         run: |
-          yosys -p "read_verilog rtl/alu.v rtl/regbank.v rtl/instr_mem.v rtl/data_mem.v rtl/control_unit.v rtl/mmu.v rtl/router.v rtl/noc_core_adapter.v rtl/noc_mem_adapter.v rtl/shared_mem_backing.v rtl/soc_top.v; hierarchy -top soc_top; synth -top soc_top" 2>&1 | tee synth_output.log
+          yosys -p "read_verilog rtl/alu.v rtl/regbank.v rtl/instr_mem.v rtl/data_mem.v rtl/control_unit.v rtl/mmu.v rtl/cpu_core.v rtl/router.v rtl/noc_core_adapter.v rtl/noc_mem_adapter.v rtl/shared_mem_backing.v rtl/soc_top.v; hierarchy -top soc_top; synth -top soc_top" 2>&1 | tee synth_output.log
           echo "---"
           tail -40 synth_output.log
           grep -q "Found and reported 0 problems." synth_output.log
