@@ -1,0 +1,73 @@
+name: AxISA NoC Mesh Synthesis Check
+
+# Manual-only (workflow_dispatch) - like axisa-mesh.yml, this compiles
+# a generated N-core mesh, except through a real synthesizer (Yosys)
+# instead of a simulator (Icarus Verilog). Synthesis is generally
+# heavier than simulation for an equivalent design, and this project's
+# own bisection already found simulation itself fails past ~4600 cores
+# on a standard GitHub-hosted runner - so start SMALL here, don't
+# assume the same ceiling applies. See
+# [[project_axisa_synthesis_check]] for the single-core synthesizability
+# investigation this builds on (found+fixed a real X-optimism trap:
+# an empty instr_mem ROM lets the optimizer prove most of the datapath
+# "unreachable" - this workflow does NOT fix that per-core, so a
+# passing run here confirms STRUCTURAL synthesizability of the whole
+# mesh netlist, not a realistic per-core area estimate).
+on:
+  workflow_dispatch:
+    inputs:
+      x_size:
+        description: "Mesh X size"
+        required: true
+        default: "8"
+      y_size:
+        description: "Mesh Y size"
+        required: true
+        default: "8"
+      z_size:
+        description: "Mesh Z size"
+        required: true
+        default: "16"
+
+jobs:
+  synth-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Yosys (OSS CAD Suite)
+        run: |
+          curl -L -o /tmp/oss-cad-suite.tgz https://github.com/YosysHQ/oss-cad-suite-build/releases/latest/download/oss-cad-suite-linux-x64.tgz
+          tar -xzf /tmp/oss-cad-suite.tgz -C /tmp
+          echo "/tmp/oss-cad-suite/bin" >> "$GITHUB_PATH"
+
+      - name: Show runner resources
+        run: |
+          free -h
+          nproc
+          df -h .
+
+      - name: Generate mesh RTL (testbench not needed for synthesis)
+        working-directory: hardware/axisa_core
+        run: |
+          python3 tools/gen_soc_top.py ${{ inputs.x_size }} ${{ inputs.y_size }} ${{ inputs.z_size }} rtl/soc_top.v
+          ls -la rtl/soc_top.v
+
+      - name: Yosys generic synthesis check (structural only, no target device)
+        working-directory: hardware/axisa_core
+        run: |
+          yosys -p "read_verilog rtl/alu.v rtl/regbank.v rtl/instr_mem.v rtl/data_mem.v rtl/control_unit.v rtl/mmu.v rtl/router.v rtl/noc_core_adapter.v rtl/noc_mem_adapter.v rtl/shared_mem_backing.v rtl/soc_top.v; hierarchy -top soc_top; synth -top soc_top" 2>&1 | tee synth_output.log
+          echo "---"
+          tail -40 synth_output.log
+          grep -q "Found and reported 0 problems." synth_output.log
+
+      - name: Upload synthesis log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synth-output-${{ inputs.x_size }}x${{ inputs.y_size }}x${{ inputs.z_size }}
+          path: hardware/axisa_core/synth_output.log
+          if-no-files-found: ignore
