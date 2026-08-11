@@ -223,15 +223,31 @@ module router #(
             reg                  chosen_valid;
             integer              kk;
             reg [DIRBITS-1:0]    cand;
+            reg [DIRBITS:0]      cand_sum;
 
             wire can_accept = !valid_r || out_ready[go];
 
+            // cand_sum = last_granted + 1 + kk, then wrapped into
+            // [0,NDIRS-1] via one conditional subtract instead of `%
+            // NDIRS` - NDIRS isn't a power of 2, and a real synthesis
+            // attempt (see [[project_axisa_synthesis_check]]) found
+            // the modulo op combined with this loop's per-router-
+            // instance MY_X/MY_Y/MY_Z constant-folding made Yosys's
+            // generic arithmetic mapper mint a brand new template per
+            // router instance, exploding memory use even on a tiny
+            // (2-core, 6-router) test - not just at full mesh scale.
+            // Mathematically identical to the old `% NDIRS` for every
+            // reachable value here: cand_sum's range is [1, 2*NDIRS-2]
+            // (last_granted and kk both span [0,NDIRS-1]), which is
+            // always < 2*NDIRS, so a single subtract-if-too-big always
+            // suffices - never needs a second wrap.
             always @(*) begin
                 chosen_valid = 1'b0;
                 chosen = {DIRBITS{1'b0}};
                 if (can_accept) begin
                     for (kk = 0; kk < NDIRS; kk = kk + 1) begin
-                        cand = (last_granted + 1 + kk) % NDIRS;
+                        cand_sum = last_granted + 1 + kk;
+                        cand = (cand_sum >= NDIRS) ? (cand_sum - NDIRS) : cand_sum[DIRBITS-1:0];
                         if (cand != go && !chosen_valid && in_valid[cand] && wanted_dir[cand] == go) begin
                             chosen = cand;
                             chosen_valid = 1'b1;
