@@ -2,11 +2,40 @@
 // NoC that replaces shared_bus.v (see [[project_noc_router]] for the
 // full design rationale). Nine ports (N/E/S/W/Up/Down/Ana/Kata/Local),
 // each a standard valid/flit/ready handshake in BOTH directions (in_*
-// and out_*), with a 1-flit skid-buffer register per OUTPUT port - a
-// flit takes exactly one clock edge to cross one hop, and every hop
-// has real backpressure (an already-buffered-but-not-yet-accepted
-// flit is never silently overwritten by a new arrival on the same
-// input).
+// and out_*).
+//
+// TWO pipeline stages internally (a flit takes two clock edges to
+// cross one hop, not one - see [[project_axisa_synthesis_check]] for
+// the real synthesis+PnR work that motivated this): Stage A (Switch
+// Allocation) decides WHICH input wins each output's round-robin
+// arbitration - same scan as always, but now registers only the
+// narrow winner index, not the wide flit data. Stage B (Switch
+// Traversal) reads that already-decided, already-stable winner index
+// and does the actual wide FLIT_WIDTH-bit data mux+capture, with no
+// arbitration logic of its own left in its cycle. A FIRST pipelining
+// attempt split "compute wanted_dir" from "arbitrate", which turned
+// out to target the wrong stage entirely (confirmed by real PnR
+// critical-path traces: the bottleneck was always the arbitration+
+// wide-mux chain, never route computation) and made timing slightly
+// WORSE, not better - reverted, this is the second, correctly-
+// targeted attempt.
+//
+// A real consequence of splitting "decide" from "move the data":
+// `in_ready` can only be asserted once stage B has actually CAPTURED
+// the winning input's flit, not merely once stage A has decided it
+// won - otherwise the upstream sender could be released (and advance
+// to its next flit) before this router ever read the data it decided
+// to route, corrupting it. So the winning input's upstream neighbor
+// is held (not granted ready) for the entire decide+capture window,
+// not just one cycle - the flit's OWN 4*COORD_BITS destination header
+// and validity are guaranteed stable across that window as a direct
+// consequence (nothing else could have changed them, since advancing
+// requires exactly the in_ready this router is deliberately not yet
+// giving it).
+//
+// Every hop still has real backpressure at BOTH stages (an already-
+// pending decision or already-buffered flit is never silently
+// overwritten before it's actually consumed downstream).
 //
 // `ana`/`kata` are the two directions along a 4th spatial axis, `W`
 // (confirmed by design review before this was written) - NOT to be
@@ -182,7 +211,11 @@ module router #(
 
     // ---- Routing decision: which output direction does each input want? ----
     // Only meaningful where in_valid is actually set - an invalid input's
-    // wanted_dir is never consulted by the arbitration below.
+    // wanted_dir is never consulted by the arbitration below. Computed
+    // combinationally from the RAW in_flit every cycle, same as always -
+    // a FIRST pipelining attempt registered this into its own stage and
+    // it made timing WORSE, not better (this was never the bottleneck -
+    // see the module header comment and [[project_axisa_synthesis_check]]).
     wire [DIRBITS-1:0] wanted_dir [0:NDIRS-1];
 
     genvar gi;
@@ -201,7 +234,7 @@ module router #(
         end
     endgenerate
 
-    // ---- Per-output round-robin arbitration + 1-flit skid buffer ----
+    // ==================== Stage A: Switch Allocation (decide the winner) ====================
     // Mirrors shared_bus.v's own last_granted/scan-and-wrap pattern
     // exactly, just applied per output DIRECTION instead of per whole
     // bus - confirmed by design review to carry over cleanly regardless
@@ -209,15 +242,19 @@ module router #(
     // same output, since a direction never wants itself - an invariant
     // proved per-axis by monotonicity, not a coincidence of any
     // specific NDIRS, so it holds independently and unchanged for both
-    // the Z and W axes).
-    wire winner_valid [0:NDIRS-1];
-    wire [DIRBITS-1:0] winner_dir [0:NDIRS-1];
+    // the Z and W axes). Only the WINNER INDEX (DIRBITS-ish bits) gets
+    // registered here, not the wide flit data - that split (not the
+    // route-compute split tried and reverted first) is what actually
+    // shortens the critical path, confirmed by real PnR.
+    wire sa_valid_r  [0:NDIRS-1]; // per output: stage A has a pending, not-yet-captured decision
+    wire [DIRBITS-1:0] sa_chosen_r [0:NDIRS-1]; // per output: which input won, if sa_valid_r
+    wire sb_consumed [0:NDIRS-1]; // driven by stage B, below: captured this cycle, decision may retire
 
     genvar go;
     generate
-        for (go = 0; go < NDIRS; go = go + 1) begin: outp
-            reg [FLIT_WIDTH-1:0] flit_r;
+        for (go = 0; go < NDIRS; go = go + 1) begin: alloc
             reg                  valid_r;
+            reg [DIRBITS-1:0]    chosen_r;
             reg [DIRBITS-1:0]    last_granted;
             reg [DIRBITS-1:0]    chosen;
             reg                  chosen_valid;
@@ -225,7 +262,36 @@ module router #(
             reg [DIRBITS-1:0]    cand;
             reg [DIRBITS:0]      cand_sum;
 
-            wire can_accept = !valid_r || out_ready[go];
+            // can_decide: stage A may compute (and latch) a NEW winner
+            // only once it holds NO pending decision - NOT merely "once
+            // the current one was just captured by stage B this same
+            // cycle" (`!valid_r || sb_consumed[go]`, tried first). That
+            // looser condition has a real, live-reproduced bug: it lets
+            // stage A re-arm and re-scan using THIS SAME cycle's
+            // in_valid/wanted_dir the instant sb_consumed[go] fires,
+            // which (since candidate data hasn't advanced yet at that
+            // exact instant) usually just re-confirms the SAME winner -
+            // but that re-confirmed decision now sits in valid_r/
+            // chosen_r for a SECOND round, and if stage B's own output
+            // register later re-opens (out_ready arrives one full cycle
+            // afterward, having been busy holding the FIRST captured
+            // flit) before stage A ever gets a chance to notice the
+            // input has moved on, stage B captures AGAIN off the stale
+            // chosen_r index - reading whatever NEW, unrelated flit has
+            // since arrived there instead of the one the decision was
+            // actually made for. Confirmed via a live cycle-by-cycle
+            // trace on the 2-router mini NoC test (see
+            // [[project_axisa_synthesis_check]]): a mem response bound
+            // for one core got double-captured and silently overwritten
+            // by a later response bound for the OTHER core, hanging the
+            // whole memory node forever (single-outstanding-at-sink
+            // throttle never saw its handoff acknowledged correctly).
+            // Fix: a decision is unconditionally retired the cycle it's
+            // consumed (see the sequential block below), and a new one
+            // can only be FORMED starting the cycle after that clear is
+            // visible - one bubble cycle per handoff is the
+            // correctness-preserving cost, not a performance nicety.
+            wire can_decide = !valid_r;
 
             // cand_sum = last_granted + 1 + kk, then wrapped into
             // [0,NDIRS-1] via one conditional subtract instead of `%
@@ -244,7 +310,7 @@ module router #(
             always @(*) begin
                 chosen_valid = 1'b0;
                 chosen = {DIRBITS{1'b0}};
-                if (can_accept) begin
+                if (can_decide) begin
                     for (kk = 0; kk < NDIRS; kk = kk + 1) begin
                         cand_sum = last_granted + 1 + kk;
                         cand = (cand_sum >= NDIRS) ? (cand_sum - NDIRS) : cand_sum[DIRBITS-1:0];
@@ -256,21 +322,110 @@ module router #(
                 end
             end
 
-            assign winner_valid[go] = chosen_valid;
-            assign winner_dir[go]   = chosen;
-            assign out_valid[go]    = valid_r;
-            assign out_flit[go]     = flit_r;
+            assign sa_valid_r[go]  = valid_r;
+            assign sa_chosen_r[go] = chosen_r;
 
             always @(posedge clk or posedge reset) begin
                 if (reset) begin
                     valid_r      <= 1'b0;
-                    flit_r       <= {FLIT_WIDTH{1'b0}};
                     last_granted <= NDIRS - 1;
-                end else if (can_accept) begin
+                end else if (sb_consumed[go]) begin
+                    // Unconditional retire - see can_decide's comment
+                    // above for why this must NOT also try to latch a
+                    // fresh decision on this same edge.
+                    valid_r <= 1'b0;
+                end else if (can_decide) begin
+                    valid_r <= chosen_valid;
                     if (chosen_valid) begin
-                        valid_r      <= 1'b1;
-                        flit_r       <= in_flit[chosen];
+                        chosen_r     <= chosen;
                         last_granted <= chosen;
+                    end
+                end
+                // else (valid_r held, not yet consumed this cycle):
+                // hold everything - stage B hasn't captured the
+                // pending decision yet, don't overwrite it.
+            end
+        end
+    endgenerate
+
+    // ==================== Stage B: Switch Traversal (move the data) ====================
+    // Reads stage A's already-decided, already-stable winner index and
+    // does ONLY the wide FLIT_WIDTH-bit data mux+capture - no
+    // arbitration logic of its own left in this cycle, which is the
+    // whole point of the split.
+    generate
+        for (go = 0; go < NDIRS; go = go + 1) begin: xtrav
+            reg [FLIT_WIDTH-1:0] flit_r;
+            reg                  valid_r;
+            reg                  captured_r;
+            reg                  taken_r;
+
+            wire can_accept   = !valid_r || out_ready[go];
+
+            // taken_r: has THIS SAME still-pending stage-A decision
+            // already been captured once? Needed precisely BECAUSE
+            // sb_consumed/retire is now a cycle behind capture_now (see
+            // below): without this, there's a real one-cycle window
+            // where alloc[go]'s decision hasn't retired yet (sa_valid_r
+            // still 1) but xtrav's OWN out register has already drained
+            // to a fast downstream (can_accept back to 1) - `capture_now`
+            // would fire a SECOND time off the exact same, already-
+            // consumed sa_chosen_r[go], resending the same flit twice.
+            // Live-reproduced (c0 tohost came back 51 instead of 127)
+            // the first time this hold-margin delay was added without
+            // this guard - see [[project_axisa_synthesis_check]]. Reset
+            // to 0 exactly when the decision retires (sa_valid_r[go]
+            // goes low), so a genuinely NEW decision can be captured.
+            wire capture_now = sa_valid_r[go] && !taken_r && can_accept;
+
+            always @(posedge clk or posedge reset) begin
+                if (reset) taken_r <= 1'b0;
+                else if (!sa_valid_r[go]) taken_r <= 1'b0;
+                else if (capture_now)     taken_r <= 1'b1;
+            end
+
+            // sb_consumed[go] is DELIBERATELY the REGISTERED (one-cycle-
+            // delayed) capture event, not `capture_now` itself. A real
+            // PnR run found that feeding `capture_now` (combinational,
+            // built from little more than sa_valid_r/valid_r register
+            // outputs) straight into a DIFFERENT register - alloc[go]'s
+            // own valid_r, via the retire condition below, plus
+            // in_ready[] feeding yet another router's registers - was a
+            // genuine, structural hold-time violation, not a one-off
+            // tool/packing artifact: confirmed by re-running PnR on the
+            // full 2-cpu_core/6-router mini NoC with real producer/
+            // consumer traffic, where it got WORSE (543 violations,
+            // setup dropped to 23MHz) rather than better, ruling out
+            // "it's just dead worst-case-area logic" as an explanation
+            // (see [[project_axisa_synthesis_check]] for the full
+            // isolated-test-vs-full-scale-test comparison that proved
+            // this). Registering the event here costs one extra bubble
+            // cycle before an input is released and before stage A can
+            // retire/re-decide (on top of the bubble the double-capture
+            // fix already introduced) - purely a latency cost, not a
+            // correctness risk, since the actual data capture into
+            // flit_r below still happens at the ORIGINAL cycle
+            // (capture_now, unchanged) - only the DOWNSTREAM
+            // notification of that event is what's now a full register
+            // hop away from its consumers, which is what buys back real
+            // hold margin instead of a same-cycle near-zero-logic path.
+            always @(posedge clk or posedge reset) begin
+                if (reset) captured_r <= 1'b0;
+                else       captured_r <= capture_now;
+            end
+            assign sb_consumed[go] = captured_r;
+
+            assign out_valid[go]   = valid_r;
+            assign out_flit[go]    = flit_r;
+
+            always @(posedge clk or posedge reset) begin
+                if (reset) begin
+                    valid_r <= 1'b0;
+                    flit_r  <= {FLIT_WIDTH{1'b0}};
+                end else if (can_accept) begin
+                    if (capture_now) begin
+                        valid_r <= 1'b1;
+                        flit_r  <= in_flit[sa_chosen_r[go]];
                     end else begin
                         valid_r <= 1'b0;
                     end
@@ -281,14 +436,21 @@ module router #(
         end
     endgenerate
 
-    // in_ready[d]: this input was the arbitration winner for whatever
-    // output it wanted, AND that output's register actually captured it
-    // this same cycle (winner_valid already folds in can_accept, so no
-    // separate check needed here).
+    // in_ready[gi]: stage B actually CAPTURED this input's data ONE
+    // CYCLE AGO (sb_consumed is now the registered, delayed capture
+    // event - see xtrav's comment above for why) - NOT merely "stage A
+    // decided this input wins," which is two cycles earlier now. This
+    // is the real protocol change from the original single-stage
+    // design: the upstream neighbor must not be released to advance
+    // until its data has actually been read, not merely selected -
+    // see the module header comment for why this is safe (the winning
+    // input's flit is guaranteed stable across the whole decide-then-
+    // capture-then-notify window as a direct consequence of not yet
+    // granting it ready).
     generate
         for (gi = 0; gi < NDIRS; gi = gi + 1) begin: in_rdy
-            assign in_ready[gi] = in_valid[gi] && winner_valid[wanted_dir[gi]] &&
-                                   (winner_dir[wanted_dir[gi]] == gi);
+            assign in_ready[gi] = sa_valid_r[wanted_dir[gi]] && sb_consumed[wanted_dir[gi]] &&
+                                   (sa_chosen_r[wanted_dir[gi]] == gi);
         end
     endgenerate
 endmodule
