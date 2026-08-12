@@ -28,6 +28,11 @@ on:
         description: "Mesh Z size"
         required: true
         default: "16"
+      worst_case_rom:
+        description: "Also run a real ECP5-mapped worst-case-area synth (blackbox instr_mem, no X-optimism collapse) - much heavier, needs this workflow's own runner (no ~25-30min background-task ceiling like a local session has)"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   synth-check:
@@ -73,4 +78,108 @@ jobs:
         with:
           name: synth-output-${{ inputs.x_size }}x${{ inputs.y_size }}x${{ inputs.z_size }}
           path: hardware/axisa_core/synth_output.log
+          if-no-files-found: ignore
+
+      # Everything below only runs when worst_case_rom is checked - it's
+      # a MUCH heavier real ECP5 device-mapped synthesis (not the quick
+      # generic structural check above), meant to get an honest worst-
+      # case gate count instead of the X-optimism-collapsed one the
+      # generic check above is prone to when instr_mem is left empty
+      # (see the module header comment and [[project_axisa_synthesis_check]]).
+      # Swaps in fpga/instr_mem_worstcase.v ((* blackbox *) stand-in) for
+      # rtl/instr_mem.v so the optimizer can't prove the whole datapath
+      # "unreachable" for one frozen (non-existent) program. Locally,
+      # three attempts at this exact recipe on a 63-core mesh all got
+      # killed externally around the 25-30 minute mark (not OOM - system
+      # RAM was always healthy at the time) - this workflow's own
+      # 300-minute job timeout and dedicated runner sidesteps that
+      # entirely, which is the whole reason to run it here instead.
+
+      - name: Yosys worst-case-area synth_ecp5 check (blackbox instr_mem)
+        if: ${{ inputs.worst_case_rom }}
+        working-directory: hardware/axisa_core
+        run: |
+          cat > worst_case_synth.ys <<'YS_EOF'
+          read_verilog rtl/alu.v rtl/regbank.v fpga/instr_mem_worstcase.v rtl/data_mem.v rtl/control_unit.v rtl/mmu.v rtl/cpu_core.v rtl/router.v rtl/noc_core_adapter.v rtl/noc_mem_adapter.v rtl/shared_mem_backing.v rtl/soc_top.v
+          read_verilog -lib -specify +/lattice/cells_sim_ecp5.v +/lattice/cells_bb_ecp5.v
+          hierarchy -check -top soc_top
+
+          # coarse (verbatim from synth_lattice's own recipe, EXCEPT
+          # `share` - skipped deliberately: its SAT-based resource-
+          # sharing analysis blows up combinatorially with multiple
+          # router.v instances present at once, crashing (OOM) even on
+          # small hand-built tests - see project_axisa_synthesis_check
+          # memory)
+          proc -latches warn
+          check
+          flatten
+          tribuf -logic
+          deminout
+          opt_expr
+          opt_clean
+          check
+          opt -nodffe -nosdff
+          fsm
+          opt
+          wreduce
+          peepopt
+          opt_clean
+          techmap -map +/cmp2lut.v -D LUT_WIDTH=4
+          opt_expr
+          opt_clean
+          alumacc
+          opt
+          memory -nomap
+          opt_clean
+
+          memory_libmap -lib +/lattice/lutrams_trellis.txt -lib +/lattice/brams_16kd.txt
+          techmap -map +/lattice/lutrams_map_trellis.v -map +/lattice/brams_map_16kd.v
+
+          opt -fast -mux_undef -undriven -fine
+          memory_map
+          opt -undriven -fine
+
+          techmap -map +/techmap.v -map +/lattice/arith_map_ccu2c.v
+          opt -fast
+
+          opt_clean
+          dfflegalize -cell $_DFF_?_ 01 -cell $_DFF_?P?_ r -cell $_SDFF_?P?_ r -cell $_DFFE_??_ 01 -cell $_DFFE_?P??_ r -cell $_SDFFE_?P??_ r -cell $_DLATCH_?_ x
+          opt_merge
+          techmap -D NO_LUT -map +/lattice/cells_map_trellis.v
+          opt_expr -undriven -mux_undef
+          simplemap
+          lattice_gsr
+          attrmvcp -copy -attr syn_useioff
+          opt_clean
+
+          check -latchonly -assert
+          techmap -map +/lattice/latches_map.v
+          abc9 -W 300
+          clean
+
+          techmap -map +/lattice/cells_map_trellis.v
+          opt_lut_ins -tech lattice
+          clean
+
+          autoname
+          hierarchy -check
+          stat
+          check -noinit
+          blackbox =A:whitebox
+
+          write_json worst_case_synth.json
+          YS_EOF
+          yosys -s worst_case_synth.ys 2>&1 | tee worst_case_synth.log
+          echo "---"
+          tail -60 worst_case_synth.log
+          grep -q "Found and reported 0 problems." worst_case_synth.log
+
+      - name: Upload worst-case synthesis log + JSON
+        if: always() && inputs.worst_case_rom
+        uses: actions/upload-artifact@v4
+        with:
+          name: worst-case-synth-${{ inputs.x_size }}x${{ inputs.y_size }}x${{ inputs.z_size }}
+          path: |
+            hardware/axisa_core/worst_case_synth.log
+            hardware/axisa_core/worst_case_synth.json
           if-no-files-found: ignore
