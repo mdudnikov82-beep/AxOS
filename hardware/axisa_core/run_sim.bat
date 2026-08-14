@@ -115,6 +115,12 @@ if %errorlevel% neq 0 goto :error
 if %errorlevel% neq 0 (echo FAILED: tb_trap_irq & "%VVP%" out_trap3.vvp & goto :error)
 echo   OK (tohost=42, IRQ preempted a real spin loop, handler's EPC redirect honored exactly)
 
+"%IVERILOG%" -o out_trap3b.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_irq_squash.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_trap3b.vvp | findstr /C:"ALL AXISA TRAP-IRQ-SQUASH TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_trap_irq_squash & "%VVP%" out_trap3b.vvp & goto :error)
+echo   OK (tohost=42, IRQ synced to land exactly on a post-branch squash cycle - EPC still =0x28, not a wrong-path bubble address)
+
 python sw\axasm.py sw\trap_irq_stall.axasm sw\trap_irq_stall.hex
 if %errorlevel% neq 0 goto :error
 "%IVERILOG%" -o out_trap4.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_irq_stall.v

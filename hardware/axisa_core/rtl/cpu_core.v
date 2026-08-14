@@ -121,13 +121,38 @@ module cpu_core #(
     localparam BANK_N = 2'b11;
 
     reg  [31:0] pc;
+    // Trails `pc` by exactly one cycle, unconditionally - always
+    // matches whatever address instr_mem's own SYNC_READ=1 internal
+    // register just latched, so (pc_r, instr) stay a self-consistent
+    // pair regardless of what else the core is doing (stalled, just
+    // reset, just redirected). "Address of the instruction currently
+    // being decoded" (branch/JAL targets, EPC on trap) - use pc_r.
+    // "Address to fetch next" (instr_mem's own .addr port, pc_plus4's
+    // fallthrough) - stays raw pc.
+    reg  [31:0] pc_r;
+    // 1 through reset and for exactly one cycle after ANY committed
+    // redirect (taken branch, JAL, trap, RFT) - a registered fetch has
+    // already latched the now-abandoned next-sequential address at the
+    // exact edge a redirect is decided, and cannot un-fetch it, so the
+    // cycle immediately after must not let that wrong-path/warm-up
+    // instr commit anything. `instr` itself is masked to 0 below, but
+    // that alone is NOT sufficient here (unlike RV32I): AxISA opcode 0
+    // is OP_ALUR with alu_funct 0 (not reserved) - a real, committing
+    // instruction that writes R-bank register 0 - so gated_reg_write
+    // ALSO needs an explicit !squash_r term, and any_trap needs
+    // squash_r checked first (a pending IRQ alone can satisfy
+    // any_trap's `!is_load && !is_store` guard even mid-squash, which
+    // would otherwise commit epc_r from a meaningless pc_r) - see the
+    // main pc/trap-state always block below.
+    reg         squash_r;
     reg         halted_r;
     assign halted = halted_r;
 
-    wire [31:0] instr;
-    instr_mem #(.MEM_WORDS(INSTR_MEM_WORDS), .INIT_FILE(INSTR_INIT_FILE)) imem (
-        .addr(pc), .instr(instr)
+    wire [31:0] instr_fetched;
+    instr_mem #(.MEM_WORDS(INSTR_MEM_WORDS), .INIT_FILE(INSTR_INIT_FILE), .SYNC_READ(1)) imem (
+        .clk(clk), .addr(pc), .stall(mem_stall), .instr(instr_fetched)
     );
+    wire [31:0] instr = squash_r ? 32'b0 : instr_fetched;
 
     wire [1:0]  bank;
     wire [3:0]  alu_funct;
@@ -340,7 +365,7 @@ module cpu_core #(
     // shared gate can't drift the way 4 independently-written copies
     // of "&& !mem_stall" could (confirmed by design review before
     // this was written).
-    wire gated_reg_write = reg_write && !mem_stall;
+    wire gated_reg_write = reg_write && !mem_stall && !squash_r;
     wire r_write_en = gated_reg_write && (write_bank == BANK_R);
     wire g_write_en = gated_reg_write && (write_bank == BANK_G);
     wire b_write_en = gated_reg_write && (write_bank == BANK_B);
@@ -665,7 +690,7 @@ module cpu_core #(
                          is_baryon ? baryon_result :
                          is_meson  ? meson_result :
                          is_load   ? effective_dmem_rdata :
-                         is_jal    ? (pc + 32'd4) :
+                         is_jal    ? (pc_r + 32'd4) :
                          (is_mvsr && !mvsr_dir) ? mvsr_read_data :
                          (is_ptb && !ptb_dir)   ? ptb_r :
                                      alu_result; // ALUR/ALUI
@@ -685,9 +710,14 @@ module cpu_core #(
     end
 
     wire [31:0] pc_plus4 = pc + 32'd4;
-    wire [31:0] next_pc  = (is_branch && branch_taken) ? (pc + imm) :
-                            is_jal                      ? (pc + jal_imm) :
+    wire [31:0] next_pc  = (is_branch && branch_taken) ? (pc_r + imm) :
+                            is_jal                      ? (pc_r + jal_imm) :
                                                            pc_plus4;
+
+    // Any of these committing means instr_mem already latched a now-
+    // abandoned next-sequential fetch at the same edge - the following
+    // cycle must squash (see squash_r's declaration above).
+    wire is_redirect = any_trap || is_rft || (is_branch && branch_taken) || is_jal;
 
     // Latching (irq_in itself) is independent of mem_stall/halted_r - a
     // brief pulse must be caught even mid-stall. CLEARING is gated by
@@ -710,6 +740,7 @@ module cpu_core #(
     always @(posedge clk or posedge reset) begin
         if (reset) begin
             pc           <= 32'b0;
+            pc_r         <= 32'b0;
             halted_r     <= 1'b0;
             tohost_r     <= 32'b0;
             epc_r        <= 32'b0;
@@ -719,22 +750,52 @@ module cpu_core #(
             ie_r         <= 1'b0;
             saved_ie_r   <= 1'b0;
             ptb_r        <= 32'b0;
+            squash_r     <= 1'b1; // warm-up bubble - instr_mem/pc_r not primed yet
         end else if (!halted_r && !mem_stall) begin
-            if (any_trap) begin
+            // pc_r must advance in EXACT lockstep with this whole block
+            // (only when a new instruction is genuinely being retired/
+            // decided), not on its own unconditional clock - a real bug
+            // caught live (tb_trap_irq_stall.v: EPC landed one
+            // instruction past the expected address) from an earlier
+            // draft that gave pc_r its own free-running always block:
+            // pc always races one instruction ahead of pc_r/instr
+            // (prefetching), so while mem_stall holds pc frozen at
+            // "the instruction AFTER the stalled one" (already
+            // prefetched before the stall was even detected), an
+            // unconditional pc_r would drift to match THAT frozen
+            // value too, silently losing track of the actually-still-
+            // stalled instruction's own real address for the entire
+            // stall.
+            pc_r <= pc;
+            // squash_r's own 1->0 transition lives in THIS gate, not an
+            // additional "&& !squash_r" on the outer condition above -
+            // otherwise it could never clear once set.
+            squash_r <= squash_r ? 1'b0 : is_redirect;
+            if (squash_r) begin
+                // Wrong-path/warm-up bubble: nothing else may commit.
+                // In particular a pending external IRQ (irq_taken - see
+                // any_trap's own definition, its guard doesn't actually
+                // depend on this cycle's own decode) must be deferred
+                // exactly one more cycle rather than taken against this
+                // cycle's meaningless pc_r - mirrors the existing
+                // mem_stall deferral below. Straight-line catch-up only.
+                pc <= pc_plus4;
+            end else if (any_trap) begin
                 // Hardware-latched EPC, not a general register - see
                 // docs/ISA.md's "Traps" section for why AxISA needs
                 // this specific primitive instead of a general
                 // indirect-jump instruction (it has neither, by
-                // design). `pc` (not yet advanced this cycle) is
-                // exactly right for BOTH cases: for a synchronous trap
-                // it's the trapping instruction's own address; for an
-                // external IRQ it's the address of the NOT-yet-executed
+                // design). `pc_r` (the address of the instruction
+                // `instr` actually reflects this cycle) is exactly
+                // right for BOTH cases: for a synchronous trap it's the
+                // trapping instruction's own address; for an external
+                // IRQ it's the address of the NOT-yet-executed
                 // instruction that got preempted - RFT jumps to
                 // EXACTLY epc (no automatic +4), so a synchronous
                 // handler must advance EPC itself (via MVSR) to skip
                 // the trapping instruction, while an IRQ handler
                 // correctly needs no adjustment at all.
-                epc_r        <= pc;
+                epc_r        <= pc_r;
                 cause_r      <= next_cause;
                 saved_mode_r <= mode_r;
                 mode_r       <= MODE_KERNEL;
