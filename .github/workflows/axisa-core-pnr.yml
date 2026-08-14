@@ -45,12 +45,16 @@ jobs:
           nproc
 
       - name: Yosys synth_ecp5 (real, program-loaded netlist - not blackboxed)
-        working-directory: hardware/axisa_core/fpga
+        # Run from hardware/axisa_core (not fpga/) - cpu_core_fpga_top_pnr.v's
+        # INSTR_INIT_FILE("sw/test1.hex") is a $readmemh path resolved
+        # relative to Yosys's own cwd, not to the .v file it appears in,
+        # and sw/test1.hex only exists relative to this directory.
+        working-directory: hardware/axisa_core
         run: |
-          yosys -p "read_verilog ../rtl/alu.v ../rtl/regbank.v ../rtl/instr_mem.v ../rtl/data_mem.v ../rtl/control_unit.v ../rtl/mmu.v ../rtl/cpu_core.v cpu_core_fpga_top_pnr.v; synth_ecp5 -top cpu_core_fpga_top -json cpu_core_pnr.json" 2>&1 | tee synth_pnr.log
+          yosys -p "read_verilog rtl/alu.v rtl/regbank.v rtl/instr_mem.v rtl/data_mem.v rtl/control_unit.v rtl/mmu.v rtl/cpu_core.v fpga/cpu_core_fpga_top_pnr.v; synth_ecp5 -top cpu_core_fpga_top -json fpga/cpu_core_pnr.json" 2>&1 | tee fpga/synth_pnr.log
           echo "---"
-          tail -40 synth_pnr.log
-          grep -q "Found and reported 0 problems." synth_pnr.log
+          tail -40 fpga/synth_pnr.log
+          grep -q "Found and reported 0 problems." fpga/synth_pnr.log
 
       - name: nextpnr-ecp5 place-and-route (real Fmax)
         working-directory: hardware/axisa_core/fpga
