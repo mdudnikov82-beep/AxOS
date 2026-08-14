@@ -84,15 +84,35 @@ the honest, correctly-inferred result this redesign was for:
   mapped correctly instead of exploding into flip-flops)
 - `Found and reported 0 problems.`
 
-A full `nextpnr-ecp5` place-and-route re-run (for a fresh Fmax number)
-was attempted this session but could not be completed locally after
-several attempts, each killed by an external session-management
-interruption partway through placement (not a design/timing failure -
-placement was progressing normally each time, into the simulated-
-annealing refinement stage). Re-run the command above (ideally via a
-long-lived environment like GitHub Actions, following this project's
-established pattern for multi-minute EDA jobs) to get a current Fmax
-figure before citing one.
+**Real `nextpnr-ecp5` place-and-route result (2026-08-15, CONFIRMED via
+GitHub Actions - `.github/workflows/axisa-core-pnr.yml`, run
+[31837400471](https://github.com/mdudnikov82-beep/AxOS/actions/runs/31837400471))**:
+local attempts kept getting killed mid-placement by external session
+interruptions, so this was run on a dedicated GH Actions runner
+instead (same pattern as the mesh synthesis workflow). Two prior
+dispatches of that workflow failed before this one - both on
+`ERROR: Can not open file sw/test1.hex` from `cpu_core_fpga_top_pnr.v`'s
+`INSTR_INIT_FILE`: first because the job's working directory was
+`fpga/` (the `$readmemh` path resolves relative to Yosys's own cwd,
+not to the `.v` file it's declared in - fixed by running from
+`hardware/axisa_core` instead), then because `sw/test1.hex` is a build
+artifact matched by `.gitignore`'s `*.hex` rule and was never actually
+committed - fixed by adding a `python3 sw/asm_test1.py sw/test1.hex`
+generation step before synthesis.
+
+With both fixed, the real PnR completed cleanly:
+- **Post-place estimate: 26.66 MHz**
+- **Post-route (final, authoritative): 33.02 MHz** for clock
+  `$glbnet$clk$TRELLIS_IO_IN`
+- Reported as "FAIL at 50.00 MHz" - this is only against the
+  `--freq 50` input constraint (an arbitrary target to report timing
+  slack against), not a real synthesis/routing error - PnR itself
+  completed normally ("Program finished normally", 0 warnings/1
+  timing-constraint "error" as expected for an unmet target).
+
+This is the honest current Fmax for the post registered-fetch-redesign
+(`SYNC_READ=1`) core with a real DP16KD-mapped instr_mem, superseding
+the stale pre-redesign 83.42 MHz number above.
 
 This is genuine physical synthesis on a real target device family -
 not a generic/no-device area estimate. See
