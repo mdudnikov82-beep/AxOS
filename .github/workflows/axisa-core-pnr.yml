@@ -1,0 +1,76 @@
+name: AxISA cpu_core.v Real Place-and-Route (Fmax)
+
+# Manual-only (workflow_dispatch). Runs the REAL nextpnr-ecp5
+# place-and-route flow documented in hardware/axisa_core/fpga/README.md
+# for a single cpu_core.v (not the mesh - see axisa-mesh-synth.yml for
+# that), using fpga/cpu_core_fpga_top_pnr.v (a concrete, program-loaded
+# top level - PnR needs a real netlist, unlike the blackboxed
+# worst-case-area estimate flow). This is specifically for getting a
+# post registered-fetch-redesign (SYNC_READ=1, see
+# [[project_axisa_synthesis_check]]) Fmax number, which repeated local
+# attempts this session could not complete - each got killed by an
+# external session-management interruption partway through placement,
+# not a design/timing failure. This workflow's own runner and job
+# timeout sidestep that the same way axisa-mesh-synth.yml does for the
+# mesh synthesis check.
+on:
+  workflow_dispatch:
+    inputs:
+      target_freq_mhz:
+        description: "Target clock frequency for nextpnr-ecp5 --freq (MHz) - just a constraint to report timing against, not a hard cap on the real Fmax measurement"
+        required: true
+        default: "50"
+
+jobs:
+  pnr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Yosys + nextpnr-ecp5 (OSS CAD Suite)
+        run: |
+          asset_url=$(curl -s https://api.github.com/repos/YosysHQ/oss-cad-suite-build/releases/latest | \
+            grep browser_download_url | grep linux-x64 | grep -o 'https://[^"]*')
+          echo "Downloading: $asset_url"
+          curl -L -o /tmp/oss-cad-suite.tgz "$asset_url"
+          tar -xzf /tmp/oss-cad-suite.tgz -C /tmp
+          echo "/tmp/oss-cad-suite/bin" >> "$GITHUB_PATH"
+
+      - name: Show runner resources
+        run: |
+          free -h
+          nproc
+
+      - name: Yosys synth_ecp5 (real, program-loaded netlist - not blackboxed)
+        working-directory: hardware/axisa_core/fpga
+        run: |
+          yosys -p "read_verilog ../rtl/alu.v ../rtl/regbank.v ../rtl/instr_mem.v ../rtl/data_mem.v ../rtl/control_unit.v ../rtl/mmu.v ../rtl/cpu_core.v cpu_core_fpga_top_pnr.v; synth_ecp5 -top cpu_core_fpga_top -json cpu_core_pnr.json" 2>&1 | tee synth_pnr.log
+          echo "---"
+          tail -40 synth_pnr.log
+          grep -q "Found and reported 0 problems." synth_pnr.log
+
+      - name: nextpnr-ecp5 place-and-route (real Fmax)
+        working-directory: hardware/axisa_core/fpga
+        run: |
+          nextpnr-ecp5 --25k --package CABGA381 --json cpu_core_pnr.json \
+            --lpf-allow-unconstrained --freq ${{ inputs.target_freq_mhz }} \
+            --textcfg cpu_core_pnr.config 2>&1 | tee nextpnr.log
+          echo "---"
+          tail -60 nextpnr.log
+          echo "### Fmax result" >> "$GITHUB_STEP_SUMMARY"
+          grep -i "Max frequency" nextpnr.log | tee -a "$GITHUB_STEP_SUMMARY" || echo "(no Max frequency line found - check nextpnr.log)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload PnR logs + artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: axisa-cpu-core-pnr
+          path: |
+            hardware/axisa_core/fpga/synth_pnr.log
+            hardware/axisa_core/fpga/nextpnr.log
+            hardware/axisa_core/fpga/cpu_core_pnr.json
+            hardware/axisa_core/fpga/cpu_core_pnr.config
+          if-no-files-found: ignore
