@@ -44,10 +44,32 @@ module cpu_core #(
     input  wire [31:0] bus_read_data
 );
     reg [31:0] pc;
+    // Trails `pc` by exactly one cycle, unconditionally within the
+    // same gate as pc's own update - always matches whatever address
+    // instr_mem's own SYNC_READ=1 internal register just latched, so
+    // (pc_r, instr) stay a self-consistent pair regardless of what
+    // else the core is doing (stalled, just reset, just redirected).
+    // "Address of the instruction currently being decoded" (AUIPC,
+    // branch/JAL targets, JAL/JALR's link-register value) - use pc_r.
+    // "Address to fetch next" (instr_mem's own .addr port, pc_plus4's
+    // fallthrough) - stays raw pc. See AxISA's sibling cpu_core.v for
+    // the two real bugs found live while building this exact redesign
+    // there (this file needs neither fix: RV32I's opcode 0 already
+    // decodes as `illegal` with every other output at its all-zero
+    // default - a genuinely inert NOP - and this core has no trap/EPC
+    // concept at all, so there's no analogous "commit against a
+    // meaningless pc_r" risk to guard against).
+    reg  [31:0] pc_r;
+    // 1 through reset and for exactly one cycle after any committed
+    // redirect (taken branch, JAL, JALR) - a registered fetch has
+    // already latched the now-abandoned next-sequential address at the
+    // exact edge a redirect is decided, and cannot un-fetch it.
+    reg         squash_r;
     reg        halted_r;
     assign halted = halted_r;
 
-    wire [31:0] instr;
+    wire [31:0] instr_fetched;
+    wire [31:0] instr = squash_r ? 32'b0 : instr_fetched;
     wire [6:0]  opcode = instr[6:0];
     wire [2:0]  funct3 = instr[14:12];
     wire [6:0]  funct7 = instr[31:25];
@@ -76,7 +98,7 @@ module cpu_core #(
     wire [31:0] fp_rs1_data, fp_rs2_data;
     reg  [31:0] fp_rd_data;
 
-    wire [31:0] alu_a = auipc ? pc : (lui ? 32'b0 : rs1_data);
+    wire [31:0] alu_a = auipc ? pc_r : (lui ? 32'b0 : rs1_data);
     wire [31:0] alu_b = alu_src ? imm : rs2_data;
     wire [31:0] alu_result;
     wire        alu_zero;
@@ -186,8 +208,14 @@ module cpu_core #(
 
     wire [31:0] effective_mem_read_data = is_shared_access ? bus_read_data : mem_read_data;
 
-    instr_mem #(.MEM_WORDS(INSTR_MEM_WORDS), .INIT_FILE(INSTR_INIT_FILE)) imem (
-        .addr(pc), .instr(instr)
+    // OR of every condition that freezes pc below - instr_mem's own
+    // internal SYNC_READ register needs this SAME signal (not just a
+    // frozen `addr`, which arrives one cycle too late for it - see
+    // instr_mem.v's own header comment for the real bug this fixes).
+    wire pc_stall = mem_stall || fpu_div_stall || fpu_sqrt_stall || mmu_stall;
+
+    instr_mem #(.MEM_WORDS(INSTR_MEM_WORDS), .INIT_FILE(INSTR_INIT_FILE), .SYNC_READ(1)) imem (
+        .clk(clk), .addr(pc), .stall(pc_stall), .instr(instr_fetched)
     );
 
     // A losing cycle must not commit a register write - the same
@@ -336,8 +364,9 @@ module cpu_core #(
     end
 
     wire [31:0] pc_plus4      = pc + 32'd4;
-    wire [31:0] branch_target = pc + imm;
-    wire [31:0] jal_target    = pc + imm;
+    wire [31:0] pc_r_plus4    = pc_r + 32'd4;
+    wire [31:0] branch_target = pc_r + imm;
+    wire [31:0] jal_target    = pc_r + imm;
     // JALR clears the LSB per spec (target must be even) - it's not
     // an alignment nicety, it's how the encoding tells JALR targets
     // apart from a plain register-relative call with an odd base.
@@ -349,8 +378,13 @@ module cpu_core #(
         (branch && branch_taken) ? branch_target :
         pc_plus4;
 
+    // Any of these committing means instr_mem already latched a now-
+    // abandoned next-sequential fetch at the same edge - the following
+    // cycle must squash (see squash_r's declaration above).
+    wire is_redirect = jump || jalr || (branch && branch_taken);
+
     always @(*) begin
-        if (jump || jalr)     rd_data = pc_plus4;      // link register gets the return address
+        if (jump || jalr)     rd_data = pc_r_plus4;    // link register gets the return address
         else if (mem_to_reg)  rd_data = effective_mem_read_data;
         else                  rd_data = alu_result;
     end
@@ -358,12 +392,26 @@ module cpu_core #(
     always @(posedge clk or posedge reset) begin
         if (reset) begin
             pc       <= 32'b0;
+            pc_r     <= 32'b0;
             halted_r <= 1'b0;
-        end else if (!halted_r && !mem_stall && !fpu_div_stall && !fpu_sqrt_stall && !mmu_stall) begin
-            pc <= next_pc;
+            squash_r <= 1'b1; // warm-up bubble - instr_mem/pc_r not primed yet
+        end else if (!halted_r && !pc_stall) begin
+            // pc_r must advance in exact lockstep with this whole
+            // block (only when a new instruction is genuinely being
+            // decided), not on its own free-running clock - see
+            // instr_mem.v's header comment for the real bug this
+            // avoids (a stalled decode silently drifting to show the
+            // next, not-yet-relevant instruction).
+            pc_r     <= pc;
+            squash_r <= squash_r ? 1'b0 : is_redirect;
+            pc <= squash_r ? pc_plus4 : next_pc;
             // SFENCE.VMA also decodes as OP_SYSTEM but must NOT halt the
             // core - is_sfence excludes it here (mmu_inst below is what
             // actually consumes it, via tlb_flush).
+            // No explicit "&& !squash_r" needed here (unlike AxISA's
+            // sibling cpu_core.v): opcode 0 (the masked-instr value
+            // during squash) decodes as `illegal`, never OP_SYSTEM, so
+            // this condition is already provably unreachable mid-squash.
             if (opcode == OP_SYSTEM && !is_sfence) halted_r <= 1'b1;
         end else if (!halted_r && page_fault) begin
             // Sticky mmu.v fault state never clears on its own (by
