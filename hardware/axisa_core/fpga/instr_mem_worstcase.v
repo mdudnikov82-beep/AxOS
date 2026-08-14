@@ -31,6 +31,14 @@
 // block RAMs for the default 1024x32) is NOT part of this run's cell
 // count and must be accounted separately.
 //
+// Port list matches rtl/instr_mem.v's current (post registered-fetch
+// redesign, see [[project_axisa_synthesis_check]]) signature exactly -
+// `clk`/`stall`/`SYNC_READ` are all real ports on the actual module
+// now, so cpu_core.v's own instr_mem instantiation would fail
+// elaboration against a stale port list even though this stand-in's
+// own internals are blackboxed and don't care about SYNC_READ's
+// value.
+//
 // Usage: read_verilog this file INSTEAD OF rtl/instr_mem.v (not both -
 // same module name), then synth_ecp5 -top cpu_core_fpga_top.
 `timescale 1ns/1ps
@@ -38,9 +46,12 @@
 (* blackbox *)
 module instr_mem #(
     parameter MEM_WORDS = 1024,
-    parameter INIT_FILE = ""
+    parameter INIT_FILE = "",
+    parameter SYNC_READ = 0
 ) (
+    input  wire        clk,
     input  wire [31:0] addr,
+    input  wire        stall,
     output wire [31:0] instr
 );
 endmodule
