@@ -1,0 +1,85 @@
+name: RV32I cpu_core.v Real Place-and-Route (Fmax)
+
+# Manual-only (workflow_dispatch). Mirrors axisa-core-pnr.yml exactly -
+# same real synth_ecp5 + nextpnr-ecp5 flow, same runner, same fixes
+# already learned there (cwd for $readmemh resolution, sw/test1.hex
+# being a gitignored *.hex build artifact that must be generated, not
+# assumed present) - applied here from the start rather than
+# rediscovering them. Built specifically to get an apples-to-apples
+# Fmax number against AxISA's cpu_core.v (see
+# [[project_axisa_synthesis_check]] for that number, 33.02 MHz
+# post-route). Uses fpga/cpu_core_fpga_top_pnr.v (real program-loaded
+# top, needed for PnR - a blackboxed instr_mem has nothing to place)
+# with fpga/fpu_blackbox.v standing in for the 5 FPU submodules so the
+# comparison isolates integer-core-only area/timing (AxISA's cpu_core.v
+# has no FPU at all).
+on:
+  workflow_dispatch:
+    inputs:
+      target_freq_mhz:
+        description: "Target clock frequency for nextpnr-ecp5 --freq (MHz) - just a constraint to report timing against, not a hard cap on the real Fmax measurement"
+        required: true
+        default: "50"
+
+jobs:
+  pnr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Yosys + nextpnr-ecp5 (OSS CAD Suite)
+        run: |
+          asset_url=$(curl -s https://api.github.com/repos/YosysHQ/oss-cad-suite-build/releases/latest | \
+            grep browser_download_url | grep linux-x64 | grep -o 'https://[^"]*')
+          echo "Downloading: $asset_url"
+          curl -L -o /tmp/oss-cad-suite.tgz "$asset_url"
+          tar -xzf /tmp/oss-cad-suite.tgz -C /tmp
+          echo "/tmp/oss-cad-suite/bin" >> "$GITHUB_PATH"
+
+      - name: Show runner resources
+        run: |
+          free -h
+          nproc
+
+      - name: Generate sw/test1.hex (gitignored - *.hex, must be built fresh)
+        working-directory: hardware/rv32i_core
+        run: |
+          python3 sw/asm_test1.py sw/test1.hex
+          ls -la sw/test1.hex
+
+      - name: Yosys synth_ecp5 (real, program-loaded netlist, FPU blackboxed for a fair integer-only comparison)
+        # Run from hardware/rv32i_core (not fpga/) - cpu_core_fpga_top_pnr.v's
+        # INSTR_INIT_FILE("sw/test1.hex") is a $readmemh path resolved
+        # relative to Yosys's own cwd, not to the .v file it appears in.
+        working-directory: hardware/rv32i_core
+        run: |
+          yosys -p "read_verilog rtl/alu.v rtl/regfile.v rtl/imm_gen.v rtl/instr_mem.v rtl/data_mem.v rtl/control_unit.v rtl/mmu.v fpga/fpu_blackbox.v rtl/cpu_core.v fpga/cpu_core_fpga_top_pnr.v; synth_ecp5 -top cpu_core_fpga_top -json fpga/cpu_core_pnr.json" 2>&1 | tee fpga/synth_pnr.log
+          echo "---"
+          tail -40 fpga/synth_pnr.log
+          grep -q "Found and reported 0 problems." fpga/synth_pnr.log
+
+      - name: nextpnr-ecp5 place-and-route (real Fmax)
+        working-directory: hardware/rv32i_core/fpga
+        run: |
+          nextpnr-ecp5 --25k --package CABGA381 --json cpu_core_pnr.json \
+            --lpf-allow-unconstrained --freq ${{ inputs.target_freq_mhz }} \
+            --textcfg cpu_core_pnr.config 2>&1 | tee nextpnr.log
+          echo "---"
+          tail -60 nextpnr.log
+          echo "### Fmax result" >> "$GITHUB_STEP_SUMMARY"
+          grep -i "Max frequency" nextpnr.log | tee -a "$GITHUB_STEP_SUMMARY" || echo "(no Max frequency line found - check nextpnr.log)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload PnR logs + artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rv32i-cpu-core-pnr
+          path: |
+            hardware/rv32i_core/fpga/synth_pnr.log
+            hardware/rv32i_core/fpga/nextpnr.log
+            hardware/rv32i_core/fpga/cpu_core_pnr.json
+            hardware/rv32i_core/fpga/cpu_core_pnr.config
+          if-no-files-found: ignore
