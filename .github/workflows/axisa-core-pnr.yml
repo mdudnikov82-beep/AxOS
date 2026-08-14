@@ -57,6 +57,7 @@ jobs:
         # and sw/test1.hex only exists relative to this directory.
         working-directory: hardware/axisa_core
         run: |
+          set -o pipefail
           yosys -p "read_verilog rtl/alu.v rtl/regbank.v rtl/instr_mem.v rtl/data_mem.v rtl/control_unit.v rtl/mmu.v rtl/cpu_core.v fpga/cpu_core_fpga_top_pnr.v; synth_ecp5 -top cpu_core_fpga_top -json fpga/cpu_core_pnr.json" 2>&1 | tee fpga/synth_pnr.log
           echo "---"
           tail -40 fpga/synth_pnr.log
@@ -65,6 +66,7 @@ jobs:
       - name: nextpnr-ecp5 place-and-route (real Fmax)
         working-directory: hardware/axisa_core/fpga
         run: |
+          set -o pipefail
           nextpnr-ecp5 --25k --package CABGA381 --json cpu_core_pnr.json \
             --lpf-allow-unconstrained --freq ${{ inputs.target_freq_mhz }} \
             --textcfg cpu_core_pnr.config 2>&1 | tee nextpnr.log
