@@ -44,6 +44,12 @@ jobs:
           free -h
           nproc
 
+      - name: Generate sw/test1.hex (gitignored - *.hex, must be built fresh)
+        working-directory: hardware/axisa_core
+        run: |
+          python3 sw/asm_test1.py sw/test1.hex
+          ls -la sw/test1.hex
+
       - name: Yosys synth_ecp5 (real, program-loaded netlist - not blackboxed)
         # Run from hardware/axisa_core (not fpga/) - cpu_core_fpga_top_pnr.v's
         # INSTR_INIT_FILE("sw/test1.hex") is a $readmemh path resolved
