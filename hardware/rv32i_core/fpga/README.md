@@ -108,3 +108,61 @@ the way (documented in `.github/workflows/rv32i-core-pnr.yml`'s own
 header comment and [[project_axisa_synthesis_check]]): the FPU-blackbox-
 can't-be-placed issue above, and an earlier `tee`-without-`pipefail`
 bug that silently reported that exact crash as a passing CI step.
+
+## UPDATE (2026-08-19): `data_mem.v` got the same SYNC_READ fix as `instr_mem.v` - read-side fixed, write-side is the REAL remaining blocker
+
+`data_mem.v` gained a `SYNC_READ` parameter (default 0, same pattern
+as `instr_mem.v`'s own fix - see [[project_axisa_synthesis_check]]),
+`mmu.v`'s walker FSM was split into ISSUE/READ state pairs to tolerate
+the new one-cycle read latency, and `cpu_core.v` gained a
+`dmem_load_stall` term for ordinary LOADs. All of this is
+correctness-verified for real: full local regression suite passes
+100% clean (including the SFENCE negative control and every
+`cpu_core_pipelined.v` test, proving that file is genuinely
+untouched), plus AxISA's equivalent fix passed its full 1023-core mesh
+regression via GitHub Actions at full scale. **None of that is in
+question.**
+
+**The synthesis/area outcome this was chasing did NOT fully resolve**,
+confirmed via a real re-run of the exact `synth_ecp5` command above
+([run 32255038333](https://github.com/mdudnikov82-beep/AxOS/actions/runs/32255038333)):
+
+- **DP16KD count: still 2** - completely unchanged from the pre-fix
+  baseline. `data_mem` did NOT get mapped to real block RAM; those 2
+  DP16KD blocks are still only `instr_mem`'s own two, exactly as
+  before this fix.
+- Full new tally: **211,706 LUT4, 83 CCU2C, 2,648 L6MUX21, 38,915
+  PFUMX, 24 TRELLIS_DPR16X4, 32,828 TRELLIS_FF, 2 DP16KD** - LUT4 down
+  slightly (~0.7%, 213,242→211,706) and PFUMX/L6MUX21 down more
+  noticeably (removing some of the old combinational-read forwarding
+  logic), but TRELLIS_FF actually went UP slightly (32,794→32,828 -
+  the new `dmem_read_valid_r`/registered-mux-selector logic added a
+  few flip-flops of its own). Net effect: essentially the same order
+  of magnitude, not the fix this was hoping for.
+- `nextpnr-ecp5` still fails placement outright, same as before:
+  `ERROR: Unable to place cell 'core.dmem.mem[1030]_..._TRELLIS_FF...',
+  no BELs remaining to implement cell type 'TRELLIS_COMB'` - explicitly
+  naming a `dmem.mem[...]` cell this time, direct confirmation `data_mem`
+  is still the thing making the design too big for any real ECP5
+  device.
+
+**Root cause, confirmed rather than just theorized**: `data_mem.v`'s
+write side, not its read side, is what actually blocks DP16KD
+inference. A single `SW` writes up to 4 independent byte addresses in
+one cycle (`mem[addr]`, `mem[addr+1]`, `mem[addr+2]`, `mem[addr+3]`)
+into one monolithic byte-addressed array that also supports fully
+*unaligned* access - a pattern no single DP16KD write port can
+represent, regardless of how the read is modeled. Fixing this for
+real would need re-architecting the array as 4 parallel byte-lane
+sub-arrays (`mem0..mem3[0:WORDS-1]`), each written at the same
+word-aligned index with its own per-lane write enable (the standard
+byte-enable-BRAM idiom) - complicated by the fact this array currently
+supports fully unaligned byte/half access across a word boundary,
+which a 4-lane-per-word organization can't represent in a single cycle
+without a bigger redesign (dual-word access or an alignment
+restriction). **This is a genuinely separate, larger piece of work,
+explicitly out of scope here** - not attempted as part of this fix.
+The read-side fix + mmu.v/cpu_core.v stall-timing correctness work
+was real, necessary, and independently valuable (and is a real
+prerequisite for any future write-side fix), but by itself does not
+get RV32I's `data_mem` onto real block RAM.
