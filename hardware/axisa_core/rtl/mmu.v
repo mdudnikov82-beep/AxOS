@@ -90,9 +90,18 @@ module mmu #(
         assign walk_active  = 1'b0;
         assign walk_addr    = 32'b0;
     end else begin: real_mmu
-        localparam S_IDLE = 2'd0;
-        localparam S_WALK = 2'd1;
-        localparam S_FILL = 2'd2;
+        localparam S_IDLE       = 2'd0;
+        // Split from a single S_WALK (design review before this split:
+        // see [[project_axisa_synthesis_check]] - data_mem.v's own read
+        // is now registered (SYNC_READ=1) to fix ECP5 block-RAM
+        // inference, so walk_read_data is no longer valid the same
+        // cycle walk_addr is first presented) - S_WALK_ISSUE presents
+        // pt_addr and does nothing else; S_WALK_READ is the ENTIRE old
+        // S_WALK case body, verbatim, now reading the registered
+        // walk_read_data one cycle later.
+        localparam S_WALK_ISSUE = 2'd1;
+        localparam S_WALK_READ  = 2'd2;
+        localparam S_FILL       = 2'd3;
 
         reg [1:0]  state;
         reg        have_valid;
@@ -113,7 +122,13 @@ module mmu #(
         assign paddr = {have_ppn, vaddr[11:0]};
 
         wire [31:0] pt_addr = ptb + {{(30-PT_INDEX_BITS){1'b0}}, index, 2'b00};
-        assign walk_active = (state == S_WALK);
+        // Must span BOTH new states, not just S_WALK_READ - cpu_core.v's
+        // STORE-write gate is `!mmu_walk_active && !mmu_stall`, and on
+        // S_WALK_READ a faulting access has mmu_stall already dropped
+        // to !mmu_fault=0 that same cycle (see mmu_fault below) - if
+        // walk_active didn't also cover S_WALK_READ, a STORE could slip
+        // through the write gate on the exact cycle a fault fires.
+        assign walk_active = (state == S_WALK_ISSUE) || (state == S_WALK_READ);
         assign walk_addr   = pt_addr;
 
         wire pte_v = walk_read_data[0];
@@ -123,15 +138,17 @@ module mmu #(
         wire perm_ok  = is_write ? pte_w : pte_r;
         wire in_range = ({pte_ppn, 12'b0} < (DATA_MEM_WORDS * 4));
 
-        // Combinational, true ONLY during the exact S_WALK cycle a
-        // fault is detected - this is the one deliberate departure
-        // from rv32i_core's own sticky S_FAULT: mmu_stall must drop to
-        // 0 on THIS SAME cycle (see below) or cpu_core.v's trap-entry
-        // block (gated on !mem_stall) would never even see the fault,
-        // since mmu_busy alone would otherwise hold mem_stall high for
-        // the whole S_WALK cycle regardless of outcome.
+        // Combinational, true ONLY during the exact S_WALK_READ cycle
+        // (walk_read_data is now valid, one cycle after S_WALK_ISSUE
+        // presented pt_addr) a fault is detected - this is the one
+        // deliberate departure from rv32i_core's own sticky S_FAULT:
+        // mmu_stall must drop to 0 on THIS SAME cycle (see below) or
+        // cpu_core.v's trap-entry block (gated on !mem_stall) would
+        // never even see the fault, since mmu_busy alone would
+        // otherwise hold mem_stall high for the whole walk regardless
+        // of outcome.
         wire walk_fault = !hi_ok || !pte_v || !perm_ok || !in_range;
-        assign mmu_fault = (state == S_WALK) && walk_fault;
+        assign mmu_fault = (state == S_WALK_READ) && walk_fault;
 
         // A real, found-live bug in an earlier version of this line:
         // written as plain `mmu_busy && !mmu_fault` (mmu_busy =
@@ -148,18 +165,24 @@ module mmu #(
         // state). Explicit per-state case instead, so each state's
         // condition is self-contained and cannot silently drop a case
         // like the OR-based version did:
-        //   S_IDLE: stall iff this cycle needs a walk that hasn't
-        //           started yet (a miss) - 0 on a hit, 0 if idle.
-        //   S_WALK: stall unless the fault is firing THIS cycle (must
-        //           read 0 exactly then, or cpu_core.v's own
-        //           !mem_stall-gated trap-entry block would never see
-        //           it and the trap would silently never fire).
-        //   S_FILL: always stall - the real access commits (or, for a
-        //           LOAD, its result is read) starting the cycle AFTER
-        //           this, once `have_ppn` is actually valid.
-        assign mmu_stall = (state == S_IDLE) ? (is_access && !have_hit) :
-                            (state == S_WALK) ? !mmu_fault :
-                                                 1'b1; // S_FILL
+        //   S_IDLE:       stall iff this cycle needs a walk that hasn't
+        //                 started yet (a miss) - 0 on a hit, 0 if idle.
+        //   S_WALK_ISSUE: always stall - pt_addr was just presented,
+        //                 walk_read_data isn't valid yet (data_mem's
+        //                 own SYNC_READ=1 registered capture lands at
+        //                 the end of THIS cycle).
+        //   S_WALK_READ:  stall unless the fault is firing THIS cycle
+        //                 (must read 0 exactly then, or cpu_core.v's
+        //                 own !mem_stall-gated trap-entry block would
+        //                 never see it and the trap would silently
+        //                 never fire).
+        //   S_FILL:       always stall - the real access commits (or,
+        //                 for a LOAD, its result is read) starting the
+        //                 cycle AFTER this, once `have_ppn` is valid.
+        assign mmu_stall = (state == S_IDLE)       ? (is_access && !have_hit) :
+                            (state == S_WALK_ISSUE) ? 1'b1 :
+                            (state == S_WALK_READ)  ? !mmu_fault :
+                                                       1'b1; // S_FILL
 
         always @(posedge clk or posedge reset) begin
             if (reset) begin
@@ -168,10 +191,19 @@ module mmu #(
             end else begin
                 case (state)
                     S_IDLE: begin
-                        if (is_access && !have_hit) state <= S_WALK;
+                        if (is_access && !have_hit) state <= S_WALK_ISSUE;
                     end
 
-                    S_WALK: begin
+                    S_WALK_ISSUE: begin
+                        // pt_addr is already presented (combinational,
+                        // see walk_addr above) - just wait one cycle for
+                        // data_mem's registered read to land.
+                        state <= S_WALK_READ;
+                    end
+
+                    S_WALK_READ: begin
+                        // Verbatim old S_WALK case body - walk_read_data
+                        // is valid now, one cycle after S_WALK_ISSUE.
                         if (walk_fault) begin
                             state <= S_IDLE; // transient - see module header
                         end else begin

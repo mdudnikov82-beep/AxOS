@@ -120,11 +120,21 @@ module mmu #(
         assign walk_active  = 1'b0;
         assign walk_addr    = 32'b0;
     end else begin: real_mmu
-        localparam S_IDLE  = 3'd0;
-        localparam S_L1    = 3'd1;
-        localparam S_L0    = 3'd2;
-        localparam S_FILL  = 3'd3;
-        localparam S_FAULT = 3'd4;
+        localparam S_IDLE     = 3'd0;
+        // Split from single S_L1/S_L0 states (design review before this
+        // split: see [[project_axisa_synthesis_check]] - data_mem.v's
+        // own read is now registered (SYNC_READ=1) to fix ECP5
+        // block-RAM inference, so walk_read_data is no longer valid the
+        // same cycle walk_addr is first presented). Each _ISSUE state
+        // presents its address and does nothing else; each _READ state
+        // is the ENTIRE old S_L1/S_L0 case body, verbatim, now reading
+        // the registered walk_read_data one cycle later.
+        localparam S_L1_ISSUE = 3'd1;
+        localparam S_L1_READ  = 3'd2;
+        localparam S_L0_ISSUE = 3'd3;
+        localparam S_L0_READ  = 3'd4;
+        localparam S_FILL     = 3'd5;
+        localparam S_FAULT    = 3'd6;
 
         localparam RR_BITS = $clog2(TLB_ENTRIES);
 
@@ -185,8 +195,9 @@ module mmu #(
         wire [31:0] l1_addr = page_table_base + {20'b0, vpn1, 2'b00};
         wire [31:0] l0_addr = {l1_ppn_r, 12'b0} | {20'b0, vpn0, 2'b00};
 
-        assign walk_active = (state == S_L1) || (state == S_L0);
-        assign walk_addr   = (state == S_L1) ? l1_addr : l0_addr;
+        assign walk_active = (state == S_L1_ISSUE) || (state == S_L1_READ) ||
+                              (state == S_L0_ISSUE) || (state == S_L0_READ);
+        assign walk_addr   = (state == S_L1_ISSUE || state == S_L1_READ) ? l1_addr : l0_addr;
 
         wire [19:0] l0_ppn_field = walk_read_data[31:12];
 
@@ -209,22 +220,41 @@ module mmu #(
                                 // combinationally this same cycle, no
                                 // state change needed.
                             end else begin
-                                state <= S_L1;
+                                state <= S_L1_ISSUE;
                             end
                         end
                     end
 
-                    S_L1: begin
+                    S_L1_ISSUE: begin
+                        // l1_addr already presented (combinational, see
+                        // walk_addr above) - wait one cycle for
+                        // data_mem's registered read to land.
+                        state <= S_L1_READ;
+                    end
+
+                    S_L1_READ: begin
+                        // Verbatim old S_L1 case body - walk_read_data
+                        // is valid now, one cycle after S_L1_ISSUE.
                         if (!walk_read_data[0]) begin
                             fault_vaddr_r <= vaddr;
                             state <= S_FAULT;
                         end else begin
                             l1_ppn_r <= walk_read_data[31:12];
-                            state    <= S_L0;
+                            state    <= S_L0_ISSUE;
                         end
                     end
 
-                    S_L0: begin
+                    S_L0_ISSUE: begin
+                        // l0_addr already presented (combinational,
+                        // depends on l1_ppn_r which S_L1_READ just
+                        // latched) - wait one cycle for data_mem's
+                        // registered read to land.
+                        state <= S_L0_READ;
+                    end
+
+                    S_L0_READ: begin
+                        // Verbatim old S_L0 case body - walk_read_data
+                        // is valid now, one cycle after S_L0_ISSUE.
                         if (!walk_read_data[0]) begin
                             fault_vaddr_r <= vaddr;
                             state <= S_FAULT;

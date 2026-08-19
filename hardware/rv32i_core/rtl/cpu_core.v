@@ -208,11 +208,32 @@ module cpu_core #(
 
     wire [31:0] effective_mem_read_data = is_shared_access ? bus_read_data : mem_read_data;
 
+    // A private-memory LOAD needs one extra cycle once its final
+    // address is stable (un-translated dmem_addr, or mmu_paddr the
+    // cycle mmu_stall first drops) - data_mem's SYNC_READ=1 registered
+    // capture (below) makes the data valid one cycle after the address
+    // is issued, not the same cycle. `!mmu_walk_active && !mmu_stall`
+    // matches this exact file's own established dmem_write gating
+    // (see its comment above: S_IDLE-miss and S_FILL cycles also need
+    // excluding, not just walk_active).
+    wire dmem_read_needed = mem_read && !is_shared_access;
+    wire dmem_load_stall  = dmem_read_needed && !mmu_walk_active && !mmu_stall && !dmem_read_valid_r;
+
+    // Gated only on !halted_r, deliberately NOT nested inside any
+    // pc_stall-gated always block - it must update WHILE pc_stall is
+    // already 1 (that's the transition it drives), or it would
+    // deadlock at dmem_load_stall=1 forever.
+    reg dmem_read_valid_r;
+    always @(posedge clk or posedge reset) begin
+        if (reset) dmem_read_valid_r <= 1'b0;
+        else if (!halted_r) dmem_read_valid_r <= dmem_load_stall;
+    end
+
     // OR of every condition that freezes pc below - instr_mem's own
     // internal SYNC_READ register needs this SAME signal (not just a
     // frozen `addr`, which arrives one cycle too late for it - see
     // instr_mem.v's own header comment for the real bug this fixes).
-    wire pc_stall = mem_stall || fpu_div_stall || fpu_sqrt_stall || mmu_stall;
+    wire pc_stall = mem_stall || fpu_div_stall || fpu_sqrt_stall || mmu_stall || dmem_load_stall;
 
     instr_mem #(.MEM_WORDS(INSTR_MEM_WORDS), .INIT_FILE(INSTR_INIT_FILE), .SYNC_READ(1)) imem (
         .clk(clk), .addr(pc), .stall(pc_stall), .instr(instr_fetched)
@@ -220,7 +241,7 @@ module cpu_core #(
 
     // A losing cycle must not commit a register write - the same
     // instruction (same rd/rd_data inputs) simply retries next cycle.
-    wire regfile_write_en = reg_write && !mem_stall && !mmu_stall;
+    wire regfile_write_en = reg_write && !mem_stall && !mmu_stall && !dmem_load_stall;
 
     regfile rf (
         .clk(clk), .rs1_addr(rs1), .rs2_addr(rs2),
@@ -249,7 +270,7 @@ module cpu_core #(
     // here at the bus level, not left to the memory to silently no-op).
     // addr/mem_write are muxed above to give the MMU's walker exclusive
     // control of this port while it's active.
-    data_mem #(.MEM_BYTES(DATA_MEM_BYTES)) dmem (
+    data_mem #(.MEM_BYTES(DATA_MEM_BYTES), .SYNC_READ(1)) dmem (
         .clk(clk), .addr(dmem_addr), .write_data(store_data),
         .mem_write(dmem_write), .mem_size(dmem_mem_size), .mem_unsigned(mem_unsigned),
         .read_data(mem_read_data)
@@ -294,7 +315,7 @@ module cpu_core #(
     // fpu_div_stall/fpu_sqrt_stall get the identical treatment: a
     // division or sqrt result only commits on the one cycle it's
     // actually done.
-    wire fp_regfile_write_en = fp_reg_write && !mem_stall && !fpu_div_stall && !fpu_sqrt_stall && !mmu_stall;
+    wire fp_regfile_write_en = fp_reg_write && !mem_stall && !fpu_div_stall && !fpu_sqrt_stall && !mmu_stall && !dmem_load_stall;
 
     fp_regfile fprf (
         .clk(clk), .rs1_addr(rs1), .rs2_addr(rs2),

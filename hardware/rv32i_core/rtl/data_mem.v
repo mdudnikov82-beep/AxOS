@@ -4,10 +4,27 @@
 // instr_mem.v - single-cycle datapath, no separate memory stage);
 // writes land on the clock edge with byte-lane masking so a narrow
 // store never touches neighboring bytes.
+//
+// SYNC_READ (default 0, combinational - unchanged behavior) registers
+// the read instead, same fix and reason as instr_mem.v's own
+// SYNC_READ: a combinational read at this depth fails ECP5 block-RAM
+// inference and falls back to wasteful per-bit flip-flops (confirmed
+// via real synth_ecp5 - see [[project_axisa_synthesis_check]]). Unlike
+// instr_mem.v, no `stall` port is needed - the address is a pure
+// combinational function of the CURRENTLY FROZEN instruction, never
+// races ahead - so a plain unconditional register is safe as long as
+// cpu_core.v's LSU and mmu.v's walker each hold their address stable
+// for one extra cycle before consuming the result (see cpu_core.v's
+// dmem_load_stall and mmu.v's S_L1_ISSUE/S_L1_READ +
+// S_L0_ISSUE/S_L0_READ splits). `mem_size` is ALSO registered
+// (`mem_size_r`) in this mode - the byte/half/word selector must land
+// on the same clock edge as the data it's selecting between, or the
+// wrong sign/zero-extension applies one cycle out of phase.
 `timescale 1ns/1ps
 
 module data_mem #(
-    parameter MEM_BYTES = 4096
+    parameter MEM_BYTES = 4096,
+    parameter SYNC_READ = 0
 ) (
     input  wire        clk,
     input  wire [31:0] addr,
@@ -42,12 +59,28 @@ module data_mem #(
     // list to get wrong, correctly reacts to the memory array changing
     // same as always @(*) did, and empirically does NOT hit the same
     // elaboration cliff (confirmed at MEM_BYTES=32768).
-    wire [31:0] byte_read = mem_unsigned ? {24'b0, mem[addr]} : {{24{mem[addr][7]}}, mem[addr]};
-    wire [31:0] half_read = mem_unsigned ? {16'b0, mem[addr+1], mem[addr]}
-                                          : {{16{mem[addr+1][7]}}, mem[addr+1], mem[addr]};
-    wire [31:0] word_read = {mem[addr+3], mem[addr+2], mem[addr+1], mem[addr]};
-    assign read_data = (mem_size == 2'b00) ? byte_read :
-                        (mem_size == 2'b01) ? half_read : word_read;
+    generate
+        if (SYNC_READ) begin: gen_sync_read
+            reg [31:0] byte_read_r, half_read_r, word_read_r;
+            reg [1:0]  mem_size_r;
+            always @(posedge clk) begin
+                byte_read_r <= mem_unsigned ? {24'b0, mem[addr]} : {{24{mem[addr][7]}}, mem[addr]};
+                half_read_r <= mem_unsigned ? {16'b0, mem[addr+1], mem[addr]}
+                                             : {{16{mem[addr+1][7]}}, mem[addr+1], mem[addr]};
+                word_read_r <= {mem[addr+3], mem[addr+2], mem[addr+1], mem[addr]};
+                mem_size_r  <= mem_size;
+            end
+            assign read_data = (mem_size_r == 2'b00) ? byte_read_r :
+                                (mem_size_r == 2'b01) ? half_read_r : word_read_r;
+        end else begin: gen_comb_read
+            wire [31:0] byte_read = mem_unsigned ? {24'b0, mem[addr]} : {{24{mem[addr][7]}}, mem[addr]};
+            wire [31:0] half_read = mem_unsigned ? {16'b0, mem[addr+1], mem[addr]}
+                                                  : {{16{mem[addr+1][7]}}, mem[addr+1], mem[addr]};
+            wire [31:0] word_read = {mem[addr+3], mem[addr+2], mem[addr+1], mem[addr]};
+            assign read_data = (mem_size == 2'b00) ? byte_read :
+                                (mem_size == 2'b01) ? half_read : word_read;
+        end
+    endgenerate
 
     always @(posedge clk) begin
         if (mem_write) begin

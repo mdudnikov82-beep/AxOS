@@ -534,11 +534,36 @@ module cpu_core #(
         .walk_read_data(dmem_rdata)
     );
 
+    // A private-memory LOAD needs one extra cycle once its final
+    // address is stable and presented (whether that's the
+    // un-translated mem_addr, or mmu_paddr the cycle mmu_stall first
+    // drops) - data_mem's SYNC_READ=1 registered capture (below) makes
+    // the data valid one cycle after the address is issued, not the
+    // same cycle. !mmu_walk_active is REQUIRED here, not just
+    // !mmu_stall - mmu_fault's own one-cycle pulse needs mem_stall to
+    // read exactly 0 on the S_WALK_READ fault cycle, and that cycle
+    // still has mmu_walk_active=1 even though mmu_stall has already
+    // dropped to 0; without this exclusion, a LOAD that page-faults
+    // would never trap (see mmu.v's own S_WALK_READ comment).
+    wire dmem_read_needed = is_load && !is_shared_access && !is_uart_addr;
+    wire dmem_load_stall  = dmem_read_needed && !mmu_walk_active && !mmu_stall && !dmem_read_valid_r;
+
+    // Gated only on !halted_r, deliberately NOT nested inside the
+    // !mem_stall-gated main always block below - it must update WHILE
+    // mem_stall is already 1 (that's the transition it drives), so
+    // gating it on !mem_stall would deadlock at dmem_load_stall=1
+    // forever.
+    reg dmem_read_valid_r;
+    always @(posedge clk or posedge reset) begin
+        if (reset) dmem_read_valid_r <= 1'b0;
+        else if (!halted_r) dmem_read_valid_r <= dmem_load_stall;
+    end
+
     // is_halt can never itself be true while mem_stall is true (HALT
     // is neither is_load nor is_store), so the tohost_r-latching logic
     // below needs no separate change for this new stall source - it's
     // already only ever reached once mem_stall has cleared.
-    wire mem_stall = (is_shared_access && !bus_grant) || mmu_stall;
+    wire mem_stall = (is_shared_access && !bus_grant) || mmu_stall || dmem_load_stall;
 
     // Walker's own PTE fetch takes priority (its read must land on
     // data_mem's shared port); otherwise a translated user-mode access
@@ -580,7 +605,7 @@ module cpu_core #(
     // unconditional; the resulting private read is simply discarded by
     // the read-data mux below whenever is_shared_access/is_uart_addr
     // is set.
-    data_mem #(.MEM_WORDS(DATA_MEM_WORDS)) dmem (
+    data_mem #(.MEM_WORDS(DATA_MEM_WORDS), .SYNC_READ(1)) dmem (
         .clk(clk), .addr(dmem_addr_final),
         .wdata(store_value),
         // !mmu_walk_active blocks a STORE's write from landing during
