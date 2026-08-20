@@ -42,10 +42,10 @@ module tb_cpu_pipelined_sfence;
 
     task poke32(input [31:0] addr, input [31:0] val);
         begin
-            dut.dmem.mem[addr]   = val[7:0];
-            dut.dmem.mem[addr+1] = val[15:8];
-            dut.dmem.mem[addr+2] = val[23:16];
-            dut.dmem.mem[addr+3] = val[31:24];
+            dut.dmem.mem0[addr[31:2]] = val[7:0];
+            dut.dmem.mem1[addr[31:2]] = val[15:8];
+            dut.dmem.mem2[addr[31:2]] = val[23:16];
+            dut.dmem.mem3[addr[31:2]] = val[31:24];
         end
     endtask
 

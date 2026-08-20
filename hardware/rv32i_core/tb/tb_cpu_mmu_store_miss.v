@@ -36,10 +36,10 @@ module tb_cpu_mmu_store_miss;
 
     task poke32(input [31:0] addr, input [31:0] val);
         begin
-            dut.dmem.mem[addr]   = val[7:0];
-            dut.dmem.mem[addr+1] = val[15:8];
-            dut.dmem.mem[addr+2] = val[23:16];
-            dut.dmem.mem[addr+3] = val[31:24];
+            dut.dmem.mem0[addr[31:2]] = val[7:0];
+            dut.dmem.mem1[addr[31:2]] = val[15:8];
+            dut.dmem.mem2[addr[31:2]] = val[23:16];
+            dut.dmem.mem3[addr[31:2]] = val[31:24];
         end
     endtask
 
@@ -54,7 +54,7 @@ module tb_cpu_mmu_store_miss;
         poke32(32'h0000_2000 + 0, {20'h0_0003, 9'h0, 3'b111});
         poke32(32'h0000_0000, 32'd9999); // guards physical page 0 - must survive untouched
 
-        phys0_before = {dut.dmem.mem[3], dut.dmem.mem[2], dut.dmem.mem[1], dut.dmem.mem[0]};
+        phys0_before = {dut.dmem.mem3[0], dut.dmem.mem2[0], dut.dmem.mem1[0], dut.dmem.mem0[0]};
 
         @(posedge clk);
         reset = 0;
@@ -64,7 +64,7 @@ module tb_cpu_mmu_store_miss;
             cycle_count = cycle_count + 1;
         end
 
-        phys0_after = {dut.dmem.mem[3], dut.dmem.mem[2], dut.dmem.mem[1], dut.dmem.mem[0]};
+        phys0_after = {dut.dmem.mem3[0], dut.dmem.mem2[0], dut.dmem.mem1[0], dut.dmem.mem0[0]};
 
         if (!halted) begin
             $display("FAIL: core never halted within %0d cycles", max_cycles);
