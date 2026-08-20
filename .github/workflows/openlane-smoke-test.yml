@@ -1,0 +1,57 @@
+name: OpenLane2 Smoke Test (sky130)
+
+# Step 1 of the AxISA-to-ASIC roadmap: prove the OpenLane2/sky130 RTL-to-
+# GDSII toolchain (Yosys + OpenROAD + Magic + Netgen) can stand up at all
+# on a GitHub Actions runner, before ever trying to push AxISA's own
+# cpu_core.v through it for real. No local Docker/WSL exists on this
+# project's dev machine (confirmed), so this mirrors the same pattern
+# already established this session for Yosys/nextpnr-ecp5: anything
+# Linux-native and heavy runs on a GH Actions runner instead.
+#
+# Uses OpenLane2's own upstream Nix flake directly via `github:` flake
+# reference (no local checkout of their repo needed - only their
+# `openlane` package output is wanted here, not their full dev/test
+# CI infra). `--accept-flake-config` is load-bearing: it's what lets
+# Nix pick up OpenLane's own public Cachix binary cache substituter
+# (defined inside their flake.nix), so this pulls prebuilt Yosys/
+# OpenROAD/Magic/Netgen binaries instead of compiling the whole
+# toolchain from source on every run - confirmed via OpenLane2's own
+# CI (.github/actions/build_nix/action.yml), which uses the identical
+# `nix run --accept-flake-config .#packages.<system>.openlane` pattern.
+#
+# `--smoke-test` is OpenLane2's own built-in self-check (also downloads
+# the sky130 PDK via volare automatically) - exactly what this step
+# exists to prove works, nothing AxISA-specific yet.
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Nix build cache (this project's own GH Actions cache, separate from OpenLane's Cachix)
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Show runner resources
+        run: |
+          df -h .
+          free -h
+
+      - name: OpenLane2 smoke test (sky130 PDK, prebuilt via Cachix)
+        run: |
+          nix run --accept-flake-config \
+            github:efabless/openlane2#openlane -- \
+            --pdk-root "$HOME/.volare" \
+            --smoke-test
+
+      - name: Show disk usage after (diagnostic - how big is the toolchain + PDK)
+        if: always()
+        run: |
+          df -h .
+          du -sh "$HOME/.volare" 2>/dev/null || true
+          du -sh /nix/store 2>/dev/null || true
