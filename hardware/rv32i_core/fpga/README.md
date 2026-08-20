@@ -166,3 +166,53 @@ The read-side fix + mmu.v/cpu_core.v stall-timing correctness work
 was real, necessary, and independently valuable (and is a real
 prerequisite for any future write-side fix), but by itself does not
 get RV32I's `data_mem` onto real block RAM.
+
+## RESOLVED (2026-08-20): write-side redesign - `data_mem` now maps to real DP16KD, confirmed
+
+Did the write-side redesign flagged above as out of scope: `data_mem.v`
+reorganized into 4 parallel byte-lane arrays (`mem0..mem3`), always
+accessed at a shared `word_idx` with independent per-lane write
+enables - the standard byte-enable-BRAM idiom. User explicitly chose
+to restrict misaligned/word-crossing halfword/word access to a
+defined-but-truncated same-word behavior (rounds `byte_off` down to
+the nearest valid lane pair, never touches the next word) rather than
+a 2-cycle crossing path - safe because no test in the suite exercises
+genuinely misaligned access, and every real compiler-emitted
+`LW`/`SW`/`LH`/`SH` is naturally aligned anyway. A design review
+verified the write-enable/data-routing logic bit-exact against the old
+flat array for every naturally-aligned case before implementing.
+Regression caught one real bug the review didn't anticipate: 7
+testbenches used hierarchical whitebox pokes into the old flat
+`dmem.mem[addr]` array to build page tables directly - fixed to poke
+the new `dmem.mem0[addr[31:2]]` etc. Full local regression clean after
+the fix, including every `cpu_core_pipelined.v` test (shares this same
+`data_mem.v` module). Committed as `206258b`.
+
+**Confirmed via real `synth_ecp5`/`nextpnr-ecp5`
+([run 32352682661](https://github.com/mdudnikov82-beep/AxOS/actions/runs/32352682661))
+- this is a genuine, complete success:**
+
+- `mapping memory cpu_core_fpga_top.core.dmem.mem0/mem1/mem2/mem3 via
+  $__DP16KD_` appears in the Yosys log - **all 4 lanes really did map
+  to block RAM**, not a fallback.
+- **DP16KD: 6** (was 2 - `instr_mem`'s original 2 blocks + `data_mem`'s
+  new 4). Full tally: **518 LUT4, 65 CCU2C, 22 L6MUX21, 103 PFUMX, 24
+  TRELLIS_DPR16X4, 30 TRELLIS_FF, 6 DP16KD** - down from 211,706
+  LUT4/32,828 TRELLIS_FF the day before, a **~411x** reduction in
+  LUT4 and **~1,094x** reduction in TRELLIS_FF. RV32I's integer-core
+  area is now actually SMALLER than AxISA's own confirmed 7,491 LUT4.
+- Both synth_ecp5 steps that used to take ~38-43 minutes each (the old
+  ~686K-AND-gate ABC9 pass on the FF-fallback explosion) now complete
+  in **single-digit seconds** - direct, independent confirmation the
+  root cause is gone, not just the cell count.
+- `nextpnr-ecp5` **placed and routed successfully** this time -
+  "Program finished normally", real device utilisation `DP16KD: 6/56
+  (10%)`, `TRELLIS_FF: 38/24288 (0%)`, `TRELLIS_COMB: 825/24288 (3%)`.
+  Real **Fmax: 47.68 MHz** (reported as "FAIL at 50.00 MHz" only
+  against the `--freq 50` input constraint, same benign pattern as
+  AxISA's own 33.02 MHz result - not a real placement/routing error).
+
+This closes out the `data_mem.v` synthesis investigation that started
+with the AxISA-vs-RV32I comparison: RV32I's `cpu_core.v` now has a
+real, honest, comparably-small FPGA footprint and a real measured
+Fmax, on equal footing with AxISA's own confirmed numbers.
