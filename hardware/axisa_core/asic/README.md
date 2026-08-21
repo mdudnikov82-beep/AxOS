@@ -22,27 +22,77 @@ at all" from "what's the real achievable Fmax" - exactly the same
 reasoning `nextpnr-ecp5 --freq` used on the FPGA side (an input
 target to report slack against, not a hard requirement).
 
-## Known open questions for this first attempt (not yet answered - see real results before assuming either way)
+## RESOLVED (2026-08-21): first successful AxISA ASIC synthesis - real numbers
 
-1. **`instr_mem.v`'s X-optimism collapse risk.** `INSTR_INIT_FILE` is
-   left at its default (`""`, no program loaded) for this first pass -
-   OpenLane's synthesis step is Yosys-based, so the SAME collapse this
-   project already hit on the FPGA side (an empty ROM lets the
-   optimizer prove most of the datapath "unreachable" and deletes it -
-   see `instr_mem_worstcase.v`'s own header comment) could happen
-   here too. Deliberately not pre-solved - the FPGA fix required a
-   real loaded program via a wrapper module, and doing that here needs
-   knowing how OpenLane's Yosys step resolves `$readmemh` paths (its
-   own sandboxed run directory, not necessarily this design's own
-   `src`-relative convention) - worth learning from a real error
-   rather than guessing.
-2. **No SRAM macro** - `instr_mem`/`data_mem` will synthesize as plain
-   flip-flops via `sky130_fd_sc_hd`, not any kind of on-chip memory
-   macro (sky130 has no direct standard-cell equivalent to ECP5's
-   DP16KD - a real memory macro would need OpenRAM or a pre-hardened
-   SRAM IP, a separate, later step). Expected to be a real area cost,
-   not a bug - full instr_mem+data_mem flip-flop area is a known
-   quantity to measure once the flow completes at all.
-3. **`CLOCK_PERIOD`/floorplan sizing are first guesses** - real timing
-   closure and utilization tuning is expected to take iteration once
-   there's a first successful run to react to.
+Took 5 real dispatches of `.github/workflows/openlane-axisa-synth.yml`
+to get here, each hitting a genuinely different, confirmed-from-actual-
+log-output problem (not guessed in advance):
+
+1. **`[PPL-0024]` - 157 I/O pins didn't fit the default floorplan.**
+   `cpu_core`'s port list (mostly wide 32-bit buses - `tohost_value`,
+   `bus_addr`, `bus_write_data`, `bus_read_data`) adds up to 157
+   individual pins, and OpenLane's default utilization-driven
+   floorplan sizing has no awareness of pin count, only cell area.
+   OpenROAD's own error gave the exact number needed: "Increase the
+   die perimeter from 324.96um to 533.80um."
+2. **`FP_CORE_UTIL` alone did nothing** - the reported required
+   perimeter didn't change at all after setting it, because cell area
+   was still tiny relative to the fixed pin-count requirement.
+3. **`DIE_AREA` alone made it WORSE** (perimeter shrank to 181.58um) -
+   `FP_SIZING` defaults to `"relative"` (utilization-driven) and
+   silently ignores `DIE_AREA` unless `FP_SIZING` is explicitly
+   `"absolute"` - confirmed via OpenLane's own docs, which specifically
+   recommend this combination for very small designs. Fixed by setting
+   both `"FP_SIZING": "absolute"` and `"DIE_AREA": "0 0 300 300"`.
+4. **`instr_mem.v`'s X-optimism collapse - confirmed, not just
+   theorized.** With `INSTR_INIT_FILE=""` (no program loaded), Yosys
+   proved the fetched instruction was a constant forever and deleted
+   almost the entire clocked datapath - directly visible in OpenROAD's
+   own log: `Net "clk" has 0 sinks. Skipping...`, `No clock nets have
+   been found`, and a `45 critical disconnected pins found` error
+   (every output whose driving logic had been optimized away). Same
+   bug class already hit and fixed on the FPGA side. Fixed by adding
+   `cpu_core_top.v` (a thin wrapper, mirrors
+   `fpga/cpu_core_fpga_top_pnr.v`) loading a real program via
+   `INSTR_INIT_FILE("../sw/test1.hex")` - **this exact relative path
+   worked on the first try**, confirming OpenLane's Yosys step runs
+   with a cwd one directory level below `asic/` (i.e. the design's own
+   root), matching the same relative relationship as the FPGA flow's
+   own convention.
+
+**Confirmed result** (via
+[run 32457079870](https://github.com/mdudnikov82-beep/AxOS/actions/runs/32457079870),
+commit `0b82257`) - `Flow complete.`, a real, non-collapsed synthesis:
+- **3,614 standard cells, 42,741 µm² cell area** inside the 300×300µm
+  (90,000 µm²) die - **4,881 real nets** (compare to the collapsed
+  attempt's near-zero net count - this is genuinely the whole CPU,
+  not a pruned stub).
+- **DRC: Passed ✅ / LVS: Passed ✅**
+- **Antenna: Failed ✗** - a real, common ASIC signoff issue (long
+  wires can act as unintended antennas during fabrication, risking
+  gate-oxide damage) - not fixed in this default-config first pass,
+  a real, disclosed follow-up (typically antenna diodes or wire-length
+  rules), not swept under the rug.
+- **Timing: setup MET cleanly** at the 50ns/20MHz target (`No setup
+  violations found`) - 683 hold violations were found and
+  automatically repaired by inserting 664 hold buffers (a completely
+  normal, automatic OpenROAD step, not a design problem) - final
+  timing is clean (TNS = 0).
+- 41 disconnected pins remain, but the checker itself reports **0
+  critical** - these are the legitimately-unconnected top-level
+  primary inputs (`bus_grant`, `uart_rx_data_in`, `uart_rx_ready_in`,
+  `irq_in`) a standalone core synthesis is expected to leave dangling.
+
+## Still open (real, disclosed, not yet worked on)
+
+1. **No SRAM macro** - `instr_mem`/`data_mem` synthesized as plain
+   flip-flops via `sky130_fd_sc_hd` (no on-chip memory macro exists in
+   this flow yet - would need OpenRAM or a pre-hardened SRAM IP, a
+   separate, larger follow-up). The 3,614-cell/42,741µm² result above
+   already includes this real cost, it isn't hidden.
+2. **Antenna violations unresolved** (see above).
+3. **`CLOCK_PERIOD`=50ns/20MHz was a deliberately conservative first
+   guess** - setup timing had comfortable positive slack throughout
+   placement (worst slack seen ~23-24ns), suggesting real headroom to
+   push the clock period down significantly in a future iteration -
+   not yet attempted.
