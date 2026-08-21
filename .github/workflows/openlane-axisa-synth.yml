@@ -1,0 +1,54 @@
+name: AxISA cpu_core.v ASIC Synthesis (OpenLane2 / sky130)
+
+# Step 2 of the AxISA-to-ASIC roadmap - see hardware/axisa_core/asic/
+# README.md for full context. Step 1 (openlane-smoke-test.yml) already
+# confirmed the OpenLane2/sky130 toolchain stands up cleanly via Nix on
+# a GH Actions runner. This pushes AxISA's real cpu_core.v through the
+# same flow for the first time - a genuinely new attempt, real errors
+# on this first try are expected and should be diagnosed for real
+# rather than assumed away.
+on:
+  workflow_dispatch:
+
+jobs:
+  synth:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Nix build cache (this project's own GH Actions cache, separate from OpenLane's Cachix)
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Show runner resources
+        run: |
+          df -h .
+          free -h
+
+      - name: OpenLane2 flow - AxISA cpu_core.v under sky130
+        working-directory: hardware/axisa_core/asic
+        run: |
+          nix run --accept-flake-config \
+            github:efabless/openlane2#openlane -- \
+            --pdk-root "$HOME/.volare" \
+            config.json
+
+      - name: Show disk usage after
+        if: always()
+        run: |
+          df -h .
+          du -sh "$HOME/.volare" 2>/dev/null || true
+          du -sh /nix/store 2>/dev/null || true
+
+      - name: Upload OpenLane run directory (logs, reports, final views)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: axisa-cpu-core-openlane-run
+          path: hardware/axisa_core/asic/runs/
+          if-no-files-found: warn

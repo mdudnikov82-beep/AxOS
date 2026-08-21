@@ -1,0 +1,14 @@
+{
+    "DESIGN_NAME": "cpu_core",
+    "VERILOG_FILES": [
+        "dir::../rtl/alu.v",
+        "dir::../rtl/regbank.v",
+        "dir::../rtl/instr_mem.v",
+        "dir::../rtl/data_mem.v",
+        "dir::../rtl/control_unit.v",
+        "dir::../rtl/mmu.v",
+        "dir::../rtl/cpu_core.v"
+    ],
+    "CLOCK_PORT": "clk",
+    "CLOCK_PERIOD": 50
+}

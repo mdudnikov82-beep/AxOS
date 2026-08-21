@@ -92,3 +92,6 @@ dkms.conf
 # Icarus Verilog compiled simulations + waveform dumps (hardware/rv32i_core)
 *.vvp
 *.vcd
+
+# OpenLane2 ASIC-flow build output (hardware/axisa_core/asic)
+hardware/axisa_core/asic/runs/
