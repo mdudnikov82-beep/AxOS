@@ -1,5 +1,5 @@
 {
-    "DESIGN_NAME": "cpu_core",
+    "DESIGN_NAME": "cpu_core_top",
     "VERILOG_FILES": [
         "dir::../rtl/alu.v",
         "dir::../rtl/regbank.v",
@@ -7,7 +7,8 @@
         "dir::../rtl/data_mem.v",
         "dir::../rtl/control_unit.v",
         "dir::../rtl/mmu.v",
-        "dir::../rtl/cpu_core.v"
+        "dir::../rtl/cpu_core.v",
+        "dir::cpu_core_top.v"
     ],
     "CLOCK_PORT": "clk",
     "CLOCK_PERIOD": 50,

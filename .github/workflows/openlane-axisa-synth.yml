@@ -30,6 +30,12 @@ jobs:
           df -h .
           free -h
 
+      - name: Generate sw/test1.hex (gitignored - *.hex, must be built fresh)
+        working-directory: hardware/axisa_core
+        run: |
+          python3 sw/asm_test1.py sw/test1.hex
+          ls -la sw/test1.hex
+
       - name: OpenLane2 flow - AxISA cpu_core.v under sky130
         working-directory: hardware/axisa_core/asic
         run: |
