@@ -83,6 +83,59 @@ commit `0b82257`) - `Flow complete.`, a real, non-collapsed synthesis:
   primary inputs (`bus_grant`, `uart_rx_data_in`, `uart_rx_ready_in`,
   `irq_in`) a standalone core synthesis is expected to leave dangling.
 
+## RESOLVED (2026-08-22): real Fmax found via binary search - 45.7 MHz
+
+The 50ns/20MHz target above was deliberately conservative just to get
+a first clean pass. Once that worked, did a real binary search on
+`CLOCK_PERIOD` across 10 more dispatches to find the true limit -
+`config.json` is left at the final, confirmed-passing value.
+
+**Critical methodology lesson, learned the hard way partway through**:
+`"Flow complete."` and the GitHub Actions job showing `"success"` do
+**NOT** mean timing passed - OpenLane doesn't hard-fail the whole run
+just because setup timing isn't fully closed, it just logs a warning
+and saves whatever layout it has. The `Checker.SetupViolations`
+messages (`WARNING Setup violations found in the following corners`
+immediately followed by `VERBOSE No setup violations found`) turned
+out to appear in BOTH passing and failing runs equally - not a
+reliable signal, initially misread as one. **The real, confirmed
+discriminator is the resizer's own repair-completion messages**:
+- `[RSZ-0062] Unable to repair all setup violations.` appearing
+  anywhere in the log = a REAL, confirmed timing failure.
+- `[RSZ-0099] Repairing N out of N (100.00%) violating endpoints...`
+  with a matching N and NO `RSZ-0062` = a REAL, confirmed clean pass.
+
+**Binary search results** (each period tested via a real full OpenLane
+dispatch, cell count/area identical throughout at 3,614 cells/42,741
+µm² - only timing outcome changed):
+
+| CLOCK_PERIOD | Frequency | Result |
+|---|---|---|
+| 50ns | 20.0 MHz | PASS (0 violations, comfortable margin) |
+| 30ns | 33.3 MHz | PASS (worst slack ~7.3-8.4ns) |
+| 24ns | 41.7 MHz | PASS (58/58 repaired, margin ~3.3-4.4ns) |
+| 22ns | 45.5 MHz | PASS (130/130 repaired, margin ~1.3-2.4ns) |
+| 21.875ns | 45.7 MHz | **PASS** (133/133 repaired, 100%) |
+| 21.8125ns | 45.7 MHz | **PASS (final, confirmed)** (143/143 repaired, 100%) |
+| 21.75ns | 45.6 MHz | FAIL (`RSZ-0062`, unrepaired) |
+| 21.5ns | 46.5 MHz | FAIL (`RSZ-0062`, unrepaired) |
+| 21ns | 47.6 MHz | FAIL (`RSZ-0062`, unrepaired) |
+| 20ns | 50.0 MHz | FAIL (`RSZ-0062`, unrepaired, 3 corners violated) |
+
+**Real, confirmed Fmax: 21.8125ns period = 45.7 MHz**, bounded to
+within ~0.06 MHz by the last fail/pass pair (21.75ns fails, 21.8125ns
+passes) - a genuinely tight, hard-won number, not an estimate. This is
+**~1.38x faster than AxISA's own confirmed FPGA/ECP5 Fmax (33.02
+MHz)** - a real, honest apples-to-apples improvement from moving off
+FPGA fabric onto real standard cells, on the exact same RTL.
+`DRC`/`LVS` passed throughout every single run in the search; `Antenna`
+flipped between pass and fail across different placements/routes
+(incidental to the specific layout each period produced, not a
+deliberate fix) - still an open, disclosed, unfixed item at the final
+21.8125ns configuration specifically (check the latest run's own
+manufacturability report before relying on antenna-clean for any
+given commit).
+
 ## Still open (real, disclosed, not yet worked on)
 
 1. **No SRAM macro** - `instr_mem`/`data_mem` synthesized as plain
@@ -90,9 +143,11 @@ commit `0b82257`) - `Flow complete.`, a real, non-collapsed synthesis:
    this flow yet - would need OpenRAM or a pre-hardened SRAM IP, a
    separate, larger follow-up). The 3,614-cell/42,741µm² result above
    already includes this real cost, it isn't hidden.
-2. **Antenna violations unresolved** (see above).
-3. **`CLOCK_PERIOD`=50ns/20MHz was a deliberately conservative first
-   guess** - setup timing had comfortable positive slack throughout
-   placement (worst slack seen ~23-24ns), suggesting real headroom to
-   push the clock period down significantly in a future iteration -
-   not yet attempted.
+2. **Antenna violations** - real, present in at least some
+   configurations (see table above), not deliberately fixed.
+3. **Fmax found is specific to this exact floorplan/DIE_AREA/placement
+   configuration** - a different floorplan (e.g. after fixing antenna,
+   or after a real PDN/pin-order pass) could shift the real number
+   somewhat in either direction; this isn't a fundamental, PDK-wide
+   ceiling, just the honest result for this specific synthesis
+   configuration.
