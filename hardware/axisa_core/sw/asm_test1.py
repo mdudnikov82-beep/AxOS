@@ -115,6 +115,25 @@ def ptb(direction, nreg):
     return (OP_PTB << 27) | (direction << 26) | (nreg << 23)
 
 
+# ==================== QHAD / QCNOT - classical quantum-circuit-
+# simulator extension (see docs/ISA.md's QHAD/QCNOT sections). Both
+# only ever touch the R bank; the actual register addresses are
+# resolved by control_unit.v/cpu_core.v from these small selector
+# bits, not instruction-encoded directly (same style as BARYON's
+# implicit rr/gg/bb). ====================
+
+OP_QHAD = 0b01110
+OP_QCNOT = 0b01111
+
+
+def qhad(qubit, half):
+    return (OP_QHAD << 27) | (qubit << 26) | (half << 25)
+
+
+def qcnot(ctrl):
+    return (OP_QCNOT << 27) | (ctrl << 26)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

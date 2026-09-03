@@ -58,7 +58,7 @@ jobs:
         working-directory: hardware/axisa_core
         run: |
           set -o pipefail
-          yosys -p "read_verilog rtl/alu.v rtl/regbank.v rtl/instr_mem.v rtl/data_mem.v rtl/control_unit.v rtl/mmu.v rtl/cpu_core.v fpga/cpu_core_fpga_top_pnr.v; synth_ecp5 -top cpu_core_fpga_top -json fpga/cpu_core_pnr.json" 2>&1 | tee fpga/synth_pnr.log
+          yosys -p "read_verilog rtl/alu.v rtl/regbank.v rtl/instr_mem.v rtl/data_mem.v rtl/control_unit.v rtl/fp_addsub.v rtl/fp_mul.v rtl/mmu.v rtl/cpu_core.v fpga/cpu_core_fpga_top_pnr.v; synth_ecp5 -top cpu_core_fpga_top -json fpga/cpu_core_pnr.json" 2>&1 | tee fpga/synth_pnr.log
           echo "---"
           tail -40 fpga/synth_pnr.log
           grep -q "Found and reported 0 problems." fpga/synth_pnr.log

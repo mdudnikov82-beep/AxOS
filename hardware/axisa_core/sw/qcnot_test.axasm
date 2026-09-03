@@ -1,0 +1,12 @@
+# QCNOT swap correctness (see docs/ISA.md's QCNOT section). Loads 4
+# distinct opaque 32-bit payloads into amp1 (r2,r3) and amp3 (r6,r7),
+# runs QCNOT ctrl=0 (swaps amp1<->amp3), and HALTs - the real check is
+# a direct peek at r0-r7 from the testbench (QCNOT is a pure data
+# move, no float semantics involved, so plain small integers are a
+# fine payload - no need for real amplitude values here).
+    ADDI R2, R0, 11    # amp1 Re
+    ADDI R3, R0, 22    # amp1 Im
+    ADDI R6, R0, 33    # amp3 Re
+    ADDI R7, R0, 44    # amp3 Im
+    QCNOT 0            # swap amp1<->amp3: expect r2=33,r3=44,r6=11,r7=22
+    HALT N0

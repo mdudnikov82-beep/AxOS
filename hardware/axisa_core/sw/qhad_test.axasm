@@ -1,0 +1,11 @@
+# QHAD numeric correctness (see docs/ISA.md's QHAD section). Sets
+# amp0=(r0,r1)=1.0+0i (float32 0x3F800000, built via ADDI+SLLI since
+# AxISA has no load-32-bit-immediate instruction), amp1=(r2,r3)=0+0i
+# (already 0 from reset), then QHAD qubit=0,half=0 mixes them:
+# new_r0=(1.0+0)*k=k, new_r1=(0+0)*k=0 (exact), new_r2=(1.0-0)*k=k,
+# new_r3=(0-0)*k=0 (exact) - an exactly-checkable case, no rounding
+# ambiguity, since both products involve an exact 0 or an exact 1.0.
+    ADDI R0, R0, 0x3F80    # r0 = 0x00003F80
+    SLLI R0, R0, 16        # r0 = 0x3F800000 = 1.0f (amp0 Re)
+    QHAD 0, 0              # expect r0=r2=0x3F3504F3 (k), r1=r3=0
+    HALT N0

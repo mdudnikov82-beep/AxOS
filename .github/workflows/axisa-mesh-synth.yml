@@ -67,7 +67,7 @@ jobs:
       - name: Yosys generic synthesis check (structural only, no target device)
         working-directory: hardware/axisa_core
         run: |
-          yosys -p "read_verilog rtl/alu.v rtl/regbank.v rtl/instr_mem.v rtl/data_mem.v rtl/control_unit.v rtl/mmu.v rtl/cpu_core.v rtl/router.v rtl/noc_core_adapter.v rtl/noc_mem_adapter.v rtl/shared_mem_backing.v rtl/soc_top.v; hierarchy -top soc_top; synth -top soc_top" 2>&1 | tee synth_output.log
+          yosys -p "read_verilog rtl/alu.v rtl/regbank.v rtl/instr_mem.v rtl/data_mem.v rtl/control_unit.v rtl/fp_addsub.v rtl/fp_mul.v rtl/mmu.v rtl/cpu_core.v rtl/router.v rtl/noc_core_adapter.v rtl/noc_mem_adapter.v rtl/shared_mem_backing.v rtl/soc_top.v; hierarchy -top soc_top; synth -top soc_top" 2>&1 | tee synth_output.log
           echo "---"
           tail -40 synth_output.log
           grep -q "Found and reported 0 problems." synth_output.log
@@ -100,7 +100,7 @@ jobs:
         working-directory: hardware/axisa_core
         run: |
           cat > worst_case_synth.ys <<'YS_EOF'
-          read_verilog rtl/alu.v rtl/regbank.v fpga/instr_mem_worstcase.v rtl/data_mem.v rtl/control_unit.v rtl/mmu.v rtl/cpu_core.v rtl/router.v rtl/noc_core_adapter.v rtl/noc_mem_adapter.v rtl/shared_mem_backing.v rtl/soc_top.v
+          read_verilog rtl/alu.v rtl/regbank.v fpga/instr_mem_worstcase.v rtl/data_mem.v rtl/control_unit.v rtl/fp_addsub.v rtl/fp_mul.v rtl/mmu.v rtl/cpu_core.v rtl/router.v rtl/noc_core_adapter.v rtl/noc_mem_adapter.v rtl/shared_mem_backing.v rtl/soc_top.v
           read_verilog -lib -specify +/lattice/cells_sim_ecp5.v +/lattice/cells_bb_ecp5.v
           hierarchy -check -top soc_top
 

@@ -60,6 +60,8 @@ bit range across classes, to keep decode simple).
 | `01011`          | SYSCALL  | deliberate trap (user→kernel door)        |
 | `01100`          | MVSR     | move to/from trap state (privileged)      |
 | `01101`          | PTB      | move to/from page table base (privileged) |
+| `01110`          | QHAD     | classical quantum-circuit-sim: Hadamard mix |
+| `01111`          | QCNOT    | classical quantum-circuit-sim: CNOT swap  |
 | others           | —        | reserved for v0.2+                        |
 
 ### ALUR — `opcode[31:27] bank[26:25] funct[24:21] rd[20:18] rs1[17:15] rs2[14:12] (unused[11:0])`
@@ -232,6 +234,77 @@ selreg field at all, just `dir` (`0`=read `PTB`→`n_reg`, `1`=write
 `n_reg`→`PTB`) and a bare 3-bit `n_reg`, the same shape as `MVSR`'s own
 `n_reg`.
 
+## QHAD / QCNOT (classical quantum-circuit-simulator extension)
+
+**Explicitly not real quantum hardware** - a real qubit needs a
+physical substrate (superconducting circuits, trapped ions, photonics)
+incompatible with the classical CMOS flows this project actually
+targets (sky130 ASIC, ECP5 FPGA). These two instructions instead give
+AxISA real, classical arithmetic for simulating a small quantum
+circuit in hardware - the same computation a software simulator
+(Qiskit-style) would do, executed for real on real gates, continuing
+this ISA's QCD-themed naming into a new "quantum" register convention
+rather than literal physics.
+
+**State representation**: a classical 2-qubit state vector (4 complex
+amplitudes) lives entirely in the `R` bank, one register pair per
+amplitude, `Re` on the even register: `amp0=(r0,r1)` `amp1=(r2,r3)`
+`amp2=(r4,r5)` `amp3=(r6,r7)`, amplitude index = `{q1,q0}` (`q0`/`q1`
+each contribute one bit). Every value is IEEE-754 binary32
+(`fp_addsub.v`/`fp_mul.v`, ported from `rv32i_core`'s own real RV32F
+FPU - same scope limitation: normal-finite-or-zero inputs only,
+NaN/infinity/subnormal are out of scope). There is no dedicated `LOAD`
+32-bit-immediate instruction, so a test program builds a float32
+constant via `ADDI`+`SLLI` (see `sw/qhad_test.axasm`).
+
+**Both are the first genuinely multi-cycle instructions in this ISA**
+(5 cycles each) - AxISA's register banks have exactly 2 read + 1 write
+port per bank, and only one write port total system-wide, so neither
+instruction (each touches 4 `R`-bank registers) can complete in one
+cycle. See the "Implementation notes" section's port-count footnote
+below.
+
+### QHAD — `opcode[31:27] qubit[26] half[25] (unused[24:0])`
+
+A classical Hadamard-gate mix on one qubit: `new_alpha=(alpha+beta)*k`,
+`new_beta=(alpha-beta)*k`, `k=1/sqrt(2)` (float32 `0x3F3504F3`),
+applied component-wise to each amplitude's Re/Im. `qubit` selects
+which qubit's Hadamard butterfly (`q0`'s pairs differ only in bit 0,
+`q1`'s pairs differ only in bit 1); `half` selects which of the 2
+independent pairs for that qubit. Both bits are always meaningful (all
+4 encodings assigned) - no illegal case, same style as `GLUON`'s
+fully-populated `funct` field.
+
+| `qubit` | `half` | Pair mixed |
+|---|---|---|
+| 0 | 0 | `amp0` <-> `amp1` |
+| 0 | 1 | `amp2` <-> `amp3` |
+| 1 | 0 | `amp0` <-> `amp2` |
+| 1 | 1 | `amp1` <-> `amp3` |
+
+**Deliberate, documented semantic concession**: a *real* single-qubit
+Hadamard touches BOTH independent pairs for that qubit at once (all 8
+registers); one `QHAD` instruction only mixes ONE pair (4 registers) -
+software applies a full single-qubit Hadamard by issuing `QHAD` twice
+(once per `half` value). This keeps the instruction's own register
+footprint within the same 4-register/5-cycle shape `QCNOT` needs,
+rather than doubling the sequencer's complexity for a single opcode.
+
+### QCNOT — `opcode[31:27] ctrl[26] (unused[25:0])`
+
+A classical CNOT: swaps the two amplitudes that share `ctrl`'s qubit
+value = 1 (a real CNOT's control=0 branch is identity - nothing to
+represent - so with only 2 qubits there are exactly 2 real
+(control,target) assignments, both meaningful, no illegal case).
+
+| `ctrl` (control qubit) | Swap |
+|---|---|
+| 0 (`q0`) | `amp1` <-> `amp3` (`r2,r3` <-> `r6,r7`) |
+| 1 (`q1`) | `amp2` <-> `amp3` (`r4,r5` <-> `r6,r7`) |
+
+Pure register move, no arithmetic - the 5-cycle floor here is entirely
+the write-port constraint, not computation.
+
 ## Traps (interrupts + privileged/user mode)
 
 AxISA v0.1's second execution mode: a single hardware `mode` bit
@@ -276,7 +349,13 @@ A pending external IRQ that arrives while a `LOAD`/`STORE` is stalled
 waiting for `bus_grant` (see `SHARED_MEM_BASE`) is held pending and
 only actually redirects `pc` once the stall clears - the stalled
 access is never aborted mid-flight, so interrupt latency is bounded by
-stall duration rather than needing a new "abort a grant" concept.
+stall duration rather than needing a new "abort a grant" concept. The
+same deferral applies to an in-flight `QHAD`/`QCNOT` (see above) - an
+IRQ arriving anywhere during the 5-cycle sequence, including exactly
+on its terminal write cycle, is held pending until the whole sequence
+completes, not taken against the instruction's own address (which
+would make `RFT` re-execute the entire sequence from scratch, reading
+its own already-mutated registers as fresh inputs).
 
 ## Virtual memory
 
@@ -391,7 +470,13 @@ Confirmed by design review before any RTL was written:
   out by checking peak per-bank demand across every format: ALUR/
   BRANCH need 2R+1W or 2R+0W to one bank; GLUON's same-bank case tops
   out at the same 2R+1W; BARYON needs only 1R from each of R/G/B plus
-  1W to N; LOAD/STORE/JAL/HALT all need less).
+  1W to N; LOAD/STORE/JAL/HALT all need less). **This claim is true
+  PER CYCLE, not per instruction** - `QHAD`/`QCNOT` (see above) each
+  need 4 registers of the `R` bank across their whole 5-cycle sequence,
+  spread across multiple cycles via a dedicated multi-cycle sequencer
+  in `cpu_core.v` rather than exceeding the port count in any single
+  cycle. They are the first instructions in this ISA that need more
+  than one cycle to retire.
 - **One parameterized register-file module, instantiated 4 times**
   (address width 3, depth 8, optional hardwired-register-0 parameter
   for N only) rather than four near-duplicate files - R/G/B/N are

@@ -150,7 +150,7 @@ module cpu_core #(
 
     wire [31:0] instr_fetched;
     instr_mem #(.MEM_WORDS(INSTR_MEM_WORDS), .INIT_FILE(INSTR_INIT_FILE), .SYNC_READ(1)) imem (
-        .clk(clk), .addr(pc), .stall(mem_stall), .instr(instr_fetched)
+        .clk(clk), .addr(pc), .stall(cpu_stall), .instr(instr_fetched)
     );
     wire [31:0] instr = squash_r ? 32'b0 : instr_fetched;
 
@@ -197,6 +197,10 @@ module cpu_core #(
     wire        ptb_dir;
     wire [2:0]  ptb_nreg;
 
+    wire        is_qhad, qhad_qubit, qhad_half;
+    wire        is_qcnot, qcnot_ctrl;
+    wire [2:0]  q_reg_i, q_reg_j;
+
     wire [1:0]  write_bank;
     wire [2:0]  write_addr;
     wire        reg_write, illegal;
@@ -220,6 +224,9 @@ module cpu_core #(
         .is_rft(is_rft), .is_syscall(is_syscall), .is_mvsr(is_mvsr),
         .mvsr_dir(mvsr_dir), .mvsr_selreg(mvsr_selreg), .mvsr_nreg(mvsr_nreg),
         .is_ptb(is_ptb), .ptb_dir(ptb_dir), .ptb_nreg(ptb_nreg),
+        .is_qhad(is_qhad), .qhad_qubit(qhad_qubit), .qhad_half(qhad_half),
+        .is_qcnot(is_qcnot), .qcnot_ctrl(qcnot_ctrl),
+        .q_reg_i(q_reg_i), .q_reg_j(q_reg_j),
         .write_bank(write_bank), .write_addr(write_addr),
         .reg_write(reg_write), .illegal(illegal)
     );
@@ -232,7 +239,20 @@ module cpu_core #(
 
     always @(*) begin
         r_addr_a = 3'b0; r_addr_b = 3'b0;
-        if (is_gluon) begin
+        if (q_active) begin
+            // The q-sequencer FSM (below) owns R-bank read routing for
+            // its whole multi-cycle sequence - top priority, since
+            // is_qhad/is_qcnot's own `bank` field defaults to 0 (=
+            // BANK_R), which would otherwise incorrectly fall through
+            // to the ALUR/ALUI/BRANCH catch-all below and read
+            // rs1_addr/rs2_addr (also 0-default garbage) instead.
+            if (q_state_r == Q_S1) begin
+                r_addr_a = q_reg_j; r_addr_b = q_reg_j + 3'd1;
+            end else if (q_state_r == Q_IDLE) begin // decode cycle
+                r_addr_a = q_reg_i; r_addr_b = q_reg_i + 3'd1;
+            end
+            // Q_S2/Q_S3/Q_S4: no read needed, defaults above stand.
+        end else if (is_gluon) begin
             case ({gluon_rs1_bank == BANK_R, gluon_rs2_bank == BANK_R})
                 2'b11: begin r_addr_a = gluon_rs1_reg; r_addr_b = gluon_rs2_reg; end
                 2'b10: begin r_addr_a = gluon_rs1_reg; r_addr_b = gluon_rs1_reg; end
@@ -371,10 +391,24 @@ module cpu_core #(
     wire b_write_en = gated_reg_write && (write_bank == BANK_B);
     wire n_write_en = gated_reg_write && (write_bank == BANK_N);
 
+    // R-bank's write port is the ONE place QHAD/QCNOT's q-sequencer
+    // (see the "QHAD / QCNOT" section below) needs its own independent
+    // write path, separate from the normal write_data/write_addr
+    // broadcast: it must write on cycles the sequencer is still busy
+    // (q_stall=1), which gated_reg_write's own "&& !mem_stall"-style
+    // term would otherwise suppress. Safe to just OR q_write_en in and
+    // mux the address/data per-bank ONLY for R: control_unit.v leaves
+    // reg_write=0 for both new opcodes, so gated_reg_write's own
+    // R-bank term is always 0 whenever q_write_en could be 1 - the two
+    // paths never race.
+    wire [2:0]  r_write_addr_final = q_write_en ? q_write_addr : write_addr;
+    wire [31:0] r_write_data_final = q_write_en ? q_write_data : write_data;
+    wire        r_write_en_final   = r_write_en || q_write_en;
+
     regbank #(.HARDWIRE_REG0(0)) r_bank (
         .clk(clk), .rs1_addr(r_addr_a), .rs2_addr(r_addr_b),
         .rs1_data(r_porta_data), .rs2_data(r_portb_data),
-        .rd_addr(write_addr), .rd_data(write_data), .reg_write(r_write_en)
+        .rd_addr(r_write_addr_final), .rd_data(r_write_data_final), .reg_write(r_write_en_final)
     );
     regbank #(.HARDWIRE_REG0(0)) g_bank (
         .clk(clk), .rs1_addr(g_addr_a), .rs2_addr(g_addr_b),
@@ -464,6 +498,109 @@ module cpu_core #(
     wire [31:0] baryon_result = baryon_rr_data + baryon_gg_data + baryon_bb_data;
     wire [31:0] meson_result  = meson_q1_data - meson_q2_data;
 
+    // ==================== QHAD / QCNOT (classical quantum-circuit-
+    // simulator extension - design review before this was written; see
+    // docs/ISA.md's QHAD/QCNOT sections) ====================
+    // AxISA's register banks have exactly 2 read + 1 write port PER
+    // BANK, and only one write port total system-wide (write_data/
+    // write_addr, broadcast to all 4 banks above) - neither QHAD nor
+    // QCNOT can complete in one cycle (each touches 4 R-bank
+    // registers). This is the first multi-cycle instruction sequencer
+    // in this core - proven minimal at 5 cycles (4 writes, 1/cycle,
+    // plus a mandatory write-free first read cycle so nothing is
+    // clobbered before it's read).
+    localparam Q_IDLE = 3'd0, Q_S1 = 3'd1, Q_S2 = 3'd2, Q_S3 = 3'd3, Q_S4 = 3'd4;
+    reg [2:0] q_state_r;
+
+    // Gated only on !halted_r, deliberately NOT nested inside a
+    // !cpu_stall-gated block - it must update WHILE q_stall (derived
+    // from q_state_r itself) is already high, or it would deadlock,
+    // exactly the same reasoning dmem_read_valid_r's own comment above
+    // documents for the identical shape of problem.
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            q_state_r <= Q_IDLE;
+        end else if (!halted_r) begin
+            case (q_state_r)
+                Q_IDLE:  q_state_r <= (is_qhad || is_qcnot) ? Q_S1 : Q_IDLE;
+                Q_S1:    q_state_r <= Q_S2;
+                Q_S2:    q_state_r <= Q_S3;
+                Q_S3:    q_state_r <= Q_S4;
+                Q_S4:    q_state_r <= Q_IDLE;
+                default: q_state_r <= Q_IDLE;
+            endcase
+        end
+    end
+
+    // q_active covers the whole 5-cycle sequence (decode cycle through
+    // the terminal write); q_stall covers only the cycles the rest of
+    // the CPU must stay frozen (everything except the terminal cycle,
+    // which commits its write on the same edge cpu_stall drops - the
+    // same "stall clears the cycle the operation is done" shape
+    // mem_stall's own sub-terms already use).
+    wire q_active = (q_state_r != Q_IDLE) || is_qhad || is_qcnot;
+    wire q_stall  = (q_state_r == Q_S1) || (q_state_r == Q_S2) || (q_state_r == Q_S3) ||
+                     (q_state_r == Q_IDLE && (is_qhad || is_qcnot));
+
+    // Scratch amplitude holding registers: T0/T1 = alpha's Re/Im
+    // (latched from the decode-cycle read), T2/T3 = beta's Re/Im
+    // (latched from the S1-cycle read). Same update-timing reasoning
+    // as q_state_r above.
+    reg [31:0] q_t0, q_t1, q_t2, q_t3;
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            q_t0 <= 32'b0; q_t1 <= 32'b0; q_t2 <= 32'b0; q_t3 <= 32'b0;
+        end else if (!halted_r) begin
+            if (q_state_r == Q_IDLE && (is_qhad || is_qcnot)) begin
+                q_t0 <= r_porta_data; // alpha Re
+                q_t1 <= r_portb_data; // alpha Im
+            end else if (q_state_r == Q_S1) begin
+                q_t2 <= r_porta_data; // beta Re
+                q_t3 <= r_portb_data; // beta Im
+            end
+        end
+    end
+
+    // QHAD's shared arithmetic: new_alpha=(alpha+beta)*k,
+    // new_beta=(alpha-beta)*k, k=1/sqrt(2). One fp_addsub/fp_mul pair,
+    // muxed per-step - "read -> addsub -> mul -> write" fits one cycle
+    // exactly like ALUR's "read -> ALU -> write", so the arithmetic
+    // itself adds zero extra cycles beyond the 5-cycle write-port
+    // floor. QCNOT bypasses both entirely (pure register move).
+    localparam [31:0] Q_INV_SQRT2 = 32'h3F3504F3; // IEEE-754 binary32 for 1/sqrt(2)
+
+    wire [31:0] q_add_a = (q_state_r == Q_S1) ? q_t0 :
+                           (q_state_r == Q_S2) ? q_t1 :
+                           (q_state_r == Q_S3) ? q_t0 :
+                                                  q_t1; // Q_S4
+    wire [31:0] q_add_b = (q_state_r == Q_S1) ? r_porta_data :
+                           (q_state_r == Q_S2) ? q_t3 :
+                           (q_state_r == Q_S3) ? q_t2 :
+                                                  q_t3; // Q_S4
+    wire        q_add_sub = (q_state_r == Q_S3) || (q_state_r == Q_S4); // SUB for beta's new value, ADD for alpha's
+
+    wire [31:0] q_addsub_result;
+    fp_addsub q_fpaddsub (.a(q_add_a), .b(q_add_b), .op_sub(q_add_sub), .result(q_addsub_result));
+
+    wire [31:0] q_mul_result;
+    fp_mul q_fpmul (.a(q_addsub_result), .b(Q_INV_SQRT2), .result(q_mul_result));
+
+    // QCNOT's write value is a pure move: whatever this cycle's R-bank
+    // read (S1) or a scratch flop (S2-S4) already holds - no
+    // arithmetic involved.
+    wire [31:0] q_qcnot_write_data = (q_state_r == Q_S1) ? r_porta_data :
+                                      (q_state_r == Q_S2) ? q_t3 :
+                                      (q_state_r == Q_S3) ? q_t0 :
+                                                             q_t1; // Q_S4
+
+    wire        q_write_en   = (q_state_r == Q_S1) || (q_state_r == Q_S2) ||
+                                (q_state_r == Q_S3) || (q_state_r == Q_S4);
+    wire [2:0]  q_write_addr = (q_state_r == Q_S1) ? q_reg_i :
+                                (q_state_r == Q_S2) ? (q_reg_i + 3'd1) :
+                                (q_state_r == Q_S3) ? q_reg_j :
+                                                       (q_reg_j + 3'd1); // Q_S4
+    wire [31:0] q_write_data = is_qcnot ? q_qcnot_write_data : q_mul_result;
+
     // ==================== Data memory (LOAD/STORE) ====================
     wire [31:0] mem_addr  = mem_base_data + mem_imm;
 
@@ -510,7 +647,7 @@ module cpu_core #(
     // retires (mirrors the trap-entry always block's own !mem_stall/
     // !any_trap gating below - a PTB write that instead traps for
     // privilege violation must NOT be treated as "PTB changed").
-    wire ptb_changed = is_ptb && ptb_dir && !mem_stall && !any_trap;
+    wire ptb_changed = is_ptb && ptb_dir && !cpu_stall && !any_trap;
     wire [31:0] ptb_write_value = n_porta_data;
 
     wire [31:0] mmu_paddr;
@@ -564,6 +701,15 @@ module cpu_core #(
     // below needs no separate change for this new stall source - it's
     // already only ever reached once mem_stall has cleared.
     wire mem_stall = (is_shared_access && !bus_grant) || mmu_stall || dmem_load_stall;
+
+    // cpu_stall = "freeze the whole CPU this cycle", the general form
+    // mem_stall alone used to be. Kept as a SEPARATE wire rather than
+    // folded into mem_stall's own definition: mem_stall must stay
+    // purely about the memory/MMU/bus subsystem (QHAD/QCNOT never
+    // touch memory, so mem_stall's own components are provably always
+    // 0 whenever q_stall is 1) - see the "QHAD / QCNOT" section above
+    // for q_stall's definition.
+    wire cpu_stall = mem_stall || q_stall;
 
     // Walker's own PTE fetch takes priority (its read must land on
     // data_mem's shared port); otherwise a translated user-mode access
@@ -689,7 +835,20 @@ module cpu_core #(
     // cleared). Deferring by exactly one cycle (irq_pending stays
     // latched) is safe and needs no special-casing for whether this
     // particular LOAD/STORE actually stalled at all.
-    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store);
+    // QHAD/QCNOT's terminal cycle (q_state_r==Q_S4, where q_stall
+    // drops to 0 and the sequencer's own last write commits) has the
+    // exact same same-cycle-completion race as a LOAD/STORE's own
+    // mem_stall-clearing cycle (see the comment above irq_taken):
+    // without excluding is_qhad/is_qcnot here too, an IRQ landing
+    // exactly on that cycle would trap with epc_r pointing at the
+    // QHAD/QCNOT instruction itself, and RFT would later re-execute
+    // the WHOLE 5-cycle sequence from scratch - reading its own
+    // already-mutated R-bank registers as if they were fresh inputs,
+    // silently producing wrong amplitudes. Since is_qhad/is_qcnot stay
+    // asserted for the full 5-cycle sequence (instr frozen throughout
+    // by cpu_stall), this defers the IRQ across the entire sequence,
+    // exactly mirroring the LOAD/STORE precedent.
+    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot);
 
     wire [2:0] next_cause = illegal        ? CAUSE_ILLEGAL :
                              is_syscall     ? CAUSE_SYSCALL :
@@ -776,7 +935,7 @@ module cpu_core #(
             saved_ie_r   <= 1'b0;
             ptb_r        <= 32'b0;
             squash_r     <= 1'b1; // warm-up bubble - instr_mem/pc_r not primed yet
-        end else if (!halted_r && !mem_stall) begin
+        end else if (!halted_r && !cpu_stall) begin
             // pc_r must advance in EXACT lockstep with this whole block
             // (only when a new instruction is genuinely being retired/
             // decided), not on its own unconditional clock - a real bug

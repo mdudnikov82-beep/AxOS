@@ -1,0 +1,38 @@
+# AxISA traps: external IRQ arriving exactly on QHAD's terminal cycle
+# (see cpu_core.v's own `any_trap` comment for the exact race this
+# guards against - the same class of same-cycle race trap_irq_stall.
+# axasm already proved for LOAD/STORE, now for the new q-sequencer).
+# Bootstrap idiom mirrors trap_irq_stall.axasm exactly (MTSIE/MTSMODE/
+# MTEPC/RFT to reach `continue` with ie_r=1).
+#
+# The testbench pulses irq_in exactly on the cycle dut.q_state_r==4
+# (Q_S4, QHAD's terminal write cycle). If cpu_core.v's any_trap fix is
+# correct, the trap is deferred until word index 10 (addr 0x28, the
+# plain ADDI right after QHAD) - NOT taken against QHAD's own address
+# (0x24) - and QHAD's own results (r0/r2) must be the correct,
+# uncorrupted amplitudes, proving the whole 5-cycle sequence completed
+# for real before the trap was allowed to land.
+    ADDI N1, N0, 1
+    MTSIE N1
+    ADDI N1, N0, 1
+    MTSMODE N1
+    ADDI N1, N0, 0x1C       # continue's address (word index 7)
+    MTEPC N1
+    RFT
+
+continue:
+    ADDI R0, R0, 0x3F80     # word index 7, addr 0x1C
+    SLLI R0, R0, 16          # word index 8, addr 0x20 - r0 = 1.0f
+    QHAD 0, 0                # word index 9, addr 0x24 - irq_in pulses on its Q_S4 cycle
+    ADDI N6, N0, 1           # word index 10, addr 0x28 - must NOT commit before the deferred IRQ fires
+finish:
+    ADDI N7, N0, 66          # word index 11, addr 0x2C
+    HALT N7
+
+.org 0x200
+handler:
+    MFCAUSE N3               # n3 = cause (expect 2 = external IRQ)
+    MFEPC N4                 # n4 = epc (expect 0x28 - proves QHAD completed first)
+    ADDI N5, N0, 0x2C        # n5 = finish's address (word index 11)
+    MTEPC N5
+    RFT

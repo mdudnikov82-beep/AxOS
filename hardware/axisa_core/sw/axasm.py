@@ -22,7 +22,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb,
+    rft, syscall, mvsr, ptb, qhad, qcnot,
     write_hex,
 )
 
@@ -219,6 +219,27 @@ def encode_one(mnemonic, ops, iaddr, labels):
         nreg_bank, nreg = parse_reg(ops[0])
         require_bank(nreg_bank, nreg, N, m, "operand")
         return ptb(direction, nreg)
+
+    # QHAD/QCNOT (classical quantum-circuit-simulator extension - see
+    # docs/ISA.md's QHAD/QCNOT sections). No register operands at all -
+    # like BARYON's implicit rr/gg/bb, the actual R-bank addresses are
+    # resolved in hardware from these small selector immediates.
+    if m == 'QHAD':
+        if len(ops) != 2:
+            raise AsmError("QHAD: expected 2 operands (qubit, half)")
+        qubit = parse_imm(ops[0])
+        half = parse_imm(ops[1])
+        if qubit not in (0, 1) or half not in (0, 1):
+            raise AsmError("QHAD: qubit and half must each be 0 or 1")
+        return qhad(qubit, half)
+
+    if m == 'QCNOT':
+        if len(ops) != 1:
+            raise AsmError("QCNOT: expected 1 operand (ctrl)")
+        ctrl = parse_imm(ops[0])
+        if ctrl not in (0, 1):
+            raise AsmError("QCNOT: ctrl must be 0 or 1")
+        return qcnot(ctrl)
 
     raise AsmError(f"unknown mnemonic '{mnemonic}'")
 

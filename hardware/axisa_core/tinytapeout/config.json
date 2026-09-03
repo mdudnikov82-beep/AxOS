@@ -1,5 +1,5 @@
 {
-    "DESIGN_NAME": "cpu_core_top",
+    "DESIGN_NAME": "tt_um_axisa_core",
     "VERILOG_FILES": [
         "dir::../rtl/alu.v",
         "dir::../rtl/regbank.v",
@@ -10,10 +10,10 @@
         "dir::../rtl/fp_mul.v",
         "dir::../rtl/mmu.v",
         "dir::../rtl/cpu_core.v",
-        "dir::cpu_core_top.v"
+        "dir::tt_um_axisa_core.v"
     ],
     "CLOCK_PORT": "clk",
-    "CLOCK_PERIOD": 21.8125,
+    "CLOCK_PERIOD": 50,
     "FP_SIZING": "absolute",
-    "DIE_AREA": "0 0 300 300"
+    "DIE_AREA": "0 0 320 200"
 }

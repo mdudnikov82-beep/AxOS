@@ -95,3 +95,6 @@ dkms.conf
 
 # OpenLane2 ASIC-flow build output (hardware/axisa_core/asic)
 hardware/axisa_core/asic/runs/
+
+# OpenLane2 Tiny Tapeout wrapper build output (hardware/axisa_core/tinytapeout)
+hardware/axisa_core/tinytapeout/runs/

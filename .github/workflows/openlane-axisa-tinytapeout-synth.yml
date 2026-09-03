@@ -1,0 +1,62 @@
+name: AxISA Tiny Tapeout Wrapper Synthesis (OpenLane2 / sky130)
+
+# Tiny Tapeout step of the AxISA-to-ASIC roadmap - see
+# hardware/axisa_core/tinytapeout/README.md for full context. This is
+# a SEPARATE design from the asic/ flow (openlane-axisa-synth.yml):
+# tt_um_axisa_core.v adapts cpu_core down to Tiny Tapeout's fixed
+# 24-pin interface and bakes in a permanently-looping UART shell
+# instead of cpu_core.v's/asic/'s minimal one-shot test program. This
+# workflow only checks the wrapper fits a real OpenLane run (area/DRC/
+# LVS/timing) - it does NOT submit anything to a real Tiny Tapeout
+# shuttle.
+on:
+  workflow_dispatch:
+
+jobs:
+  synth:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Nix build cache (this project's own GH Actions cache, separate from OpenLane's Cachix)
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Show runner resources
+        run: |
+          df -h .
+          free -h
+
+      - name: Generate sw/mini_shell_loop.hex (gitignored - *.hex, must be built fresh)
+        working-directory: hardware/axisa_core
+        run: |
+          python3 sw/axasm.py sw/mini_shell_loop.axasm sw/mini_shell_loop.hex
+          ls -la sw/mini_shell_loop.hex
+
+      - name: OpenLane2 flow - tt_um_axisa_core.v under sky130
+        working-directory: hardware/axisa_core/tinytapeout
+        run: |
+          nix run --accept-flake-config \
+            github:efabless/openlane2#openlane -- \
+            --pdk-root "$HOME/.volare" \
+            config.json
+
+      - name: Show disk usage after
+        if: always()
+        run: |
+          df -h .
+          du -sh "$HOME/.volare" 2>/dev/null || true
+          du -sh /nix/store 2>/dev/null || true
+
+      - name: Upload OpenLane run directory (logs, reports, final views)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: axisa-tinytapeout-openlane-run
+          path: hardware/axisa_core/tinytapeout/runs/
+          if-no-files-found: warn

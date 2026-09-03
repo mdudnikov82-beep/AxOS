@@ -100,6 +100,22 @@ module control_unit (
     output reg          ptb_dir,      // 0=read (PTB->N), 1=write (N->PTB)
     output reg  [2:0]  ptb_nreg,
 
+    // QHAD / QCNOT - classical quantum-circuit-simulator extension (see
+    // docs/ISA.md's QHAD/QCNOT sections). Both only ever touch the R
+    // bank; the actual register addresses are resolved HERE from a
+    // small selector field (like BARYON's implicit rr/gg/bb), not
+    // instruction-encoded directly. reg_write is intentionally left 0
+    // for both - the write path is entirely the new multi-cycle
+    // q-sequencer FSM in cpu_core.v, not the normal single-cycle write
+    // path this module drives for every other opcode.
+    output reg          is_qhad,
+    output reg          qhad_qubit,   // which qubit the Hadamard acts on
+    output reg          qhad_half,    // which of the 2 independent amplitude-pairs for that qubit
+    output reg          is_qcnot,
+    output reg          qcnot_ctrl,   // which qubit is the control (the other is the target)
+    output reg  [2:0]  q_reg_i,      // "Re" address of amplitude alpha (Im = q_reg_i+1)
+    output reg  [2:0]  q_reg_j,      // "Re" address of amplitude beta  (Im = q_reg_j+1)
+
     // Resolved write target (valid whenever reg_write=1)
     output reg  [1:0]  write_bank,
     output reg  [2:0]  write_addr,
@@ -121,6 +137,8 @@ module control_unit (
     localparam OP_SYSCALL = 5'b01011;
     localparam OP_MVSR   = 5'b01100;
     localparam OP_PTB    = 5'b01101;
+    localparam OP_QHAD   = 5'b01110;
+    localparam OP_QCNOT  = 5'b01111;
 
     localparam BANK_N = 2'b11;
 
@@ -178,6 +196,14 @@ module control_unit (
         is_ptb         = 1'b0;
         ptb_dir        = 1'b0;
         ptb_nreg       = 3'b0;
+
+        is_qhad        = 1'b0;
+        qhad_qubit     = 1'b0;
+        qhad_half      = 1'b0;
+        is_qcnot       = 1'b0;
+        qcnot_ctrl     = 1'b0;
+        q_reg_i        = 3'b0;
+        q_reg_j        = 3'b0;
 
         write_bank     = 2'b0;
         write_addr     = 3'b0;
@@ -331,6 +357,43 @@ module control_unit (
                     write_addr = ptb_nreg;
                     reg_write  = 1'b1;
                 end
+            end
+
+            OP_QHAD: begin
+                // Amplitude layout (R bank): amp0=(r0,r1) amp1=(r2,r3)
+                // amp2=(r4,r5) amp3=(r6,r7), amplitude index = {q1,q0}.
+                // qhad_qubit selects WHICH qubit's Hadamard butterfly
+                // (q0 pairs differ only in bit0, q1 pairs differ only
+                // in bit1); qhad_half selects which of the 2
+                // independent pairs for that qubit. Both bits are
+                // always meaningful (all 4 encodings used) - no
+                // illegal case, same style as GLUON's fully-populated
+                // funct field.
+                is_qhad    = 1'b1;
+                qhad_qubit = instr[26];
+                qhad_half  = instr[25];
+                case ({qhad_qubit, qhad_half})
+                    2'b00: begin q_reg_i = 3'd0; q_reg_j = 3'd2; end // qubit0,half0: amp0<->amp1
+                    2'b01: begin q_reg_i = 3'd4; q_reg_j = 3'd6; end // qubit0,half1: amp2<->amp3
+                    2'b10: begin q_reg_i = 3'd0; q_reg_j = 3'd4; end // qubit1,half0: amp0<->amp2
+                    2'b11: begin q_reg_i = 3'd2; q_reg_j = 3'd6; end // qubit1,half1: amp1<->amp3
+                endcase
+                // no reg_write - the q-sequencer FSM in cpu_core.v owns R-bank writes for this opcode
+            end
+
+            OP_QCNOT: begin
+                // A real CNOT's control=0 branch is identity (nothing
+                // to represent), so with 2 qubits there are only 2
+                // real (control,target) assignments - both encodings
+                // meaningful, no illegal case.
+                is_qcnot   = 1'b1;
+                qcnot_ctrl = instr[26];
+                if (!qcnot_ctrl) begin
+                    q_reg_i = 3'd2; q_reg_j = 3'd6; // control=q0: swap amp1<->amp3
+                end else begin
+                    q_reg_i = 3'd4; q_reg_j = 3'd6; // control=q1: swap amp2<->amp3
+                end
+                // no reg_write - the q-sequencer FSM in cpu_core.v owns R-bank writes for this opcode
             end
 
             default: begin

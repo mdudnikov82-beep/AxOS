@@ -62,6 +62,7 @@ jobs:
         run: |
           time iverilog -o out_soc_mesh.vvp \
             rtl/alu.v rtl/regbank.v rtl/instr_mem.v rtl/data_mem.v rtl/control_unit.v \
+            rtl/fp_addsub.v rtl/fp_mul.v \
             rtl/cpu_core.v rtl/mmu.v rtl/shared_mem_backing.v rtl/router.v \
             rtl/noc_core_adapter.v rtl/noc_mem_adapter.v rtl/soc_top.v tb/tb_soc.v
 
