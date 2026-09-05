@@ -136,9 +136,7 @@ jobs:
           LIB=$(find "$HOME/.volare" -iname 'sky130_fd_sc_hd__tt_025C_1v80.lib' | head -1)
           echo "All *.tlef files found under the PDK (diagnostic, in case the exact name guess below is wrong):"
           find "$HOME/.volare" -iname '*.tlef'
-          echo "Any *.lef under the run's own final views (diagnostic):"
-          find "$RUN_DIR/final" -iname '*.lef' 2>/dev/null || true
-          TECH_LEF=$(find "$HOME/.volare" -iname '*.tlef' | head -1)
+          TECH_LEF=$(find "$HOME/.volare" -iname 'sky130_fd_sc_hd__nom.tlef' | head -1)
           CELL_LEF=$(find "$HOME/.volare" -iname 'sky130_fd_sc_hd.lef' | head -1)
           echo "NETLIST=$NETLIST"
           echo "SDC=$SDC"
@@ -159,7 +157,6 @@ jobs:
           read_sdc $SDC
           read_spef $SPEF
           read_vcd -scope tb_gatelevel_power/dut gl_power.vcd
-          report_activity_annotation
           report_power
           TCL_EOF
           nix run --accept-flake-config \
