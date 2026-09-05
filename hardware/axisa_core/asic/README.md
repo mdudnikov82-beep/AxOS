@@ -136,18 +136,98 @@ deliberate fix) - still an open, disclosed, unfixed item at the final
 manufacturability report before relying on antenna-clean for any
 given commit).
 
+## RESOLVED (2026-09-05): re-synthesized after QHAD/QCNOT + FPU - real growth, new Fmax = 18.18 MHz, real power number
+
+`cpu_core.v` grew a real FPU (`fp_addsub.v`/`fp_mul.v`, ported from
+`rv32i_core`) plus its first-ever multi-cycle instruction sequencer
+(QHAD/QCNOT - see `docs/ISA.md`) since the 45.7MHz result above was
+measured. That FPU/sequencer hardware is real combinational logic
+present in the netlist regardless of whether the loaded program (still
+`test1.hex`, which never executes QHAD/QCNOT) ever exercises it - not
+a memory-content-dependent effect like the Tiny Tapeout wrapper's own
+overage (see `tinytapeout/README.md`).
+
+**Real consequences, found via 2 more real dispatch failures before
+this passed**:
+1. **`[GPL-0301] Utilization 107.297% exceeds`** - the design no
+   longer fit the old 300×300µm (90,000µm²) floorplan at all, even at
+   the SAME 47.5%-utilization test1.hex program that used to fit
+   comfortably. Fixed by enlarging `DIE_AREA` to `"0 0 450 450"`
+   (202,500µm², ~2.25x) - real headroom confirmed by the final
+   ~41% utilization achieved.
+2. **The old 45.7MHz Fmax no longer held** - even a conservative
+   50ns/20MHz retry failed real timing (`RSZ-0062`, WNS=**-3.803ns**
+   after the resizer's best effort) - the FPU's `fp_mul`→`fp_addsub`
+   chain (a real 24×24 multiply feeding a float add/sub, both
+   combinational, in QHAD's one-cycle-per-step datapath) is
+   significantly longer than the old ALU-only critical path.
+3. **A real, unrelated infrastructure failure mid-bisection**: `volare`
+   (the sky130 PDK downloader) hit `403 rate limit exceeded` from
+   `api.github.com/repos/efabless/volare/releases` - every dispatch was
+   re-downloading the whole PDK from GitHub's release API with no
+   caching, and several dispatches in a short bisection window
+   exhausted GitHub's anonymous rate limit. Fixed by adding
+   `actions/cache@v4` on `~/.volare` (keyed loosely - a stale/missing
+   cache just means volare re-fetches, same as before, never worse) to
+   `.github/workflows/openlane-axisa-synth.yml`.
+
+**New confirmed numbers**:
+- **7,568 standard cells, 83,637.72 µm²** (up from 3,614 cells/42,741
+  µm² - real, expected growth from the FPU + sequencer, not a bug) -
+  ~41% utilization of the new 202,500µm² die.
+- **DRC: Passed ✅ / LVS: Passed ✅ / Antenna: Failed ✗** (same
+  pre-existing, disclosed, unfixed issue as before - 15 pin + 9 net
+  violations at this configuration).
+- **Real Fmax bisected to CLOCK_PERIOD=55ns = 18.18 MHz** (confirmed
+  via the same RSZ-0062/RSZ-0099 discriminator this project already
+  established): 50ns FAILS (RSZ-0062, WNS=-3.803ns); 55ns **PASSES**
+  cleanly (`RSZ-0099`: 248/248 endpoints repaired, no RSZ-0062). Not
+  narrowed further than this 5ns bracket - locked in at 55ns as the
+  honest, real, signed-off value rather than continuing to bisect for
+  marginal precision.
+- **Real power (OpenROAD `report_power`, vectorless default switching
+  activity - a first real number, not a representative-workload
+  number)** at the locked-in 55ns/18.18MHz config:
+
+  | Group | Internal | Switching | Leakage | Total | Share |
+  |---|---|---|---|---|---|
+  | Sequential | 1.49e-03 W | 2.73e-04 W | ~0 | ~1.8mW | small |
+  | Combinational | dominant | dominant | ~0 | dominant | ~99% |
+  | Clock | small | small | ~0 | small | ~0.3% |
+  | **Total** | 8.18e-02 W | 1.08e-01 W | 5.80e-08 W | **≈190 mW** | 100% |
+
+  (At the earlier-tried, timing-failing 50ns/20MHz point the same
+  report gave ≈217mW - higher, consistent with dynamic power scaling
+  with frequency; the 55ns/190mW number above is the one to cite, since
+  it's the one with clean, real timing signoff behind it.)
+
+**Honest caveat for any external use of this power number** (e.g. a
+grant/pitch context): "vectorless default activity" is OpenSTA's
+generic statistical estimate, not derived from this core's real
+program behavior - a credible next step, not yet done, would be a real
+gate-level simulation with a representative program, feeding its VCD
+into `report_power` via `read_vcd`, for an activity-driven (not just
+default) number.
+
 ## Still open (real, disclosed, not yet worked on)
 
 1. **No SRAM macro** - `instr_mem`/`data_mem` synthesized as plain
    flip-flops via `sky130_fd_sc_hd` (no on-chip memory macro exists in
    this flow yet - would need OpenRAM or a pre-hardened SRAM IP, a
-   separate, larger follow-up). The 3,614-cell/42,741µm² result above
-   already includes this real cost, it isn't hidden.
+   separate, larger follow-up). The 7,568-cell/83,637.72µm² result
+   above already includes this real cost, it isn't hidden.
 2. **Antenna violations** - real, present in at least some
-   configurations (see table above), not deliberately fixed.
+   configurations (see tables above), not deliberately fixed.
 3. **Fmax found is specific to this exact floorplan/DIE_AREA/placement
    configuration** - a different floorplan (e.g. after fixing antenna,
    or after a real PDN/pin-order pass) could shift the real number
    somewhat in either direction; this isn't a fundamental, PDK-wide
    ceiling, just the honest result for this specific synthesis
    configuration.
+4. **Power number is vectorless/default-activity, not workload-driven**
+   - a real gate-level-simulation VCD fed into `report_power` via
+   `read_vcd` would give a more representative, more credible number
+   for any external (e.g. grant/pitch) use.
+5. **55ns Fmax is only bounded to a 5ns bracket** (50ns fails, 55ns
+   passes) - not narrowed further by choice, not because tighter
+   bisection isn't possible.
