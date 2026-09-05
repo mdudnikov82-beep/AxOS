@@ -44,6 +44,37 @@ jobs:
             --pdk-root "$HOME/.volare" \
             config.json
 
+      - name: Report power (OpenROAD report_power - first real number, vectorless default activity)
+        working-directory: hardware/axisa_core/asic
+        run: |
+          set -o pipefail
+          RUN_DIR=$(ls -td runs/RUN_* | head -1)
+          echo "Using run: $RUN_DIR"
+          ODB=$(find "$RUN_DIR/final/odb" -name '*.odb' | head -1)
+          SDC=$(find "$RUN_DIR/final/sdc" -name '*.sdc' | head -1)
+          SPEF=$(find "$RUN_DIR/final/spef" -name '*.spef' | head -1)
+          LIB=$(find "$HOME/.volare" -iname 'sky130_fd_sc_hd__tt_025C_1v80.lib' | head -1)
+          echo "ODB=$ODB"
+          echo "SDC=$SDC"
+          echo "SPEF=$SPEF"
+          echo "LIB=$LIB"
+          if [ -z "$ODB" ] || [ -z "$LIB" ]; then
+            echo "Could not locate required final views or PDK liberty file - see paths above (empty = not found). Real diagnosis needed, not a guess to paper over."
+            exit 1
+          fi
+          cat > power_report.tcl <<TCL_EOF
+          read_lib $LIB
+          read_db $ODB
+          read_sdc $SDC
+          read_spef $SPEF
+          report_power
+          TCL_EOF
+          nix run --accept-flake-config \
+            github:efabless/openlane2#openroad -- \
+            -exit -no_init power_report.tcl 2>&1 | tee power_report.log
+          echo "---"
+          tail -40 power_report.log
+
       - name: Show disk usage after
         if: always()
         run: |
@@ -56,5 +87,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: axisa-cpu-core-openlane-run
-          path: hardware/axisa_core/asic/runs/
+          path: |
+            hardware/axisa_core/asic/runs/
+            hardware/axisa_core/asic/power_report.log
           if-no-files-found: warn
