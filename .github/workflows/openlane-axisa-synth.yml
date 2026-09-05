@@ -25,6 +25,21 @@ jobs:
       - name: Nix build cache (this project's own GH Actions cache, separate from OpenLane's Cachix)
         uses: DeterminateSystems/magic-nix-cache-action@main
 
+      - name: Cache the sky130 PDK (volare) - avoid re-hitting GitHub's release API every dispatch
+        # A real, repeated failure (not guessed): "403 rate limit exceeded" from
+        # https://api.github.com/repos/efabless/volare/releases/... - every
+        # dispatch was re-downloading the whole PDK from GitHub's release API
+        # with no caching, and enough dispatches in a short window (this
+        # bisection) exhausted GitHub's anonymous rate limit. Keyed loosely
+        # (not on an exact PDK commit hash, which isn't known ahead of a run) -
+        # a stale cache just means volare re-fetches whatever's missing, same
+        # as no cache at all, so this can't make a run WORSE, only faster/less
+        # rate-limited when it hits.
+        uses: actions/cache@v4
+        with:
+          path: ~/.volare
+          key: volare-pdk-sky130-v1
+
       - name: Show runner resources
         run: |
           df -h .
