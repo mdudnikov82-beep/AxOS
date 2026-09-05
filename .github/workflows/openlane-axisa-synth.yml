@@ -90,6 +90,70 @@ jobs:
           echo "---"
           tail -40 power_report.log
 
+      - name: Install Icarus Verilog (for real gate-level simulation)
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+
+      - name: Real gate-level simulation - generate a workload-driven VCD
+        # The vectorless "Report power" step above uses OpenSTA's own
+        # generic statistical switching activity, not this core's real
+        # program behavior - a real gate-level simulation of the
+        # SYNTHESIZED netlist (not RTL - net names must match what
+        # OpenSTA loads) gives a genuine, workload-driven VCD instead.
+        # Recipe confirmed from OpenSTA's own examples/power_vcd.tcl
+        # and community sky130 gate-level-sim practice (not guessed):
+        # sky130_fd_sc_hd's behavioral Verilog models need a companion
+        # primitives.v (UDP definitions, e.g. udp_pwrgood) to compile
+        # under Icarus.
+        working-directory: hardware/axisa_core/asic
+        run: |
+          set -o pipefail
+          RUN_DIR=$(ls -td runs/RUN_* | head -1)
+          NETLIST=$(find "$RUN_DIR/final/nl" -name '*.v' | head -1)
+          PRIMITIVES=$(find "$HOME/.volare" -iname 'primitives.v' -path '*sky130_fd_sc_hd*' | head -1)
+          CELLS=$(find "$HOME/.volare" -iname 'sky130_fd_sc_hd.v' | head -1)
+          echo "NETLIST=$NETLIST"
+          echo "PRIMITIVES=$PRIMITIVES"
+          echo "CELLS=$CELLS"
+          if [ -z "$NETLIST" ] || [ -z "$PRIMITIVES" ] || [ -z "$CELLS" ]; then
+            echo "Could not locate the gate-level netlist or PDK Verilog models - see paths above (empty = not found). Real diagnosis needed, not a guess to paper over."
+            exit 1
+          fi
+          iverilog -o gl_power_tb.vvp -g2012 -DFUNCTIONAL -DSIM -DGL -DUNIT_DELAY="#1" \
+            "$PRIMITIVES" "$CELLS" "$NETLIST" tb_gatelevel_power.v
+          vvp gl_power_tb.vvp | tee gl_power_sim.log
+          echo "---"
+          tail -20 gl_power_sim.log
+          grep -q "ALL AXISA GATE-LEVEL POWER TESTS PASSED" gl_power_sim.log
+
+      - name: Report power (OpenROAD report_power - real workload-driven VCD activity)
+        working-directory: hardware/axisa_core/asic
+        run: |
+          set -o pipefail
+          RUN_DIR=$(ls -td runs/RUN_* | head -1)
+          NETLIST=$(find "$RUN_DIR/final/nl" -name '*.v' | head -1)
+          SDC=$(find "$RUN_DIR/final/sdc" -name '*.sdc' | head -1)
+          SPEF=$(find "$RUN_DIR/final/spef" -name '*.spef' | head -1)
+          LIB=$(find "$HOME/.volare" -iname 'sky130_fd_sc_hd__tt_025C_1v80.lib' | head -1)
+          echo "NETLIST=$NETLIST"
+          echo "SDC=$SDC"
+          echo "SPEF=$SPEF"
+          echo "LIB=$LIB"
+          cat > power_report_vcd.tcl <<TCL_EOF
+          read_liberty $LIB
+          read_verilog $NETLIST
+          link_design cpu_core_top
+          read_sdc $SDC
+          read_spef $SPEF
+          read_vcd -scope tb_gatelevel_power/dut gl_power.vcd
+          report_activity_annotation
+          report_power
+          TCL_EOF
+          nix run --accept-flake-config \
+            github:efabless/openlane2#openroad -- \
+            -exit -no_init power_report_vcd.tcl 2>&1 | tee power_report_vcd.log
+          echo "---"
+          tail -60 power_report_vcd.log
+
       - name: Show disk usage after
         if: always()
         run: |
@@ -105,4 +169,7 @@ jobs:
           path: |
             hardware/axisa_core/asic/runs/
             hardware/axisa_core/asic/power_report.log
+            hardware/axisa_core/asic/gl_power_sim.log
+            hardware/axisa_core/asic/power_report_vcd.log
+            hardware/axisa_core/asic/gl_power.vcd
           if-no-files-found: warn
