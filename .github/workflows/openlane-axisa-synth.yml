@@ -134,7 +134,11 @@ jobs:
           SDC=$(find "$RUN_DIR/final/sdc" -name '*.sdc' | head -1)
           SPEF=$(find "$RUN_DIR/final/spef" -name '*.spef' | head -1)
           LIB=$(find "$HOME/.volare" -iname 'sky130_fd_sc_hd__tt_025C_1v80.lib' | head -1)
-          TECH_LEF=$(find "$HOME/.volare" -iname 'sky130_fd_sc_hd.tlef' | head -1)
+          echo "All *.tlef files found under the PDK (diagnostic, in case the exact name guess below is wrong):"
+          find "$HOME/.volare" -iname '*.tlef'
+          echo "Any *.lef under the run's own final views (diagnostic):"
+          find "$RUN_DIR/final" -iname '*.lef' 2>/dev/null || true
+          TECH_LEF=$(find "$HOME/.volare" -iname '*.tlef' | head -1)
           CELL_LEF=$(find "$HOME/.volare" -iname 'sky130_fd_sc_hd.lef' | head -1)
           echo "NETLIST=$NETLIST"
           echo "SDC=$SDC"
