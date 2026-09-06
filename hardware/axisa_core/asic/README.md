@@ -209,6 +209,59 @@ gate-level simulation with a representative program, feeding its VCD
 into `report_power` via `read_vcd`, for an activity-driven (not just
 default) number.
 
+## RESOLVED (2026-09-05): real workload-driven power via gate-level VCD simulation
+
+The vectorless number above is OpenSTA's generic statistical estimate,
+not this core's real behavior. Got a genuinely real one instead: a
+gate-level (not RTL) Icarus simulation of the actual SYNTHESIZED
+netlist (`runs/.../final/nl/cpu_core_top.nl.v`) against sky130's own
+behavioral Verilog models (`primitives.v` + `sky130_fd_sc_hd.v`),
+driving `test1.hex` for real and dumping a VCD - fed into OpenROAD's
+`report_power` via `read_vcd -scope`. New files: `tb_gatelevel_power.v`
+(also doubles as a real functional gate-level-vs-RTL equivalence check
+- confirmed `tohost=200`, matching the RTL testbenches exactly, not
+just "didn't crash"), new steps in `.github/workflows/openlane-axisa-
+synth.yml` (install `iverilog`, run the gate-level sim, run the
+VCD-driven `report_power`).
+
+**3 real, sequential dispatch failures before this worked, each
+diagnosed from actual output, not guessed**:
+1. `[ERROR ORD-2010] no technology has been read` - `openroad`'s own
+   `read_verilog` (unlike the earlier `read_db`-based vectorless step,
+   which loads a self-contained database with technology baked in)
+   needs an explicit `read_lef` first.
+2. The `*.tlef` glob picked an unrelated `sky130_fd_sc_hvl` techlef
+   instead of the correct `sky130_fd_sc_hd__nom.tlef` - harmless this
+   time (same underlying process layers), but fixed to the correct
+   file once its real name was visible in a diagnostic listing.
+3. `report_activity_annotation` isn't a real OpenROAD/OpenSTA command
+   (removed - was a nice-to-have diagnostic, not needed for
+   `report_power` itself; `read_lef`/`read_verilog`/`link_design`/
+   `read_sdc`/`read_spef`/`read_vcd` had all already succeeded by the
+   time this failed).
+
+**Real result: Total ≈ 2.46 mW** (1.37e-03 W internal + 1.09e-03 W
+switching + 6.19e-08 W leakage) - **dramatically lower** than the
+190mW vectorless estimate above, and this is itself a real, honest,
+non-obvious finding, not a discrepancy to paper over:
+
+- `test1.hex` is a tiny 15-instruction program that halts almost
+  immediately - the VCD capture window is dominated by the chip
+  sitting idle in its post-`HALT` state, not sustained real switching.
+- OpenSTA's vectorless default instead assumes some baseline
+  statistical toggle rate on every signal for the whole analysis - a
+  generic, more conservative "worst case shape" estimate, not a
+  measurement of any specific program's real behavior.
+
+**Neither number alone is "the" credible one for external use** (e.g.
+a grant/competition submission) - 190mW is a generic upper-bound-style
+estimate, 2.46mW reflects a near-idle chip running a trivial one-shot
+program. A genuinely representative number would need a longer,
+computationally-active program (e.g. the looping UART shell,
+`sw/mini_shell_loop.axasm`, or a real compute loop) run for enough
+cycles to reflect sustained, real operating behavior - not yet done,
+a real next step if a single defensible power figure is needed.
+
 ## Still open (real, disclosed, not yet worked on)
 
 1. **No SRAM macro** - `instr_mem`/`data_mem` synthesized as plain
@@ -224,10 +277,11 @@ default) number.
    somewhat in either direction; this isn't a fundamental, PDK-wide
    ceiling, just the honest result for this specific synthesis
    configuration.
-4. **Power number is vectorless/default-activity, not workload-driven**
-   - a real gate-level-simulation VCD fed into `report_power` via
-   `read_vcd` would give a more representative, more credible number
-   for any external (e.g. grant/pitch) use.
+4. **No single representative power number yet** - vectorless
+   (190mW, generic estimate) and VCD-driven-on-`test1.hex` (2.46mW,
+   real but near-idle/trivial workload) are both real but neither is a
+   credible "typical operating power" figure on its own - would need a
+   longer, computationally-active program's VCD for that.
 5. **55ns Fmax is only bounded to a 5ns bracket** (50ns fails, 55ns
    passes) - not narrowed further by choice, not because tighter
    bisection isn't possible.
