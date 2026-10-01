@@ -9,7 +9,7 @@ echo ===== AxISA milestone 1: ALUR/ALUI/BRANCH/HALT, 4 register banks =====
 python sw\asm_test1.py sw\test1.hex
 if %errorlevel% neq 0 goto :error
 
-"%IVERILOG%" -o out_tb_cpu.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_cpu.v
+"%IVERILOG%" -o out_tb_cpu.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_cpu.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_cpu.vvp | findstr /C:"ALL AXISA MILESTONE-1 TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_cpu & "%VVP%" out_tb_cpu.vvp & goto :error)
@@ -20,7 +20,7 @@ echo ===== AxISA milestone 2: GLUON/BARYON/MESON/LOAD/STORE/JAL =====
 python sw\asm_test2.py sw\test2.hex
 if %errorlevel% neq 0 goto :error
 
-"%IVERILOG%" -o out_tb_cpu2.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_cpu2.v
+"%IVERILOG%" -o out_tb_cpu2.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_cpu2.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_tb_cpu2.vvp | findstr /C:"ALL AXISA MILESTONE-2 TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_cpu2 & "%VVP%" out_tb_cpu2.vvp & goto :error)
@@ -31,7 +31,7 @@ echo ===== AxISA demo: "particle collider" (real .axasm source, sw\axasm.py) ===
 python sw\axasm.py sw\demo_collider.axasm sw\collider.hex
 if %errorlevel% neq 0 goto :error
 
-"%IVERILOG%" -o out_collider.vvp "-DINSTR_HEX=\"sw/collider.hex\"" rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_run.v
+"%IVERILOG%" -o out_collider.vvp "-DINSTR_HEX=\"sw/collider.hex\"" rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_run.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_collider.vvp +EXPECT_TOHOST=28 | findstr /C:"PASS: tohost matches expected value" >nul
 if %errorlevel% neq 0 (echo FAILED: collider demo & "%VVP%" out_collider.vvp +EXPECT_TOHOST=28 & goto :error)
@@ -49,7 +49,7 @@ echo   OK
 echo.
 echo ===== NoC: single REAL core through one hop to shared memory =====
 echo First test to exercise cpu_core.v's own is_shared_access/mem_stall/write-enable-gating/effective_dmem_rdata logic, not just the adapter+router protocol
-"%IVERILOG%" -o out_nocsingle.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v rtl\shared_mem_backing.v rtl\router.v rtl\noc_core_adapter.v rtl\noc_mem_adapter.v tb\tb_noc_single.v
+"%IVERILOG%" -o out_nocsingle.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v rtl\shared_mem_backing.v rtl\router.v rtl\noc_core_adapter.v rtl\noc_mem_adapter.v tb\tb_noc_single.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_nocsingle.vvp | findstr /C:"ALL AXISA NOC SINGLE-CORE TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_noc_single & "%VVP%" out_nocsingle.vvp & goto :error)
@@ -63,7 +63,7 @@ if %errorlevel% neq 0 goto :error
 python sw\axasm.py sw\shared_consumer.axasm sw\shared_consumer.hex
 if %errorlevel% neq 0 goto :error
 echo c0 (consumer, busy-waits, 13 hops from memory) reads c1's (producer, 12 hops) payload through the arbitrated NoC - real X+Y+Z routing, not just X/Y - only correct (127) if it genuinely observed the other core's write; c2-c1022 run independently (test1.hex) alongside
-"%IVERILOG%" -o out_soc.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v rtl\shared_mem_backing.v rtl\router.v rtl\noc_core_adapter.v rtl\noc_mem_adapter.v rtl\soc_top.v tb\tb_soc.v
+"%IVERILOG%" -o out_soc.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v rtl\shared_mem_backing.v rtl\router.v rtl\noc_core_adapter.v rtl\noc_mem_adapter.v rtl\soc_top.v tb\tb_soc.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_soc.vvp | findstr /C:"PASS: cross-core communication verified" >nul
 if %errorlevel% neq 0 (echo FAILED: AxISA mini-SoC & "%VVP%" out_soc.vvp & goto :error)
@@ -73,13 +73,13 @@ echo.
 echo ===== AxISA mini-kernel: UART console + one-command shell (real .axasm source) =====
 python sw\axasm.py sw\mini_shell.axasm sw\mini_shell.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -o out_shell.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_uart_shell.v
+"%IVERILOG%" -o out_shell.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_uart_shell.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_shell.vvp | findstr /C:"ALL AXISA UART SHELL TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_uart_shell & "%VVP%" out_shell.vvp & goto :error)
 echo   OK ("hi" recognized - prompt+echo+"OK" byte-exact through the simulated console)
 
-"%IVERILOG%" -o out_shell_nomatch.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_uart_shell_nomatch.v
+"%IVERILOG%" -o out_shell_nomatch.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_uart_shell_nomatch.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_shell_nomatch.vvp | findstr /C:"ALL AXISA UART SHELL NOMATCH TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_uart_shell_nomatch & "%VVP%" out_shell_nomatch.vvp & goto :error)
@@ -95,7 +95,7 @@ REM INSTR_INIT_FILE("../sw/mini_shell_loop.hex") resolves the same way
 REM it will under OpenLane, whose Yosys cwd is this design directory -
 REM see the wrapper's own header comment / asic/cpu_core_top.v's
 REM identical precedent.
-"%IVERILOG%" -o ..\out_tt_um.vvp ..\rtl\alu.v ..\rtl\regbank.v ..\rtl\instr_mem.v ..\rtl\data_mem.v ..\rtl\control_unit.v ..\rtl\fp_addsub.v ..\rtl\fp_mul.v ..\rtl\cpu_core.v ..\rtl\mmu.v tt_um_axisa_core.v ..\tb\tb_tt_um_axisa_core.v
+"%IVERILOG%" -o ..\out_tt_um.vvp ..\rtl\alu.v ..\rtl\regbank.v ..\rtl\instr_mem.v ..\rtl\data_mem.v ..\rtl\control_unit.v ..\rtl\fp_addsub.v ..\rtl\fp_mul.v ..\rtl\fp_sqrt.v ..\rtl\fp_div.v ..\rtl\lfsr.v ..\rtl\cpu_core.v ..\rtl\mmu.v tt_um_axisa_core.v ..\tb\tb_tt_um_axisa_core.v
 if %errorlevel% neq 0 (cd .. & goto :error)
 "%VVP%" ..\out_tt_um.vvp | findstr /C:"ALL AXISA TT_UM WRAPPER TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_tt_um_axisa_core & "%VVP%" ..\out_tt_um.vvp & cd .. & goto :error)
@@ -106,7 +106,7 @@ echo.
 echo ===== AxISA traps 1/3: illegal-instruction (entry+EPC+CAUSE+RFT) =====
 python sw\axasm.py sw\trap_illegal.axasm sw\trap_illegal.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -o out_trap1.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_illegal.v
+"%IVERILOG%" -o out_trap1.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_illegal.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_trap1.vvp | findstr /C:"ALL AXISA TRAP-ILLEGAL TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_trap_illegal & "%VVP%" out_trap1.vvp & goto :error)
@@ -116,7 +116,7 @@ echo.
 echo ===== AxISA traps 2/3: SYSCALL + real user-mode transition + PRIV_VIOLATION =====
 python sw\axasm.py sw\trap_syscall.axasm sw\trap_syscall.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -o out_trap2.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_syscall.v
+"%IVERILOG%" -o out_trap2.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_syscall.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_trap2.vvp | findstr /C:"ALL AXISA TRAP-SYSCALL TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_trap_syscall & "%VVP%" out_trap2.vvp & goto :error)
@@ -126,13 +126,13 @@ echo.
 echo ===== AxISA traps 3/3: external interrupt =====
 python sw\axasm.py sw\trap_irq.axasm sw\trap_irq.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -o out_trap3.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_irq.v
+"%IVERILOG%" -o out_trap3.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_irq.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_trap3.vvp | findstr /C:"ALL AXISA TRAP-IRQ TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_trap_irq & "%VVP%" out_trap3.vvp & goto :error)
 echo   OK (tohost=42, IRQ preempted a real spin loop, handler's EPC redirect honored exactly)
 
-"%IVERILOG%" -o out_trap3b.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_irq_squash.v
+"%IVERILOG%" -o out_trap3b.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_irq_squash.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_trap3b.vvp | findstr /C:"ALL AXISA TRAP-IRQ-SQUASH TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_trap_irq_squash & "%VVP%" out_trap3b.vvp & goto :error)
@@ -140,7 +140,7 @@ echo   OK (tohost=42, IRQ synced to land exactly on a post-branch squash cycle -
 
 python sw\axasm.py sw\trap_irq_stall.axasm sw\trap_irq_stall.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -o out_trap4.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_irq_stall.v
+"%IVERILOG%" -o out_trap4.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_irq_stall.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_trap4.vvp | findstr /C:"ALL AXISA TRAP-IRQ-STALL TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_trap_irq_stall & "%VVP%" out_trap4.vvp & goto :error)
@@ -150,7 +150,7 @@ echo.
 echo ===== AxISA QHAD/QCNOT: classical quantum-circuit-simulator extension =====
 python sw\axasm.py sw\qcnot_test.axasm sw\qcnot_test.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -o out_qcnot.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_qcnot.v
+"%IVERILOG%" -o out_qcnot.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_qcnot.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_qcnot.vvp | findstr /C:"ALL AXISA QCNOT TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_qcnot & "%VVP%" out_qcnot.vvp & goto :error)
@@ -158,7 +158,7 @@ echo   OK (5-cycle register swap: amp1<->amp3 verified byte-exact)
 
 python sw\axasm.py sw\qhad_test.axasm sw\qhad_test.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -o out_qhad.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_qhad.v
+"%IVERILOG%" -o out_qhad.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_qhad.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_qhad.vvp | findstr /C:"ALL AXISA QHAD TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_qhad & "%VVP%" out_qhad.vvp & goto :error)
@@ -166,17 +166,51 @@ echo   OK (Hadamard mix on |00>: both new amplitudes = 1/sqrt(2) exactly, real p
 
 python sw\axasm.py sw\trap_irq_qhad.axasm sw\trap_irq_qhad.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -o out_trap_irq_qhad.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_irq_qhad.v
+"%IVERILOG%" -o out_trap_irq_qhad.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_irq_qhad.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_trap_irq_qhad.vvp | findstr /C:"ALL AXISA TRAP-IRQ-QHAD TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_trap_irq_qhad & "%VVP%" out_trap_irq_qhad.vvp & goto :error)
 echo   OK (IRQ pulsed exactly on QHAD's terminal cycle - deferred across the whole 5-cycle sequence, EPC=0x28 not 0x24)
 
 echo.
+echo ===== AxISA QMEASURE: quantum-measurement, third member of the simulator extension =====
+python sw\axasm.py sw\qmeasure_test_p1.axasm sw\qmeasure_test_p1.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_qm_p1.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_qmeasure_p1.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_qm_p1.vvp | findstr /C:"ALL AXISA QMEASURE P1 TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_qmeasure_p1 & "%VVP%" out_qm_p1.vvp & goto :error)
+echo   OK (P0=1.0 degenerate case: outcome forced 0, survivors unchanged, losers zeroed)
+
+python sw\axasm.py sw\qmeasure_test_p0.axasm sw\qmeasure_test_p0.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_qm_p0.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_qmeasure_p0.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_qm_p0.vvp | findstr /C:"ALL AXISA QMEASURE P0 TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_qmeasure_p0 & "%VVP%" out_qm_p0.vvp & goto :error)
+echo   OK (P0=0.0 degenerate case: outcome forced 1, proves the compare/mux works both ways)
+
+python sw\axasm.py sw\qmeasure_test_5050.axasm sw\qmeasure_test_5050.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_qm_5050.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_qmeasure_5050.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_qm_5050.vvp | findstr /C:"ALL AXISA QMEASURE 5050 TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_qmeasure_5050 & "%VVP%" out_qm_5050.vvp & goto :error)
+echo   OK (real 50/50 branch: outcome-conditioned invariants hold - exactly one group zeroed, survivor renormalized to ~1.0)
+
+python sw\axasm.py sw\trap_irq_qmeasure.axasm sw\trap_irq_qmeasure.hex
+if %errorlevel% neq 0 goto :error
+"%IVERILOG%" -o out_trap_irq_qm.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_trap_irq_qmeasure.v
+if %errorlevel% neq 0 goto :error
+"%VVP%" out_trap_irq_qm.vvp | findstr /C:"ALL AXISA TRAP-IRQ-QMEASURE TESTS PASSED" >nul
+if %errorlevel% neq 0 (echo FAILED: tb_trap_irq_qmeasure & "%VVP%" out_trap_irq_qm.vvp & goto :error)
+echo   OK (IRQ pulsed exactly on QMEASURE's terminal cycle - deferred across the whole ~96-cycle sequence, EPC=0x28 not 0x24)
+
+echo.
 echo ===== AxISA virtual memory: real translation + a recoverable page fault =====
 python sw\axasm.py sw\mmu_test.axasm sw\mmu_test.hex
 if %errorlevel% neq 0 goto :error
-"%IVERILOG%" -o out_mmu.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\cpu_core.v rtl\mmu.v tb\tb_mmu.v
+"%IVERILOG%" -o out_mmu.vvp rtl\alu.v rtl\regbank.v rtl\instr_mem.v rtl\data_mem.v rtl\control_unit.v rtl\fp_addsub.v rtl\fp_mul.v rtl\fp_sqrt.v rtl\fp_div.v rtl\lfsr.v rtl\cpu_core.v rtl\mmu.v tb\tb_mmu.v
 if %errorlevel% neq 0 goto :error
 "%VVP%" out_mmu.vvp | findstr /C:"ALL AXISA MMU TESTS PASSED" >nul
 if %errorlevel% neq 0 (echo FAILED: tb_mmu & "%VVP%" out_mmu.vvp & goto :error)

@@ -62,6 +62,7 @@ bit range across classes, to keep decode simple).
 | `01101`          | PTB      | move to/from page table base (privileged) |
 | `01110`          | QHAD     | classical quantum-circuit-sim: Hadamard mix |
 | `01111`          | QCNOT    | classical quantum-circuit-sim: CNOT swap  |
+| `10000`          | QMEASURE | classical quantum-circuit-sim: probabilistic measurement/collapse |
 | others           | —        | reserved for v0.2+                        |
 
 ### ALUR — `opcode[31:27] bank[26:25] funct[24:21] rd[20:18] rs1[17:15] rs2[14:12] (unused[11:0])`
@@ -234,12 +235,12 @@ selreg field at all, just `dir` (`0`=read `PTB`→`n_reg`, `1`=write
 `n_reg`→`PTB`) and a bare 3-bit `n_reg`, the same shape as `MVSR`'s own
 `n_reg`.
 
-## QHAD / QCNOT (classical quantum-circuit-simulator extension)
+## QHAD / QCNOT / QMEASURE (classical quantum-circuit-simulator extension)
 
 **Explicitly not real quantum hardware** - a real qubit needs a
 physical substrate (superconducting circuits, trapped ions, photonics)
 incompatible with the classical CMOS flows this project actually
-targets (sky130 ASIC, ECP5 FPGA). These two instructions instead give
+targets (sky130 ASIC, ECP5 FPGA). These three instructions instead give
 AxISA real, classical arithmetic for simulating a small quantum
 circuit in hardware - the same computation a software simulator
 (Qiskit-style) would do, executed for real on real gates, continuing
@@ -257,12 +258,15 @@ NaN/infinity/subnormal are out of scope). There is no dedicated `LOAD`
 32-bit-immediate instruction, so a test program builds a float32
 constant via `ADDI`+`SLLI` (see `sw/qhad_test.axasm`).
 
-**Both are the first genuinely multi-cycle instructions in this ISA**
-(5 cycles each) - AxISA's register banks have exactly 2 read + 1 write
-port per bank, and only one write port total system-wide, so neither
-instruction (each touches 4 `R`-bank registers) can complete in one
-cycle. See the "Implementation notes" section's port-count footnote
-below.
+**`QHAD`/`QCNOT` were the first genuinely multi-cycle instructions in
+this ISA** (5 cycles each) - AxISA's register banks have exactly 2
+read + 1 write port per bank, and only one write port total
+system-wide, so neither instruction (each touches 4 `R`-bank
+registers) can complete in one cycle. `QMEASURE` (below) is the third
+member of this family and by far the longest at 96 cycles, since it
+also needs real division and square-root hardware, neither of which
+existed anywhere in AxISA before it. See the "Implementation notes"
+section's port-count footnote below.
 
 ### QHAD — `opcode[31:27] qubit[26] half[25] (unused[24:0])`
 
@@ -304,6 +308,77 @@ represent - so with only 2 qubits there are exactly 2 real
 
 Pure register move, no arithmetic - the 5-cycle floor here is entirely
 the write-port constraint, not computation.
+
+### QMEASURE — `opcode[31:27] qubit[26] nd[25:23] (unused[22:0])`
+
+A classical probabilistic measurement of one qubit: computes that
+qubit's outcome-0 probability, draws a random sample, collapses the
+state vector to the surviving 2-amplitude group (renormalized back to
+unit probability), zeroes the losing group, and reports the 1-bit
+outcome (zero-extended) to N-bank register `nd`. Unlike `QHAD`, there
+is no `half` field - computing `P0` inherently sums over both
+amplitudes sharing the qubit's 0-value, so `qubit` alone determines
+both outcome groups (all 8 `R` registers are touched every time):
+
+| `qubit` | Outcome-0 group | Outcome-1 group |
+|---|---|---|
+| 0 (`q0`) | `amp0`(`r0,r1`), `amp2`(`r4,r5`) | `amp1`(`r2,r3`), `amp3`(`r6,r7`) |
+| 1 (`q1`) | `amp0`(`r0,r1`), `amp1`(`r2,r3`) | `amp2`(`r4,r5`), `amp3`(`r6,r7`) |
+
+**Algorithm**: `P0 = |A0|^2 + |A1|^2` (outcome-0 group), `P1 = 1-P0`;
+draw a uniform float32 `r` in `[0, 1-2^-23]` from a new hardware LFSR
+(see below); `outcome = 0` iff `r < P0` (else `1`) - standard
+inverse-CDF sampling, so `P(outcome=0)=P0` exactly, including the
+`P0=0` tie always correctly yielding outcome=1. The surviving group is
+rescaled by `1/sqrt(P_survived)` (real `fp_sqrt` then `fp_div`, both
+new multi-cycle units ported from `rv32i_core`'s RV32F FDIV.S/FSQRT.S
+work) so its total probability returns to 1.0; the losing group's 4
+registers are explicitly zeroed rather than left stale.
+
+**Random source**: a new free-running 32-bit Fibonacci XOR-LFSR
+(`rtl/lfsr.v`, taps `[32,22,2,1]`, fixed nonzero seed), clocked
+unconditionally (not gated by `cpu_stall`/`halted_r` - its value's
+relationship to instruction timing is itself part of what makes it
+unpredictable in practice). Converted to a uniform float32 by taking
+the LFSR's top 23 bits as the fraction of a fixed-exponent value in
+`[1.0,2.0)`, then subtracting `1.0` (exact, via the shared
+`fp_addsub`) - no subnormal/precision edge case, since `[1,2)` has
+exactly `2^23` evenly-spaced representable float32 values.
+
+**Documented, deliberate limitation**: this is a real LFSR, not a
+CSPRNG - deterministic given its fixed seed, `2^32-1` period, and
+successive draws are linearly correlated (recoverable via
+Berlekamp-Massey). Honest and sufficient for a classical *simulator's*
+measurement flavor - the same "not real quantum hardware" framing this
+whole extension already carries - but must never be described as
+cryptographically rigorous, and software should not rely on it for
+anything security-sensitive.
+
+**Real cost: 96 cycles** (register reads + probability computation +
+RNG draw/compare ≈10, `fp_sqrt` ≈27, `fp_div` ≈51, 8 register writes),
+dominated (~81%) by the sqrt/div hardware - a real, bounded,
+deterministic cost, the same category as RV32I's own FDIV.S.
+
+**IRQ-deferral note, with an extra wrinkle beyond `QHAD`/`QCNOT`**: an
+IRQ arriving anywhere during `QMEASURE`'s ~96-cycle sequence is held
+pending until the sequence completes, exactly like `QHAD`/`QCNOT`
+(see "Traps" below) - this alone prevents `RFT` from re-executing the
+instruction against its own already-mutated registers. But `QMEASURE`
+has a second, independent reason this matters: its LFSR keeps
+advancing every single cycle regardless of `cpu_stall`, so an
+undeferred IRQ would make a re-executed attempt draw a *different*
+random sample than the aborted one - a silent non-reproducibility bug
+layered on top of the register-corruption class `QHAD`/`QCNOT` already
+guard against.
+
+**Inherited FPU-scope limitation**: if the state vector fed to
+`QMEASURE` is itself degenerate or mis-normalized (e.g.
+`P_survived` underflows to an exact `0.0`), `fp_div(1.0, 0.0)` yields
+`+Inf` and the subsequent `fp_mul(0.0, +Inf)` hits `fp_mul.v`'s own
+zero-check first, silently returning `0` instead of `NaN`. This is the
+same accepted scope limitation `QHAD`/`QCNOT` already carry from
+reusing `fp_addsub.v`/`fp_mul.v` (normal-finite-or-zero inputs only),
+not a new gap introduced by `QMEASURE`.
 
 ## Traps (interrupts + privileged/user mode)
 
@@ -350,12 +425,15 @@ waiting for `bus_grant` (see `SHARED_MEM_BASE`) is held pending and
 only actually redirects `pc` once the stall clears - the stalled
 access is never aborted mid-flight, so interrupt latency is bounded by
 stall duration rather than needing a new "abort a grant" concept. The
-same deferral applies to an in-flight `QHAD`/`QCNOT` (see above) - an
-IRQ arriving anywhere during the 5-cycle sequence, including exactly
-on its terminal write cycle, is held pending until the whole sequence
-completes, not taken against the instruction's own address (which
-would make `RFT` re-execute the entire sequence from scratch, reading
-its own already-mutated registers as fresh inputs).
+same deferral applies to an in-flight `QHAD`/`QCNOT`/`QMEASURE` (see
+above) - an IRQ arriving anywhere during the sequence (5 cycles for
+`QHAD`/`QCNOT`, ~96 for `QMEASURE`), including exactly on its terminal
+write cycle, is held pending until the whole sequence completes, not
+taken against the instruction's own address (which would make `RFT`
+re-execute the entire sequence from scratch, reading its own
+already-mutated registers as fresh inputs - and for `QMEASURE`
+specifically, drawing a different random sample than the aborted
+attempt, since its LFSR never stops advancing).
 
 ## Virtual memory
 
@@ -473,10 +551,16 @@ Confirmed by design review before any RTL was written:
   1W to N; LOAD/STORE/JAL/HALT all need less). **This claim is true
   PER CYCLE, not per instruction** - `QHAD`/`QCNOT` (see above) each
   need 4 registers of the `R` bank across their whole 5-cycle sequence,
-  spread across multiple cycles via a dedicated multi-cycle sequencer
-  in `cpu_core.v` rather than exceeding the port count in any single
+  and `QMEASURE` needs all 8 across its ~96-cycle sequence, spread
+  across multiple cycles via a dedicated multi-cycle sequencer in
+  `cpu_core.v` rather than exceeding the port count in any single
   cycle. They are the first instructions in this ISA that need more
-  than one cycle to retire.
+  than one cycle to retire. `QMEASURE` additionally needed a second,
+  independent write path into the `N` bank (mirroring the one already
+  built for `R`) to report its 1-bit outcome mid-sequence, since the
+  normal opcode-decoded write path is driven by a static decode of the
+  frozen instruction and can't fire partway through a sequencer's own
+  run.
 - **One parameterized register-file module, instantiated 4 times**
   (address width 3, depth 8, optional hardwired-register-0 parameter
   for N only) rather than four near-duplicate files - R/G/B/N are

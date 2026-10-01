@@ -201,6 +201,10 @@ module cpu_core #(
     wire        is_qcnot, qcnot_ctrl;
     wire [2:0]  q_reg_i, q_reg_j;
 
+    wire        is_qmeasure, qmeasure_qubit;
+    wire [2:0]  qmeasure_nd;
+    wire [2:0]  qm_reg_a0, qm_reg_a1, qm_reg_b0, qm_reg_b1;
+
     wire [1:0]  write_bank;
     wire [2:0]  write_addr;
     wire        reg_write, illegal;
@@ -227,6 +231,8 @@ module cpu_core #(
         .is_qhad(is_qhad), .qhad_qubit(qhad_qubit), .qhad_half(qhad_half),
         .is_qcnot(is_qcnot), .qcnot_ctrl(qcnot_ctrl),
         .q_reg_i(q_reg_i), .q_reg_j(q_reg_j),
+        .is_qmeasure(is_qmeasure), .qmeasure_qubit(qmeasure_qubit), .qmeasure_nd(qmeasure_nd),
+        .qm_reg_a0(qm_reg_a0), .qm_reg_a1(qm_reg_a1), .qm_reg_b0(qm_reg_b0), .qm_reg_b1(qm_reg_b1),
         .write_bank(write_bank), .write_addr(write_addr),
         .reg_write(reg_write), .illegal(illegal)
     );
@@ -252,6 +258,21 @@ module cpu_core #(
                 r_addr_a = q_reg_i; r_addr_b = q_reg_i + 3'd1;
             end
             // Q_S2/Q_S3/Q_S4: no read needed, defaults above stand.
+        end else if (qm_active) begin
+            // The qm-sequencer FSM (below) owns R-bank read routing for
+            // its whole 96-cycle sequence - same top-priority reasoning
+            // as q_active above (is_qmeasure's own `bank` field also
+            // defaults to 0=BANK_R).
+            if (qm_state_r == QM_IDLE) begin
+                r_addr_a = qm_reg_a0; r_addr_b = qm_reg_a0 + 3'd1;
+            end else if (qm_state_r == QM_S1) begin
+                r_addr_a = qm_reg_a1; r_addr_b = qm_reg_a1 + 3'd1;
+            end else if (qm_state_r == QM_S2) begin
+                r_addr_a = qm_reg_b0; r_addr_b = qm_reg_b0 + 3'd1;
+            end else if (qm_state_r == QM_S3) begin
+                r_addr_a = qm_reg_b1; r_addr_b = qm_reg_b1 + 3'd1;
+            end
+            // QM_S4 onward: no further reads needed, defaults stand.
         end else if (is_gluon) begin
             case ({gluon_rs1_bank == BANK_R, gluon_rs2_bank == BANK_R})
                 2'b11: begin r_addr_a = gluon_rs1_reg; r_addr_b = gluon_rs2_reg; end
@@ -401,9 +422,14 @@ module cpu_core #(
     // reg_write=0 for both new opcodes, so gated_reg_write's own
     // R-bank term is always 0 whenever q_write_en could be 1 - the two
     // paths never race.
-    wire [2:0]  r_write_addr_final = q_write_en ? q_write_addr : write_addr;
-    wire [31:0] r_write_data_final = q_write_en ? q_write_data : write_data;
-    wire        r_write_en_final   = r_write_en || q_write_en;
+    // QMEASURE's qm-sequencer needs the identical independent-write
+    // treatment, extended here (mutually exclusive with q_write_en by
+    // construction, same reasoning as fpaddsub_in_a/b's own mux above).
+    wire [2:0]  r_write_addr_final = q_write_en ? q_write_addr :
+                                      qm_write_en ? qm_write_addr : write_addr;
+    wire [31:0] r_write_data_final = q_write_en ? q_write_data :
+                                      qm_write_en ? qm_write_data : write_data;
+    wire        r_write_en_final   = r_write_en || q_write_en || qm_write_en;
 
     regbank #(.HARDWIRE_REG0(0)) r_bank (
         .clk(clk), .rs1_addr(r_addr_a), .rs2_addr(r_addr_b),
@@ -420,10 +446,17 @@ module cpu_core #(
         .rs1_data(b_porta_data), .rs2_data(b_portb_data),
         .rd_addr(write_addr), .rd_data(write_data), .reg_write(b_write_en)
     );
+    // N-bank's own independent write path (QMEASURE's outcome bit) -
+    // see q_n_write_en/addr/data's own declaration in the QMEASURE
+    // section above for why the normal write path can't be reused here.
+    wire [2:0]  n_write_addr_final = q_n_write_en ? q_n_write_addr : write_addr;
+    wire [31:0] n_write_data_final = q_n_write_en ? q_n_write_data : write_data;
+    wire        n_write_en_final   = n_write_en || q_n_write_en;
+
     regbank #(.HARDWIRE_REG0(1)) n_bank (
         .clk(clk), .rs1_addr(n_addr_a), .rs2_addr(n_addr_b),
         .rs1_data(n_porta_data), .rs2_data(n_portb_data),
-        .rd_addr(write_addr), .rd_data(write_data), .reg_write(n_write_en)
+        .rd_addr(n_write_addr_final), .rd_data(n_write_data_final), .reg_write(n_write_en_final)
     );
 
     // ALUR/ALUI/BRANCH operand select (bank's own port A/B - rs1/rs2 of `bank`)
@@ -579,11 +612,30 @@ module cpu_core #(
                                                   q_t3; // Q_S4
     wire        q_add_sub = (q_state_r == Q_S3) || (q_state_r == Q_S4); // SUB for beta's new value, ADD for alpha's
 
+    // Shared fp_addsub/fp_mul instances are ALSO used by the QMEASURE
+    // qm-sequencer below (see that section) - QHAD/QCNOT's own q_active
+    // and QMEASURE's own qm_active are mutually exclusive (only one
+    // instruction is ever in flight at a time in this single-cycle
+    // core), so muxing by qm_active here is safe and keeps "one shared
+    // add/mul pair, isolated from ALUR/etc." true across the whole
+    // family instead of instantiating a second, redundant pair.
+    wire [31:0] fpaddsub_in_a = qm_active ? qm_add_a : q_add_a;
+    wire [31:0] fpaddsub_in_b = qm_active ? qm_add_b : q_add_b;
+    wire        fpaddsub_in_sub = qm_active ? qm_add_sub : q_add_sub;
+
     wire [31:0] q_addsub_result;
-    fp_addsub q_fpaddsub (.a(q_add_a), .b(q_add_b), .op_sub(q_add_sub), .result(q_addsub_result));
+    fp_addsub q_fpaddsub (.a(fpaddsub_in_a), .b(fpaddsub_in_b), .op_sub(fpaddsub_in_sub), .result(q_addsub_result));
+
+    // QHAD always chains fp_mul's input from fp_addsub's own result
+    // (scaling the sum/difference by 1/sqrt(2)); QMEASURE needs fp_mul
+    // used INDEPENDENTLY (squaring components, then later scaling a
+    // survivor component by qm_scale) - see the qm_mul_a/qm_mul_b mux
+    // in the QMEASURE section below.
+    wire [31:0] fpmul_in_a = qm_active ? qm_mul_a : q_addsub_result;
+    wire [31:0] fpmul_in_b = qm_active ? qm_mul_b : Q_INV_SQRT2;
 
     wire [31:0] q_mul_result;
-    fp_mul q_fpmul (.a(q_addsub_result), .b(Q_INV_SQRT2), .result(q_mul_result));
+    fp_mul q_fpmul (.a(fpmul_in_a), .b(fpmul_in_b), .result(q_mul_result));
 
     // QCNOT's write value is a pure move: whatever this cycle's R-bank
     // read (S1) or a scratch flop (S2-S4) already holds - no
@@ -600,6 +652,248 @@ module cpu_core #(
                                 (q_state_r == Q_S3) ? q_reg_j :
                                                        (q_reg_j + 3'd1); // Q_S4
     wire [31:0] q_write_data = is_qcnot ? q_qcnot_write_data : q_mul_result;
+
+    // ==================== QMEASURE (third member of the classical
+    // quantum-circuit-simulator family - design review before this was
+    // written; see docs/ISA.md's QMEASURE section) ====================
+    // Measures one qubit: computes the outcome-0 probability P0 =
+    // |A0|^2+|A1|^2 (A0/A1 = the two amplitudes sharing that qubit's
+    // 0-value), draws a random float from a new free-running LFSR,
+    // compares it against P0 to pick an outcome, then renormalizes the
+    // 2 surviving amplitudes by 1/sqrt(P_survived) (needs fp_sqrt AND
+    // fp_div, both new, ported from rv32i_core) while zeroing the 2
+    // losing amplitudes - 8 R-bank writes total (4 scaled survivors +
+    // 4 zeros), plus 1 N-bank write for the 1-bit outcome. A genuinely
+    // new, PARALLEL FSM (qm_state_r), not folded into q_state_r above,
+    // to avoid bloating every existing QHAD/QCNOT state comparison -
+    // safe because is_qhad/is_qcnot/is_qmeasure are mutually exclusive
+    // opcodes and only one instruction is ever in flight at a time, so
+    // q_active/qm_active never overlap.
+    localparam QM_IDLE=5'd0, QM_S1=5'd1, QM_S2=5'd2, QM_S3=5'd3, QM_S4=5'd4,
+               QM_S5=5'd5, QM_S6=5'd6, QM_S7=5'd7, QM_S8=5'd8, QM_S9=5'd9,
+               QM_SQRT=5'd10, QM_DIV=5'd11,
+               QM_W0=5'd12, QM_W1=5'd13, QM_W2=5'd14, QM_W3=5'd15,
+               QM_W4=5'd16, QM_W5=5'd17, QM_W6=5'd18, QM_W7=5'd19;
+    reg [4:0] qm_state_r;
+
+    // fp_sqrt/fp_div's own busy/done - declared here (used by the state
+    // transition block below) even though the instances themselves are
+    // declared further down, since Verilog wire references are order-
+    // independent (same as this file's own existing mem_stall/
+    // gated_reg_write forward-reference precedent).
+    wire fp_sqrt_busy, fp_sqrt_done;
+    wire fp_div_busy, fp_div_done;
+
+    // Same "gated only on !halted_r, not nested in !cpu_stall" style as
+    // q_state_r above - must transition while qm_stall (derived from
+    // qm_state_r itself) is already high, or it would deadlock.
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            qm_state_r <= QM_IDLE;
+        end else if (!halted_r) begin
+            case (qm_state_r)
+                QM_IDLE: qm_state_r <= is_qmeasure ? QM_S1 : QM_IDLE;
+                QM_S1:   qm_state_r <= QM_S2;
+                QM_S2:   qm_state_r <= QM_S3;
+                QM_S3:   qm_state_r <= QM_S4;
+                QM_S4:   qm_state_r <= QM_S5;
+                QM_S5:   qm_state_r <= QM_S6;
+                QM_S6:   qm_state_r <= QM_S7;
+                QM_S7:   qm_state_r <= QM_S8;
+                QM_S8:   qm_state_r <= QM_S9;
+                QM_S9:   qm_state_r <= QM_SQRT;
+                QM_SQRT: qm_state_r <= fp_sqrt_done ? QM_DIV : QM_SQRT;
+                QM_DIV:  qm_state_r <= fp_div_done  ? QM_W0  : QM_DIV;
+                QM_W0:   qm_state_r <= QM_W1;
+                QM_W1:   qm_state_r <= QM_W2;
+                QM_W2:   qm_state_r <= QM_W3;
+                QM_W3:   qm_state_r <= QM_W4;
+                QM_W4:   qm_state_r <= QM_W5;
+                QM_W5:   qm_state_r <= QM_W6;
+                QM_W6:   qm_state_r <= QM_W7;
+                QM_W7:   qm_state_r <= QM_IDLE;
+                default: qm_state_r <= QM_IDLE;
+            endcase
+        end
+    end
+
+    // qm_active spans decode through the terminal write (QM_W7
+    // included); qm_stall excludes QM_W7 (its write commits the same
+    // edge cpu_stall drops) - identical shape to q_active/q_stall above.
+    wire qm_active = (qm_state_r != QM_IDLE) || is_qmeasure;
+    wire qm_stall  = qm_active && (qm_state_r != QM_W7);
+
+    // A new hardware random-number source - AxISA's first. Free-running
+    // off clk/reset alone (see lfsr.v's own header for why it must NOT
+    // be gated by cpu_stall/halted_r).
+    wire [31:0] lfsr_q;
+    lfsr32 qm_lfsr (.clk(clk), .reset(reset), .q(lfsr_q));
+    // Top 23 raw bits as fraction, fixed exponent 127 -> [1.0,2.0);
+    // QM_S8 below subtracts 1.0 via the shared fp_addsub to land in
+    // [0, 1-2^-23], exact (no subnormal/precision edge case).
+    wire [31:0] qm_rng_float = {1'b0, 8'b0111_1111, lfsr_q[31:9]};
+
+    localparam [31:0] Q_ONE = 32'h3F800000; // IEEE-754 binary32 for 1.0
+
+    // Scratch registers: t0-t7 hold the 4 amplitudes' Re/Im (A0,A1 =
+    // outcome-0 group; B0,B1 = outcome-1 group) as they're read;
+    // sq0-sq3 hold the 4 squared components; sum0/sum1 are running
+    // accumulators toward P0; p0/p1 are the two outcome probabilities;
+    // r is the drawn random value; p_survived/outcome_r are latched
+    // once the compare (QM_S9) resolves; sqrtval/scale hold fp_sqrt's
+    // and fp_div's results.
+    reg [31:0] qm_t0, qm_t1, qm_t2, qm_t3, qm_t4, qm_t5, qm_t6, qm_t7;
+    reg [31:0] qm_sq0, qm_sq1, qm_sq2, qm_sq3;
+    reg [31:0] qm_sum0, qm_sum1;
+    reg [31:0] qm_p0, qm_p1, qm_r;
+    reg [31:0] qm_p_survived;
+    reg        qm_outcome_r;
+    reg [31:0] qm_sqrtval, qm_scale;
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            qm_t0 <= 32'b0; qm_t1 <= 32'b0; qm_t2 <= 32'b0; qm_t3 <= 32'b0;
+            qm_t4 <= 32'b0; qm_t5 <= 32'b0; qm_t6 <= 32'b0; qm_t7 <= 32'b0;
+            qm_sq0 <= 32'b0; qm_sq1 <= 32'b0; qm_sq2 <= 32'b0; qm_sq3 <= 32'b0;
+            qm_sum0 <= 32'b0; qm_sum1 <= 32'b0;
+            qm_p0 <= 32'b0; qm_p1 <= 32'b0; qm_r <= 32'b0;
+            qm_p_survived <= 32'b0; qm_outcome_r <= 1'b0;
+            qm_sqrtval <= 32'b0; qm_scale <= 32'b0;
+        end else if (!halted_r) begin
+            case (qm_state_r)
+                QM_IDLE: if (is_qmeasure) begin
+                    qm_t0 <= r_porta_data; qm_t1 <= r_portb_data; // A0
+                end
+                QM_S1: begin qm_t2 <= r_porta_data; qm_t3 <= r_portb_data; end // A1
+                QM_S2: begin
+                    qm_t4 <= r_porta_data; qm_t5 <= r_portb_data; // B0
+                    qm_sq0 <= q_mul_result; // A0_re^2
+                end
+                QM_S3: begin
+                    qm_t6 <= r_porta_data; qm_t7 <= r_portb_data; // B1
+                    qm_sq1 <= q_mul_result; // A0_im^2
+                end
+                QM_S4: begin
+                    qm_sq2  <= q_mul_result;    // A1_re^2
+                    qm_sum0 <= q_addsub_result; // sq0+sq1
+                end
+                QM_S5: begin
+                    qm_sq3  <= q_mul_result;    // A1_im^2
+                    qm_sum1 <= q_addsub_result; // sum0+sq2
+                end
+                QM_S6: qm_p0 <= q_addsub_result; // sum1+sq3 = |A0|^2+|A1|^2
+                QM_S7: qm_p1 <= q_addsub_result; // 1-P0
+                QM_S8: qm_r  <= q_addsub_result; // rng_float-1.0, uniform [0,1)
+                QM_S9: begin
+                    // q_addsub_result here = r-P0 (see qm_add_a/b
+                    // below). Sign bit set (negative) means r<P0 ->
+                    // outcome=0 (the A group survives); otherwise
+                    // outcome=1 (covers the r>=P0 tie correctly).
+                    qm_outcome_r  <= q_addsub_result[31] ? 1'b0 : 1'b1;
+                    qm_p_survived <= q_addsub_result[31] ? qm_p0 : qm_p1;
+                end
+                QM_SQRT: if (fp_sqrt_done) qm_sqrtval <= fp_sqrt_result;
+                QM_DIV:  if (fp_div_done)  qm_scale   <= fp_div_result;
+                default: ;
+            endcase
+        end
+    end
+
+    // Shared fp_addsub operand mux for QMEASURE's own states (see
+    // fpaddsub_in_a/b/sub above, which select these whenever qm_active).
+    wire [31:0] qm_add_a = (qm_state_r == QM_S4) ? qm_sq0 :
+                            (qm_state_r == QM_S5) ? qm_sum0 :
+                            (qm_state_r == QM_S6) ? qm_sum1 :
+                            (qm_state_r == QM_S7) ? Q_ONE :
+                            (qm_state_r == QM_S8) ? qm_rng_float :
+                            (qm_state_r == QM_S9) ? qm_r :
+                                                     32'b0;
+    wire [31:0] qm_add_b = (qm_state_r == QM_S4) ? qm_sq1 :
+                            (qm_state_r == QM_S5) ? qm_sq2 :
+                            (qm_state_r == QM_S6) ? qm_sq3 :
+                            (qm_state_r == QM_S7) ? qm_p0 :
+                            (qm_state_r == QM_S8) ? Q_ONE :
+                            (qm_state_r == QM_S9) ? qm_p0 :
+                                                     32'b0;
+    wire        qm_add_sub = (qm_state_r == QM_S7) || (qm_state_r == QM_S8) || (qm_state_r == QM_S9);
+
+    // Survivor/loser register addresses and values - resolved directly
+    // from qm_outcome_r once latched (QM_S9 onward); qm_reg_a0/a1/b0/b1
+    // stay valid combinationally for the whole sequence since `instr`
+    // is frozen throughout (same reasoning q_reg_i/q_reg_j already
+    // rely on for QHAD/QCNOT).
+    wire [2:0]  qm_surv_reg0 = qm_outcome_r ? qm_reg_b0 : qm_reg_a0;
+    wire [2:0]  qm_surv_reg1 = qm_outcome_r ? qm_reg_b1 : qm_reg_a1;
+    wire [2:0]  qm_lose_reg0 = qm_outcome_r ? qm_reg_a0 : qm_reg_b0;
+    wire [2:0]  qm_lose_reg1 = qm_outcome_r ? qm_reg_a1 : qm_reg_b1;
+    wire [31:0] qm_surv_val0 = qm_outcome_r ? qm_t4 : qm_t0;
+    wire [31:0] qm_surv_val1 = qm_outcome_r ? qm_t5 : qm_t1;
+    wire [31:0] qm_surv_val2 = qm_outcome_r ? qm_t6 : qm_t2;
+    wire [31:0] qm_surv_val3 = qm_outcome_r ? qm_t7 : qm_t3;
+
+    // Shared fp_mul operand mux for QMEASURE's own states: squares
+    // (S2-S5) then survivor-component scaling (W0-W3).
+    wire [31:0] qm_mul_a = (qm_state_r == QM_S2) ? qm_t0 :
+                            (qm_state_r == QM_S3) ? qm_t1 :
+                            (qm_state_r == QM_S4) ? qm_t2 :
+                            (qm_state_r == QM_S5) ? qm_t3 :
+                            (qm_state_r == QM_W0) ? qm_surv_val0 :
+                            (qm_state_r == QM_W1) ? qm_surv_val1 :
+                            (qm_state_r == QM_W2) ? qm_surv_val2 :
+                            (qm_state_r == QM_W3) ? qm_surv_val3 :
+                                                     32'b0;
+    wire [31:0] qm_mul_b = (qm_state_r == QM_S2) ? qm_t0 :
+                            (qm_state_r == QM_S3) ? qm_t1 :
+                            (qm_state_r == QM_S4) ? qm_t2 :
+                            (qm_state_r == QM_S5) ? qm_t3 :
+                            ((qm_state_r == QM_W0) || (qm_state_r == QM_W1) ||
+                             (qm_state_r == QM_W2) || (qm_state_r == QM_W3)) ? qm_scale :
+                                                     32'b0;
+
+    // fp_sqrt/fp_div: start pulses exactly once (the cycle busy is
+    // still 0), same discipline as rv32i_core/rtl/cpu_core.v's own
+    // fpu_div_start/fpu_sqrt_start.
+    wire fp_sqrt_start = (qm_state_r == QM_SQRT) && !fp_sqrt_busy;
+    wire [31:0] fp_sqrt_result;
+    fp_sqrt qm_fpsqrt (
+        .clk(clk), .reset(reset), .start(fp_sqrt_start), .a(qm_p_survived),
+        .busy(fp_sqrt_busy), .done(fp_sqrt_done), .result(fp_sqrt_result)
+    );
+
+    wire fp_div_start = (qm_state_r == QM_DIV) && !fp_div_busy;
+    wire [31:0] fp_div_result;
+    fp_div qm_fpdiv (
+        .clk(clk), .reset(reset), .start(fp_div_start), .a(Q_ONE), .b(qm_sqrtval),
+        .busy(fp_div_busy), .done(fp_div_done), .result(fp_div_result)
+    );
+
+    // R-bank writes: W0-W3 write the 2 surviving amplitudes' Re/Im,
+    // each scaled by qm_scale (computed combinationally the same cycle
+    // via the shared fp_mul, mirroring QHAD's own "compute->write same
+    // cycle" style); W4-W7 zero the 2 losing amplitudes' Re/Im.
+    wire qm_write_en = (qm_state_r == QM_W0) || (qm_state_r == QM_W1) ||
+                        (qm_state_r == QM_W2) || (qm_state_r == QM_W3) ||
+                        (qm_state_r == QM_W4) || (qm_state_r == QM_W5) ||
+                        (qm_state_r == QM_W6) || (qm_state_r == QM_W7);
+    wire [2:0] qm_write_addr = (qm_state_r == QM_W0) ? qm_surv_reg0 :
+                                (qm_state_r == QM_W1) ? (qm_surv_reg0 + 3'd1) :
+                                (qm_state_r == QM_W2) ? qm_surv_reg1 :
+                                (qm_state_r == QM_W3) ? (qm_surv_reg1 + 3'd1) :
+                                (qm_state_r == QM_W4) ? qm_lose_reg0 :
+                                (qm_state_r == QM_W5) ? (qm_lose_reg0 + 3'd1) :
+                                (qm_state_r == QM_W6) ? qm_lose_reg1 :
+                                                         (qm_lose_reg1 + 3'd1); // QM_W7
+    wire [31:0] qm_write_data = ((qm_state_r == QM_W0) || (qm_state_r == QM_W1) ||
+                                  (qm_state_r == QM_W2) || (qm_state_r == QM_W3)) ? q_mul_result : 32'b0;
+
+    // N-bank write: the 1-bit outcome, fired on the terminal cycle
+    // alongside the last R-bank zero-write - a NEW, independent write
+    // path for N (mirroring R's own q_write_en/addr/data mechanism),
+    // since the normal opcode-decoded write path can't fire mid-
+    // sequence (reg_write is a static decode of the frozen instr).
+    wire        q_n_write_en   = (qm_state_r == QM_W7);
+    wire [2:0]  q_n_write_addr = qmeasure_nd;
+    wire [31:0] q_n_write_data = {31'b0, qm_outcome_r};
 
     // ==================== Data memory (LOAD/STORE) ====================
     wire [31:0] mem_addr  = mem_base_data + mem_imm;
@@ -705,11 +999,11 @@ module cpu_core #(
     // cpu_stall = "freeze the whole CPU this cycle", the general form
     // mem_stall alone used to be. Kept as a SEPARATE wire rather than
     // folded into mem_stall's own definition: mem_stall must stay
-    // purely about the memory/MMU/bus subsystem (QHAD/QCNOT never
-    // touch memory, so mem_stall's own components are provably always
-    // 0 whenever q_stall is 1) - see the "QHAD / QCNOT" section above
-    // for q_stall's definition.
-    wire cpu_stall = mem_stall || q_stall;
+    // purely about the memory/MMU/bus subsystem (QHAD/QCNOT/QMEASURE
+    // never touch memory, so mem_stall's own components are provably
+    // always 0 whenever q_stall/qm_stall is 1) - see the "QHAD / QCNOT"
+    // and "QMEASURE" sections above for q_stall/qm_stall's definitions.
+    wire cpu_stall = mem_stall || q_stall || qm_stall;
 
     // Walker's own PTE fetch takes priority (its read must land on
     // data_mem's shared port); otherwise a translated user-mode access
@@ -847,8 +1141,14 @@ module cpu_core #(
     // silently producing wrong amplitudes. Since is_qhad/is_qcnot stay
     // asserted for the full 5-cycle sequence (instr frozen throughout
     // by cpu_stall), this defers the IRQ across the entire sequence,
-    // exactly mirroring the LOAD/STORE precedent.
-    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot);
+    // exactly mirroring the LOAD/STORE precedent. QMEASURE needs the
+    // identical treatment, for an EXTRA reason beyond register
+    // corruption: the LFSR keeps advancing every cycle regardless of
+    // qm_stall, so an undeferred IRQ would make RFT re-execute
+    // QMEASURE against a DIFFERENT random draw than the aborted
+    // attempt, compounding the corruption with silent non-
+    // reproducibility.
+    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure);
 
     wire [2:0] next_cause = illegal        ? CAUSE_ILLEGAL :
                              is_syscall     ? CAUSE_SYSCALL :

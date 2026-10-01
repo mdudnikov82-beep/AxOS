@@ -1,0 +1,12 @@
+# QMEASURE degenerate test 2/2: P0=0.0 (see docs/ISA.md's QMEASURE
+# section). amp1=(r2,r3)=1.0+0i (part of the OUTCOME-1 group when
+# measuring q0), amp0/amp2 (outcome-0 group) both 0 -> P0=0.0 exactly,
+# so outcome=1 on EVERY possible random draw. Proves the compare/mux
+# logic works in the OTHER direction from qmeasure_test_p1.axasm - a
+# single degenerate case alone couldn't distinguish "the real
+# comparator fired and correctly always came out this way" from
+# "outcome is stuck-at-one-value by a wiring bug."
+    ADDI R2, R2, 0x3F80    # r2 = 0x00003F80
+    SLLI R2, R2, 16        # r2 = 0x3F800000 = 1.0f (amp1 Re)
+    QMEASURE 0, N1         # measure q0; outcome forced 1; n1 = outcome
+    HALT N1

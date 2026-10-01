@@ -134,6 +134,20 @@ def qcnot(ctrl):
     return (OP_QCNOT << 27) | (ctrl << 26)
 
 
+# QMEASURE - third member of the same extension (see docs/ISA.md's
+# QMEASURE section). Unlike QHAD, no `half`-equivalent bit - measuring
+# a qubit inherently sums a probability over BOTH amplitudes sharing
+# that qubit's value, so 1 bit fully determines both outcome groups.
+# `nd` is a bare N-bank index (same shape as PTB's own `nreg`) - the
+# 1-bit measurement outcome is written there.
+
+OP_QMEASURE = 0b10000
+
+
+def qmeasure(qubit, nd):
+    return (OP_QMEASURE << 27) | (qubit << 26) | (nd << 23)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

@@ -1,0 +1,12 @@
+# QMEASURE degenerate test 1/2: P0=1.0 (see docs/ISA.md's QMEASURE
+# section). amp0=(r0,r1)=1.0+0i, everything else 0 (already 0 from
+# reset) -> P0=|amp0|^2+|amp2|^2=1.0 exactly, so outcome=0 on EVERY
+# possible random draw (r is always strictly <1.0). Every arithmetic
+# step here is exact in IEEE-754 (1.0^2=1.0, 0^2=0, sqrt(1.0)=1.0,
+# 1.0/1.0=1.0, x*1.0=x) - a hand-computable, no-rounding-ambiguity
+# case that still exercises the real 96-cycle hardware path end to
+# end, matching qhad_test.axasm's own design precedent.
+    ADDI R0, R0, 0x3F80    # r0 = 0x00003F80
+    SLLI R0, R0, 16        # r0 = 0x3F800000 = 1.0f (amp0 Re)
+    QMEASURE 0, N1         # measure q0; outcome forced 0; n1 = outcome
+    HALT N1

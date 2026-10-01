@@ -1,0 +1,16 @@
+# QMEASURE invariant test: a real 50/50 case (see docs/ISA.md's
+# QMEASURE section). amp0=(r0,r1)=1/sqrt(2)+0i, amp1=(r2,r3)=
+# 1/sqrt(2)+0i, amp2=amp3=0 -> a real, properly normalized state
+# (|amp0|^2+|amp1|^2=1.0) where P0=P1=0.5 approximately. The real
+# outcome is NOT predictable/assertable exactly here (genuinely
+# depends on the LFSR's live value) - the testbench must assert
+# INVARIANTS instead (exactly one group zeroed, survivor renormalized
+# to ~1.0 within float tolerance, N-bank outcome matches which group
+# survived), not a fixed expected value. This is the only one of the
+# 3 QMEASURE tests that exercises a real, non-forced branch.
+    ADDI R0, R0, 0x3F35
+    SLLI R0, R0, 16
+    ORI  R0, R0, 0x04F3   # r0 = 0x3F3504F3 = 1/sqrt(2) (amp0 Re)
+    ADDI R2, R0, 0        # r2 = r0 (copy) -> amp1 Re = 1/sqrt(2) too
+    QMEASURE 0, N1         # measure q0; real 50/50 branch; n1 = outcome
+    HALT N1

@@ -22,7 +22,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb, qhad, qcnot,
+    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure,
     write_hex,
 )
 
@@ -240,6 +240,20 @@ def encode_one(mnemonic, ops, iaddr, labels):
         if ctrl not in (0, 1):
             raise AsmError("QCNOT: ctrl must be 0 or 1")
         return qcnot(ctrl)
+
+    # QMEASURE - third member of the same extension. Unlike QHAD/QCNOT,
+    # `nd` IS a real register reference (the N-bank destination for the
+    # 1-bit outcome), so this parses like MVSR/PTB's own operand, not
+    # a plain immediate.
+    if m == 'QMEASURE':
+        if len(ops) != 2:
+            raise AsmError("QMEASURE: expected 2 operands (qubit, nd)")
+        qubit = parse_imm(ops[0])
+        if qubit not in (0, 1):
+            raise AsmError("QMEASURE: qubit must be 0 or 1")
+        nd_bank, nd = parse_reg(ops[1])
+        require_bank(nd_bank, nd, N, m, "nd")
+        return qmeasure(qubit, nd)
 
     raise AsmError(f"unknown mnemonic '{mnemonic}'")
 

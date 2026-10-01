@@ -116,6 +116,24 @@ module control_unit (
     output reg  [2:0]  q_reg_i,      // "Re" address of amplitude alpha (Im = q_reg_i+1)
     output reg  [2:0]  q_reg_j,      // "Re" address of amplitude beta  (Im = q_reg_j+1)
 
+    // QMEASURE - third member of the same extension. Unlike QHAD, it
+    // has no `half`-equivalent bit: measuring a qubit inherently sums
+    // over BOTH amplitudes sharing that qubit's value, so `qmeasure_
+    // qubit` alone fully determines both outcome groups (see docs/
+    // ISA.md's QMEASURE section for the pairing table). `qmeasure_nd`
+    // is a bare N-bank index (same shape as LOAD's nd/HALT's
+    // tohost_reg) - the 1-bit outcome is written there by the
+    // qm-sequencer's own independent N-write path, not through the
+    // normal write_data/write_bank broadcast (reg_write stays 0 here
+    // too, same reasoning as QHAD/QCNOT).
+    output reg          is_qmeasure,
+    output reg          qmeasure_qubit,
+    output reg  [2:0]  qmeasure_nd,
+    output reg  [2:0]  qm_reg_a0,    // "Re" address of outcome-0 amplitude A (Im = qm_reg_a0+1)
+    output reg  [2:0]  qm_reg_a1,    // "Re" address of outcome-0 amplitude B (Im = qm_reg_a1+1)
+    output reg  [2:0]  qm_reg_b0,    // "Re" address of outcome-1 amplitude A (Im = qm_reg_b0+1)
+    output reg  [2:0]  qm_reg_b1,    // "Re" address of outcome-1 amplitude B (Im = qm_reg_b1+1)
+
     // Resolved write target (valid whenever reg_write=1)
     output reg  [1:0]  write_bank,
     output reg  [2:0]  write_addr,
@@ -139,6 +157,7 @@ module control_unit (
     localparam OP_PTB    = 5'b01101;
     localparam OP_QHAD   = 5'b01110;
     localparam OP_QCNOT  = 5'b01111;
+    localparam OP_QMEASURE = 5'b10000;
 
     localparam BANK_N = 2'b11;
 
@@ -204,6 +223,14 @@ module control_unit (
         qcnot_ctrl     = 1'b0;
         q_reg_i        = 3'b0;
         q_reg_j        = 3'b0;
+
+        is_qmeasure    = 1'b0;
+        qmeasure_qubit = 1'b0;
+        qmeasure_nd    = 3'b0;
+        qm_reg_a0      = 3'b0;
+        qm_reg_a1      = 3'b0;
+        qm_reg_b0      = 3'b0;
+        qm_reg_b1      = 3'b0;
 
         write_bank     = 2'b0;
         write_addr     = 3'b0;
@@ -394,6 +421,31 @@ module control_unit (
                     q_reg_i = 3'd4; q_reg_j = 3'd6; // control=q1: swap amp2<->amp3
                 end
                 // no reg_write - the q-sequencer FSM in cpu_core.v owns R-bank writes for this opcode
+            end
+
+            OP_QMEASURE: begin
+                // Measuring qubit `qmeasure_qubit` inherently sums a
+                // probability over BOTH amplitudes sharing that
+                // qubit's value - unlike QHAD, there is no free
+                // "which pair" choice to disambiguate, so 1 bit fully
+                // determines both outcome groups. Both encodings
+                // meaningful, no illegal case (same style as QHAD/
+                // QCNOT's fully-populated selector fields).
+                is_qmeasure    = 1'b1;
+                qmeasure_qubit = instr[26];
+                qmeasure_nd    = instr[25:23];
+                case (qmeasure_qubit)
+                    1'b0: begin // measuring q0: outcome-0={amp0,amp2}, outcome-1={amp1,amp3}
+                        qm_reg_a0 = 3'd0; qm_reg_a1 = 3'd4;
+                        qm_reg_b0 = 3'd2; qm_reg_b1 = 3'd6;
+                    end
+                    1'b1: begin // measuring q1: outcome-0={amp0,amp1}, outcome-1={amp2,amp3}
+                        qm_reg_a0 = 3'd0; qm_reg_a1 = 3'd2;
+                        qm_reg_b0 = 3'd4; qm_reg_b1 = 3'd6;
+                    end
+                endcase
+                // no reg_write - the qm-sequencer FSM in cpu_core.v owns both the
+                // R-bank writes (collapsed amplitudes) and the N-bank write (outcome)
             end
 
             default: begin
