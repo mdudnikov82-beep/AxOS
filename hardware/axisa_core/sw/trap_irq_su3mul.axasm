@@ -1,0 +1,30 @@
+# AxISA v2.0 step 5: an external IRQ arriving while SU3MUL is running
+# (see tb/tb_trap_irq_su3mul.v's +IRQ_PHASE: its first cycle, mid-
+# sequence, or its terminal write-back cycle W5). The testbench preloads
+# the identity matrix at address 0, so SU3MUL copies pair 0 into pair 2. In
+# every phase the trap must wait until SU3MUL has finished: EPC = 0x28,
+# r2 = r0 = 1.5f. Bootstrap idiom mirrors trap_irq_qhad.axasm.
+    ADDI N1, N0, 1
+    MTSIE N1
+    ADDI N1, N0, 1
+    MTSMODE N1
+    ADDI N1, N0, 0x1C       # continue's address (word index 7)
+    MTEPC N1
+    RFT
+
+continue:
+    ADDI R0, R0, 0x3FC0     # word index 7, addr 0x1C
+    SLLI R0, R0, 16          # word index 8, addr 0x20 - r0 = 1.5f (a NORMAL float: the FPU flushes subnormals)
+    SU3MUL N0, 2, 0          # word index 9, addr 0x24 - matrix at N0 = address 0; 79 cycles, irq_in pulses inside
+    ADDI N6, N0, 1           # word index 10, addr 0x28 - must NOT commit before the deferred IRQ fires
+finish:
+    ADDI N7, N0, 77          # word index 11, addr 0x2C
+    HALT N7
+
+.org 0x200
+handler:
+    MFCAUSE N3               # n3 = cause (expect 2 = external IRQ)
+    MFEPC N4                 # n4 = epc (expect 0x28 - proves SU3MUL completed first)
+    ADDI N5, N0, 0x2C        # n5 = finish's address (word index 11)
+    MTEPC N5
+    RFT

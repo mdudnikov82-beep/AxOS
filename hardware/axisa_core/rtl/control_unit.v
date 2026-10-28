@@ -133,6 +133,14 @@ module control_unit (
     // the distance-dependent stall cycles.
     output reg          is_string,
 
+    // SU3MUL (v2.0 step 5): U*psi, U = 3x3 complex SU(3) matrix in
+    // memory at N[su3_ns], psi = color vector in R/G/B[su3_src..+1].
+    // cpu_core.v's su-sequencer owns every read/write - reg_write stays 0.
+    output reg          is_su3mul,
+    output reg  [2:0]  su3_ns,
+    output reg  [2:0]  su3_dst,
+    output reg  [2:0]  su3_src,
+
     output reg          is_qmeasure,
     output reg          qmeasure_qubit,
     output reg  [2:0]  qmeasure_nd,
@@ -166,6 +174,7 @@ module control_unit (
     localparam OP_QCNOT  = 5'b01111;
     localparam OP_QMEASURE = 5'b10000;
     localparam OP_STRING   = 5'b10001;
+    localparam OP_SU3MUL   = 5'b10010;
 
     localparam BANK_R = 2'b00;
     localparam BANK_G = 2'b01;
@@ -250,6 +259,10 @@ module control_unit (
         q_reg_j        = 3'b0;
 
         is_string      = 1'b0;
+        is_su3mul      = 1'b0;
+        su3_ns         = 3'b0;
+        su3_dst        = 3'b0;
+        su3_src        = 3'b0;
         is_qmeasure    = 1'b0;
         qmeasure_qubit = 1'b0;
         qmeasure_nd    = 3'b0;
@@ -488,6 +501,18 @@ module control_unit (
                     illegal = 1'b1;
                 else
                     reg_write = 1'b1;
+            end
+
+            OP_SU3MUL: begin
+                // opcode[31:27] ns[26:24] dst[23:21] src[20:18]. Each color
+                // component is a register PAIR (Re = idx, Im = idx+1), so
+                // idx 7 has no Im partner -> ILLEGAL.
+                is_su3mul = 1'b1;
+                su3_ns    = instr[26:24];
+                su3_dst   = instr[23:21];
+                su3_src   = instr[20:18];
+                if (instr[23:21] == 3'd7 || instr[20:18] == 3'd7)
+                    illegal = 1'b1;
             end
 
             OP_QMEASURE: begin

@@ -161,6 +161,14 @@ def string(nd, bank, qa, qb):
     return (OP_STRING << 27) | (nd << 24) | (bank << 22) | (qa << 19) | (qb << 16)
 
 
+# v2.0 step 5: SU3MUL - psi' = U * psi (U in memory at N[ns])
+OP_SU3MUL = 0b10010
+
+
+def su3mul(ns, dst, src):
+    return (OP_SU3MUL << 27) | (ns << 24) | (dst << 21) | (src << 18)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

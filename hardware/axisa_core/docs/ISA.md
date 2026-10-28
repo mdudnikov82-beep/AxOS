@@ -41,7 +41,15 @@ at a time — each step lands with its own tests before the next starts:
 | 2 | **BARYON/MESON combine rules + antiquarks**: `MAJ`, `EPS`, `SINGLET`, `ANTI` | **done** |
 | 3 | **Protons, neutrons and hadrons**: quark flavor codes, `BARYON QN` / `MESON QN` quantum numbers | **done** |
 | 4 | **Asymptotic freedom**: `STRING` — interaction time grows with distance, the string breaks into new pairs | **done** |
-| 5 | `SU3MUL`: SU(3) matrix × color vector on the FPU — the core operation of lattice-QCD supercomputers | planned |
+| 5 | **`SU3MUL`**: SU(3) matrix × color vector on the FPU — the core operation of lattice-QCD supercomputers | **done** |
+
+**v2.0 is complete.** Next up is **v2.1** (planned, same one-step-at-a-time rule):
+
+| Step | Feature | Status |
+|------|---------|--------|
+| 1 | **Hardware memory tagging (MTE-style)**: tag bits in pointers and per memory granule, `LOAD`/`STORE` trap on mismatch | planned |
+| 2 | **Hardened malloc** in AxISA assembly on top of the tags and the MMU: tagged allocations, guard pages, randomized slots | planned |
+| 3 | **String theory**: Regge trajectories — the bridge from the QCD flux tube (`STRING`) to string theory, checked against real hadrons | planned |
 
 **Breaking change in step 1:** GLUON's encoding and semantics changed
 completely (see below). v0.1 GLUON programs must be rewritten.
@@ -106,6 +114,7 @@ bit range across classes, to keep decode simple).
 | `01111`          | QCNOT    | classical quantum-circuit-sim: CNOT swap  |
 | `10000`          | QMEASURE | classical quantum-circuit-sim: probabilistic measurement/collapse |
 | `10001`          | STRING   | color flux tube: distance-dependent latency, string breaking (v2.0) |
+| `10010`          | SU3MUL   | lattice QCD: SU(3) matrix × color vector on the FPU (v2.0) |
 | others           | —        | reserved for v0.2+                        |
 
 ### ALUR — `opcode[31:27] bank[26:25] funct[24:21] rd[20:18] rs1[17:15] rs2[14:12] (unused[11:0])`
@@ -438,6 +447,54 @@ mid-stall, or on its terminal cycle — is deferred until it commits
 
 Assembler: `STRING N1, R1, R2`.
 
+### SU3MUL — `opcode[31:27] ns[26:24] dst[23:21] src[20:18] (unused[17:0])` (v2.0 step 5)
+
+The core operation of lattice QCD: a quark's color vector `ψ` is
+transported along a link of the space-time lattice by multiplying it
+with that link's **gauge field**, an SU(3) matrix `U`: `ψ' = U·ψ`.
+Lattice-QCD supercomputers (QCDOC, APEnet, and the GPUs that replaced
+them) spend most of their time doing exactly this.
+
+- **`ψ` lives in the color banks.** Its red, green and blue components
+  are complex numbers, each a register pair (Re = `idx`, Im = `idx+1`,
+  binary32) in bank R, G and B respectively. `src`/`dst` name the pair,
+  `0`…`6`; `7` has no Im partner → `ILLEGAL`. `dst` may equal `src`
+  (in place).
+- **`U` lives in memory** at the address in `N[ns]` (only N touches
+  memory — confinement): 18 binary32 words, row-major, element `(i,j)`
+  as Re at `base + 8·(3i+j)` and Im at `+4`. The base must be
+  word-aligned and the whole matrix must lie below the UART window
+  (`base ≤ 0xFB8`), otherwise `ILLEGAL`.
+- **Kernel mode only** (privilege violation in user mode): it reads
+  physical memory directly, bypassing the MMU.
+
+**Exact rounding order** (so software and test models can reproduce
+every bit). For each row `i`, starting from `acc = +0.0 + 0.0i`, for
+`j = 0, 1, 2` with `U_ij = a + bi` and `ψ_j = c + di`:
+
+```
+tRe = fl(fl(a·c) − fl(b·d))      accRe = fl(accRe + tRe)
+tIm = fl(fl(a·d) + fl(b·c))      accIm = fl(accIm + tIm)
+```
+
+`fl` is binary32 round-to-nearest-even on the shared `fp_mul` /
+`fp_addsub` (the same units as `QHAD`/`QMEASURE`). Like them, it flushes
+subnormal results to zero and does not handle NaN/∞.
+
+**Timing:** 79 cycles (8 per matrix element, plus decode and 6
+write-back cycles — one register per cycle through the single write
+port). External IRQs are deferred until it finishes, like
+`QHAD`/`QMEASURE`/`STRING`.
+
+`sw/su3mul_test.axasm` uses real SU(3) matrices — products of
+`exp(iθλ_k)` over the Gell-Mann matrices, checked unitary with
+determinant 1 — and compares every output bit with an independent
+binary32 model (`tools/gen_su3mul_test.py`), including a chained
+`U·U·ψ`, an in-place multiply, the highest legal base and all four
+traps.
+
+Assembler: `SU3MUL N1, 2, 0` (ns, dst, src).
+
 ## QHAD / QCNOT / QMEASURE (classical quantum-circuit-simulator extension)
 
 **Explicitly not real quantum hardware** - a real qubit needs a
@@ -598,7 +655,7 @@ vector is deferred until that stops being true).
 
 Cause codes (3 bits, in the `CAUSE` special register):
 `000`=illegal instruction, `001`=`SYSCALL`, `010`=external interrupt,
-`011`=privilege violation (`RFT`/`MVSR`/`PTB` executed in user mode),
+`011`=privilege violation (`RFT`/`MVSR`/`PTB`/`SU3MUL` executed in user mode),
 `100`=page fault (see "Virtual memory" below), `101`-`111` reserved.
 
 **Illegal instruction** reuses the ALREADY-EXISTING `illegal` decode
@@ -634,7 +691,7 @@ waiting for `bus_grant` (see `SHARED_MEM_BASE`) is held pending and
 only actually redirects `pc` once the stall clears - the stalled
 access is never aborted mid-flight, so interrupt latency is bounded by
 stall duration rather than needing a new "abort a grant" concept. The
-same deferral applies to an in-flight `QHAD`/`QCNOT`/`QMEASURE`/`STRING` (see
+same deferral applies to an in-flight `QHAD`/`QCNOT`/`QMEASURE`/`STRING`/`SU3MUL` (see
 above) - an IRQ arriving anywhere during the sequence (5 cycles for
 `QHAD`/`QCNOT`, ~96 for `QMEASURE`), including exactly on its terminal
 write cycle, is held pending until the whole sequence completes, not

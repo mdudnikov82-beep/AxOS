@@ -22,7 +22,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string,
+    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul,
     GLUON_FUNCT, GLUON_COLORS,
     write_hex,
 )
@@ -286,6 +286,18 @@ def encode_one(mnemonic, ops, iaddr, labels):
         if qa_bank != qb_bank or qa_bank == N:
             raise AsmError("STRING: both ends must be the same color (R, G or B)")
         return string(nd, qa_bank, qa, qb)
+
+    # v2.0 step 5: SU3MUL ns, dst, src - dst/src are register-PAIR indices
+    # (Re = idx, Im = idx+1) shared by all three color banks
+    if m == 'SU3MUL':
+        if len(ops) != 3:
+            raise AsmError("SU3MUL: expected 3 operands (ns, dst, src)")
+        ns_bank, ns = parse_reg(ops[0])
+        require_bank(ns_bank, ns, N, m, "ns")
+        dst, src = parse_imm(ops[1]), parse_imm(ops[2])
+        if not (0 <= dst <= 6 and 0 <= src <= 6):
+            raise AsmError("SU3MUL: dst/src must be 0..6 (each names the pair idx, idx+1)")
+        return su3mul(ns, dst, src)
 
     if m == 'QMEASURE':
         if len(ops) != 2:

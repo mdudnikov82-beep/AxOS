@@ -204,6 +204,9 @@ module cpu_core #(
     wire [2:0]  q_reg_i, q_reg_j;
 
     wire        is_string;
+    wire        is_su3mul;
+    wire [2:0]  su3_ns, su3_dst, su3_src;
+    wire        su3_active, su3_stall, su3_bad; // v2.0 step 5 su-sequencer (see the SU3MUL section)
     wire        is_qmeasure, qmeasure_qubit;
     wire [2:0]  qmeasure_nd;
     wire [2:0]  qm_reg_a0, qm_reg_a1, qm_reg_b0, qm_reg_b1;
@@ -211,7 +214,7 @@ module cpu_core #(
     wire [1:0]  write_bank;
     wire [2:0]  write_addr;
     wire        reg_write, illegal;
-    wire        hadron_bad; // v2.0 step 3: data-dependent ILLEGAL (BARYON/MESON QN on non-quark flavors)
+    wire        data_illegal; // v2.0: ILLEGAL that depends on register VALUES (QN flavors, SU3MUL address)
     wire        str_stall;  // v2.0 step 4: STRING's distance-dependent stall
 
     control_unit cu (
@@ -237,6 +240,7 @@ module cpu_core #(
         .is_qcnot(is_qcnot), .qcnot_ctrl(qcnot_ctrl),
         .q_reg_i(q_reg_i), .q_reg_j(q_reg_j),
         .is_string(is_string),
+        .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src),
         .is_qmeasure(is_qmeasure), .qmeasure_qubit(qmeasure_qubit), .qmeasure_nd(qmeasure_nd),
         .qm_reg_a0(qm_reg_a0), .qm_reg_a1(qm_reg_a1), .qm_reg_b0(qm_reg_b0), .qm_reg_b1(qm_reg_b1),
         .write_bank(write_bank), .write_addr(write_addr),
@@ -300,6 +304,8 @@ module cpu_core #(
         end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr && !is_ptb) begin // ALUR/ALUI/BRANCH (and illegal/default, harmlessly)
             if (bank == BANK_R) begin r_addr_a = rs1_addr; r_addr_b = rs2_addr; end
         end
+        // SU3MUL owns every R/G/B read while it runs: color j's psi pair
+        if (su3_active) begin r_addr_a = su3_src; r_addr_b = su3_src + 3'd1; end
     end
 
     always @(*) begin
@@ -325,6 +331,8 @@ module cpu_core #(
         end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr && !is_ptb) begin
             if (bank == BANK_G) begin g_addr_a = rs1_addr; g_addr_b = rs2_addr; end
         end
+        // SU3MUL owns every R/G/B read while it runs: color j's psi pair
+        if (su3_active) begin g_addr_a = su3_src; g_addr_b = su3_src + 3'd1; end
     end
 
     always @(*) begin
@@ -350,6 +358,8 @@ module cpu_core #(
         end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr && !is_ptb) begin
             if (bank == BANK_B) begin b_addr_a = rs1_addr; b_addr_b = rs2_addr; end
         end
+        // SU3MUL owns every R/G/B read while it runs: color j's psi pair
+        if (su3_active) begin b_addr_a = su3_src; b_addr_b = su3_src + 3'd1; end
     end
 
     // N is the only bank with STORE's real double-read (ns + base_reg,
@@ -396,6 +406,8 @@ module cpu_core #(
         end else if (!is_jal && !is_rft && !is_syscall) begin // ALUR/ALUI/BRANCH (BARYON has no N read - falls through harmlessly, bank stays 0!=BANK_N)
             if (bank == BANK_N) begin n_addr_a = rs1_addr; n_addr_b = rs2_addr; end
         end
+        // SU3MUL: the matrix base address (only N touches memory)
+        if (su3_active) begin n_addr_a = su3_ns; n_addr_b = su3_ns; end
     end
 
     // ==================== Register banks ====================
@@ -417,7 +429,7 @@ module cpu_core #(
     // reg_write=0, but an external IRQ landing on an ordinary
     // instruction used to let its write through as well, so after RFT
     // it ran twice (found by tb_trap_irq_string.v's n6 check, v2.0).
-    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !hadron_bad && !str_stall && !any_trap;
+    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !data_illegal && !str_stall && !any_trap;
     wire r_write_en = gated_reg_write && (write_bank == BANK_R);
     wire g_write_en = gated_reg_write && (write_bank == BANK_G);
     wire b_write_en = gated_reg_write && (write_bank == BANK_B);
@@ -436,11 +448,21 @@ module cpu_core #(
     // QMEASURE's qm-sequencer needs the identical independent-write
     // treatment, extended here (mutually exclusive with q_write_en by
     // construction, same reasoning as fpaddsub_in_a/b's own mux above).
+    // SU3MUL's write-back phase is a third independent writer, into all
+    // three color banks (one register per cycle) - same exclusivity.
     wire [2:0]  r_write_addr_final = q_write_en ? q_write_addr :
-                                      qm_write_en ? qm_write_addr : write_addr;
+                                      qm_write_en ? qm_write_addr :
+                                      su_wr_r ? su_wr_addr : write_addr;
     wire [31:0] r_write_data_final = q_write_en ? q_write_data :
-                                      qm_write_en ? qm_write_data : write_data;
-    wire        r_write_en_final   = r_write_en || q_write_en || qm_write_en;
+                                      qm_write_en ? qm_write_data :
+                                      su_wr_r ? su_wr_data : write_data;
+    wire        r_write_en_final   = r_write_en || q_write_en || qm_write_en || su_wr_r;
+    wire [2:0]  g_write_addr_final = su_wr_g ? su_wr_addr : write_addr;
+    wire [31:0] g_write_data_final = su_wr_g ? su_wr_data : write_data;
+    wire        g_write_en_final   = g_write_en || su_wr_g;
+    wire [2:0]  b_write_addr_final = su_wr_b ? su_wr_addr : write_addr;
+    wire [31:0] b_write_data_final = su_wr_b ? su_wr_data : write_data;
+    wire        b_write_en_final   = b_write_en || su_wr_b;
 
     regbank #(.HARDWIRE_REG0(0)) r_bank (
         .clk(clk), .rs1_addr(r_addr_a), .rs2_addr(r_addr_b),
@@ -450,12 +472,12 @@ module cpu_core #(
     regbank #(.HARDWIRE_REG0(0)) g_bank (
         .clk(clk), .rs1_addr(g_addr_a), .rs2_addr(g_addr_b),
         .rs1_data(g_porta_data), .rs2_data(g_portb_data),
-        .rd_addr(write_addr), .rd_data(write_data), .reg_write(g_write_en)
+        .rd_addr(g_write_addr_final), .rd_data(g_write_data_final), .reg_write(g_write_en_final)
     );
     regbank #(.HARDWIRE_REG0(0)) b_bank (
         .clk(clk), .rs1_addr(b_addr_a), .rs2_addr(b_addr_b),
         .rs1_data(b_porta_data), .rs2_data(b_portb_data),
-        .rd_addr(write_addr), .rd_data(write_data), .reg_write(b_write_en)
+        .rd_addr(b_write_addr_final), .rd_data(b_write_data_final), .reg_write(b_write_en_final)
     );
     // N-bank's own independent write path (QMEASURE's outcome bit) -
     // see q_n_write_en/addr/data's own declaration in the QMEASURE
@@ -623,8 +645,9 @@ module cpu_core #(
                                 (meson_funct == 2'b10) ? meson_qn :
                                                          meson_q1_data - meson_q2_data;
 
-    assign hadron_bad = (is_baryon && baryon_funct == 3'b011 && !baryon_qn_ok) ||
-                        (is_meson  && meson_funct  == 2'b10  && !meson_qn_ok);
+    assign data_illegal = (is_baryon && baryon_funct == 3'b011 && !baryon_qn_ok) ||
+                          (is_meson  && meson_funct  == 2'b10  && !meson_qn_ok) ||
+                          su3_bad;
 
     // ==================== STRING (v2.0 step 4: asymptotic freedom) ====================
     // d = |qa - qb|, the two quarks' positions as signed integers (33-bit
@@ -763,9 +786,10 @@ module cpu_core #(
     // core), so muxing by qm_active here is safe and keeps "one shared
     // add/mul pair, isolated from ALUR/etc." true across the whole
     // family instead of instantiating a second, redundant pair.
-    wire [31:0] fpaddsub_in_a = qm_active ? qm_add_a : q_add_a;
-    wire [31:0] fpaddsub_in_b = qm_active ? qm_add_b : q_add_b;
-    wire        fpaddsub_in_sub = qm_active ? qm_add_sub : q_add_sub;
+    // SU3MUL's su-sequencer shares the same pair (mutually exclusive too).
+    wire [31:0] fpaddsub_in_a = su3_active ? su_add_a : qm_active ? qm_add_a : q_add_a;
+    wire [31:0] fpaddsub_in_b = su3_active ? su_add_b : qm_active ? qm_add_b : q_add_b;
+    wire        fpaddsub_in_sub = su3_active ? su_add_sub : qm_active ? qm_add_sub : q_add_sub;
 
     wire [31:0] q_addsub_result;
     fp_addsub q_fpaddsub (.a(fpaddsub_in_a), .b(fpaddsub_in_b), .op_sub(fpaddsub_in_sub), .result(q_addsub_result));
@@ -775,11 +799,119 @@ module cpu_core #(
     // used INDEPENDENTLY (squaring components, then later scaling a
     // survivor component by qm_scale) - see the qm_mul_a/qm_mul_b mux
     // in the QMEASURE section below.
-    wire [31:0] fpmul_in_a = qm_active ? qm_mul_a : q_addsub_result;
-    wire [31:0] fpmul_in_b = qm_active ? qm_mul_b : Q_INV_SQRT2;
+    wire [31:0] fpmul_in_a = su3_active ? su_mul_a : qm_active ? qm_mul_a : q_addsub_result;
+    wire [31:0] fpmul_in_b = su3_active ? su_mul_b : qm_active ? qm_mul_b : Q_INV_SQRT2;
 
     wire [31:0] q_mul_result;
     fp_mul q_fpmul (.a(fpmul_in_a), .b(fpmul_in_b), .result(q_mul_result));
+
+    // ==================== SU3MUL (v2.0 step 5: lattice QCD) ====================
+    // psi' = U * psi. U: 3x3 complex matrix, 18 binary32 words row-major
+    // at N[ns] (element (i,j): Re at base+8*(3i+j), Im at +4). psi: color
+    // j's component is the register pair (Re, Im) = bank j [src, src+1],
+    // with bank 0/1/2 = R/G/B. psi' goes to [dst, dst+1] of each bank.
+    //
+    // Exact, documented rounding order (docs/ISA.md) so a reference
+    // model can match it bit for bit: for each term, with u = a+bi and
+    // psi_j = c+di,
+    //   tRe = fl(fl(a*c) - fl(b*d))    tIm = fl(fl(a*d) + fl(b*c))
+    //   acc = fl(acc + t), acc starting at +0.0, j = 0, 1, 2.
+    // Every product is registered (su_p1_r/su_p2_r) before it is added,
+    // so fp_mul never feeds fp_addsub in the same cycle: QHAD chains
+    // them the OTHER way (addsub -> mul), and a mux-selected path in
+    // both directions would be a structural combinational loop.
+    //
+    // Per term: LRE (fetch Re) LIM (fetch Im, latch a) A (latch b,
+    // p1=a*c) B (p2=b*d) C (tRe=p1-p2, p1=a*d) D (p2=b*c, accRe+=tRe)
+    // E (tIm=p1+p2) F (accIm+=tIm; row done after j=2). 9 terms x 8 +
+    // decode + 6 write-back cycles W0..W5 = 79 cycles. W5 is the
+    // terminal cycle (stall drops, pc moves on).
+    localparam SU_IDLE = 4'd0, SU_LRE = 4'd1, SU_LIM = 4'd2, SU_A = 4'd3, SU_B = 4'd4,
+               SU_C = 4'd5, SU_D = 4'd6, SU_E = 4'd7, SU_F = 4'd8,
+               SU_W0 = 4'd9, SU_W1 = 4'd10, SU_W2 = 4'd11, SU_W3 = 4'd12, SU_W4 = 4'd13, SU_W5 = 4'd14;
+    reg [3:0]  su_state_r;
+    reg [1:0]  su_i_r, su_j_r;
+    reg [31:0] su_base_r, su_a_r, su_b_r, su_p1_r, su_p2_r, su_tre_r, su_tim_r, su_accre_r, su_accim_r;
+    reg [31:0] su_ore0_r, su_oim0_r, su_ore1_r, su_oim1_r, su_ore2_r, su_oim2_r;
+
+    // Matrix must be word-aligned and lie entirely below the UART/MMIO
+    // window - SU3MUL reads physical memory directly (kernel-only).
+    assign su3_bad = is_su3mul && (su_state_r == SU_IDLE) &&
+                     ((n_porta_data[1:0] != 2'b00) || (n_porta_data > UART_TX_ADDR - 32'd72));
+    wire su3_go = is_su3mul && (su_state_r == SU_IDLE) && !sync_trap;
+
+    assign su3_active = (su_state_r != SU_IDLE) || is_su3mul;
+    assign su3_stall  = (su_state_r == SU_IDLE) ? su3_go : (su_state_r != SU_W5);
+
+    wire [3:0]  su_k       = {2'b00, su_i_r} * 4'd3 + {2'b00, su_j_r};   // 3i + j, 0..8
+    wire        su3_mem_rd = (su_state_r == SU_LRE) || (su_state_r == SU_LIM);
+    wire [31:0] su3_addr   = su_base_r + {25'd0, su_k, 3'b000} + ((su_state_r == SU_LIM) ? 32'd4 : 32'd0);
+
+    wire [31:0] su_c = (su_j_r == 2'd0) ? r_porta_data : (su_j_r == 2'd1) ? g_porta_data : b_porta_data; // psi_j Re
+    wire [31:0] su_d = (su_j_r == 2'd0) ? r_portb_data : (su_j_r == 2'd1) ? g_portb_data : b_portb_data; // psi_j Im
+
+    wire [31:0] su_mul_a = (su_state_r == SU_A || su_state_r == SU_C) ? su_a_r : su_b_r;
+    wire [31:0] su_mul_b = (su_state_r == SU_A || su_state_r == SU_D) ? su_c   : su_d;
+    wire [31:0] su_add_a = (su_state_r == SU_D) ? su_accre_r : (su_state_r == SU_F) ? su_accim_r : su_p1_r;
+    wire [31:0] su_add_b = (su_state_r == SU_D) ? su_tre_r   : (su_state_r == SU_F) ? su_tim_r   : su_p2_r;
+    wire        su_add_sub = (su_state_r == SU_C);
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            su_state_r <= SU_IDLE;
+            su_i_r <= 2'd0; su_j_r <= 2'd0;
+            su_base_r <= 32'b0; su_a_r <= 32'b0; su_b_r <= 32'b0;
+            su_p1_r <= 32'b0; su_p2_r <= 32'b0; su_tre_r <= 32'b0; su_tim_r <= 32'b0;
+            su_accre_r <= 32'b0; su_accim_r <= 32'b0;
+            su_ore0_r <= 32'b0; su_oim0_r <= 32'b0; su_ore1_r <= 32'b0;
+            su_oim1_r <= 32'b0; su_ore2_r <= 32'b0; su_oim2_r <= 32'b0;
+        end else if (!halted_r) begin
+            case (su_state_r)
+                SU_IDLE: if (su3_go) begin
+                    su_base_r  <= n_porta_data;
+                    su_i_r     <= 2'd0; su_j_r <= 2'd0;
+                    su_accre_r <= 32'b0; su_accim_r <= 32'b0; // +0.0
+                    su_state_r <= SU_LRE;
+                end
+                SU_LRE: su_state_r <= SU_LIM;
+                SU_LIM: begin su_a_r <= dmem_rdata; su_state_r <= SU_A; end
+                SU_A:   begin su_b_r <= dmem_rdata; su_p1_r <= q_mul_result; su_state_r <= SU_B; end
+                SU_B:   begin su_p2_r <= q_mul_result; su_state_r <= SU_C; end
+                SU_C:   begin su_tre_r <= q_addsub_result; su_p1_r <= q_mul_result; su_state_r <= SU_D; end
+                SU_D:   begin su_p2_r <= q_mul_result; su_accre_r <= q_addsub_result; su_state_r <= SU_E; end
+                SU_E:   begin su_tim_r <= q_addsub_result; su_state_r <= SU_F; end
+                SU_F: begin
+                    if (su_j_r == 2'd2) begin // row i finished
+                        case (su_i_r)
+                            2'd0:    begin su_ore0_r <= su_accre_r; su_oim0_r <= q_addsub_result; end
+                            2'd1:    begin su_ore1_r <= su_accre_r; su_oim1_r <= q_addsub_result; end
+                            default: begin su_ore2_r <= su_accre_r; su_oim2_r <= q_addsub_result; end
+                        endcase
+                        su_accre_r <= 32'b0; su_accim_r <= 32'b0;
+                        su_j_r     <= 2'd0;
+                        su_i_r     <= su_i_r + 2'd1;
+                        su_state_r <= (su_i_r == 2'd2) ? SU_W0 : SU_LRE;
+                    end else begin
+                        su_accim_r <= q_addsub_result;
+                        su_j_r     <= su_j_r + 2'd1;
+                        su_state_r <= SU_LRE;
+                    end
+                end
+                SU_W5:   su_state_r <= SU_IDLE;
+                default: su_state_r <= su_state_r + 4'd1; // W0..W4
+            endcase
+        end
+    end
+
+    // Write-back: W0/W1 = red (Re, Im), W2/W3 = green, W4/W5 = blue.
+    // W0/W2/W4 have odd state codes (9/11/13) -> Re at dst; W1/W3/W5 -> Im at dst+1.
+    wire        su_wr_r = (su_state_r == SU_W0) || (su_state_r == SU_W1);
+    wire        su_wr_g = (su_state_r == SU_W2) || (su_state_r == SU_W3);
+    wire        su_wr_b = (su_state_r == SU_W4) || (su_state_r == SU_W5);
+    wire [2:0]  su_wr_addr = su3_dst + {2'b00, ~su_state_r[0]};
+    wire [31:0] su_wr_data = (su_state_r == SU_W0) ? su_ore0_r : (su_state_r == SU_W1) ? su_oim0_r :
+                             (su_state_r == SU_W2) ? su_ore1_r : (su_state_r == SU_W3) ? su_oim1_r :
+                             (su_state_r == SU_W4) ? su_ore2_r : su_oim2_r;
 
     // QCNOT's write value is a pure move: whatever this cycle's R-bank
     // read (S1) or a scratch flop (S2-S4) already holds - no
@@ -1147,7 +1279,7 @@ module cpu_core #(
     // never touch memory, so mem_stall's own components are provably
     // always 0 whenever q_stall/qm_stall is 1) - see the "QHAD / QCNOT"
     // and "QMEASURE" sections above for q_stall/qm_stall's definitions.
-    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall;
+    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall || su3_stall;
 
     // Walker's own PTE fetch takes priority (its read must land on
     // data_mem's shared port); otherwise a translated user-mode access
@@ -1156,7 +1288,8 @@ module cpu_core #(
     // elsewhere and whose private-array read here is simply discarded
     // below) passes the raw address through unchanged - identical to
     // rv32i_core/rtl/cpu_core.v's own dmem_addr muxing.
-    wire [31:0] dmem_addr_final = mmu_walk_active ? mmu_walk_addr :
+    wire [31:0] dmem_addr_final = su3_mem_rd      ? su3_addr :      // SU3MUL matrix fetch (kernel-only, physical)
+                                   mmu_walk_active ? mmu_walk_addr :
                                    mmu_is_access   ? mmu_paddr    :
                                                       mem_addr;
 
@@ -1237,7 +1370,7 @@ module cpu_core #(
     // lives HERE, not in control_unit.v - keeps that module a pure
     // function of `instr` alone (confirmed by design review: no other
     // module needs to know the CPU's runtime state just to decode).
-    wire priv_violation = (is_rft || is_mvsr || is_ptb) && (mode_r == MODE_USER);
+    wire priv_violation = (is_rft || is_mvsr || is_ptb || is_su3mul) && (mode_r == MODE_USER); // SU3MUL reads physical memory directly
     // Exceptions are never maskable by ie_r (a real bug in kernel code
     // shouldn't be silently swallowed) - only the external-IRQ cause
     // below is gated by ie_r. A synchronous double-fault (the handler
@@ -1248,7 +1381,7 @@ module cpu_core #(
     // by construction (it can only ever coincide with is_load/is_store,
     // which illegal/is_syscall/priv_violation's own opcode classes
     // never are).
-    wire sync_trap = illegal || hadron_bad || is_syscall || priv_violation || mmu_fault;
+    wire sync_trap = illegal || data_illegal || is_syscall || priv_violation || mmu_fault;
 
     // Latched, not a live level - a brief irq_in pulse must never be
     // missed even if it arrives mid-mem_stall (see below), and clearing
@@ -1294,9 +1427,9 @@ module cpu_core #(
     // reproducibility.
     // STRING (v2.0) gets the same deferral: its write commits on the
     // terminal cycle, so an IRQ there would make RFT redo it.
-    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string);
+    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul);
 
-    wire [2:0] next_cause = (illegal || hadron_bad) ? CAUSE_ILLEGAL :
+    wire [2:0] next_cause = (illegal || data_illegal) ? CAUSE_ILLEGAL :
                              is_syscall     ? CAUSE_SYSCALL :
                              priv_violation ? CAUSE_PRIV :
                              mmu_fault      ? CAUSE_PAGE_FAULT :
