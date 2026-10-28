@@ -98,3 +98,4 @@ hardware/axisa_core/asic/runs/
 
 # OpenLane2 Tiny Tapeout wrapper build output (hardware/axisa_core/tinytapeout)
 hardware/axisa_core/tinytapeout/runs/
+.aider*
