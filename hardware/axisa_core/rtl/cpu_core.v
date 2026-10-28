@@ -75,6 +75,10 @@ module cpu_core #(
     // rv32i_core/rtl/mmu.v's own precedent exactly. Only a test that
     // deliberately wants to exercise translation passes MMU_ENABLE=1.
     parameter MMU_ENABLE    = 0,
+    // v2.1: MTE-style memory tagging (docs/ISA.md "Memory tagging").
+    // 0 removes the tag memory and every tag check (LDG reads tag 0,
+    // STG does nothing) - for area-constrained builds.
+    parameter MTE_ENABLE    = 1,
     parameter PT_INDEX_BITS = 4
 ) (
     input  wire        clk,
@@ -204,6 +208,9 @@ module cpu_core #(
     wire [2:0]  q_reg_i, q_reg_j;
 
     wire        is_string;
+    wire        is_mtag;
+    wire [1:0]  mtag_funct;
+    wire [2:0]  mtag_ns;
     wire        is_su3mul;
     wire [2:0]  su3_ns, su3_dst, su3_src;
     wire        su3_active, su3_stall, su3_bad; // v2.0 step 5 su-sequencer (see the SU3MUL section)
@@ -214,7 +221,8 @@ module cpu_core #(
     wire [1:0]  write_bank;
     wire [2:0]  write_addr;
     wire        reg_write, illegal;
-    wire        data_illegal; // v2.0: ILLEGAL that depends on register VALUES (QN flavors, SU3MUL address)
+    wire        data_illegal; // v2.0: ILLEGAL that depends on register VALUES (QN flavors, SU3MUL/STG/LDG address)
+    wire        tag_fault;    // v2.1: MTE tag mismatch on LOAD/STORE
     wire        str_stall;  // v2.0 step 4: STRING's distance-dependent stall
 
     control_unit cu (
@@ -240,6 +248,7 @@ module cpu_core #(
         .is_qcnot(is_qcnot), .qcnot_ctrl(qcnot_ctrl),
         .q_reg_i(q_reg_i), .q_reg_j(q_reg_j),
         .is_string(is_string),
+        .is_mtag(is_mtag), .mtag_funct(mtag_funct), .mtag_ns(mtag_ns),
         .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src),
         .is_qmeasure(is_qmeasure), .qmeasure_qubit(qmeasure_qubit), .qmeasure_nd(qmeasure_nd),
         .qm_reg_a0(qm_reg_a0), .qm_reg_a1(qm_reg_a1), .qm_reg_b0(qm_reg_b0), .qm_reg_b1(qm_reg_b1),
@@ -408,6 +417,8 @@ module cpu_core #(
         end
         // SU3MUL: the matrix base address (only N touches memory)
         if (su3_active) begin n_addr_a = su3_ns; n_addr_b = su3_ns; end
+        // MTAG: its pointer operand
+        if (is_mtag) begin n_addr_a = mtag_ns; n_addr_b = mtag_ns; end
     end
 
     // ==================== Register banks ====================
@@ -647,7 +658,7 @@ module cpu_core #(
 
     assign data_illegal = (is_baryon && baryon_funct == 3'b011 && !baryon_qn_ok) ||
                           (is_meson  && meson_funct  == 2'b10  && !meson_qn_ok) ||
-                          su3_bad;
+                          su3_bad || mtag_bad;
 
     // ==================== STRING (v2.0 step 4: asymptotic freedom) ====================
     // d = |qa - qb|, the two quarks' positions as signed integers (33-bit
@@ -1172,7 +1183,13 @@ module cpu_core #(
     wire [31:0] q_n_write_data = {31'b0, qm_outcome_r};
 
     // ==================== Data memory (LOAD/STORE) ====================
-    wire [31:0] mem_addr  = mem_base_data + mem_imm;
+    // v2.1: bits [31:28] are the pointer's MTE tag, not address bits -
+    // every decode below (shared/UART/MMU/dmem) sees the stripped
+    // address, like ARM's top-byte-ignore. Untagged pointers (tag 0)
+    // behave exactly as before.
+    wire [31:0] mem_addr_tagged = mem_base_data + mem_imm;
+    wire [3:0]  mem_ptr_tag     = mem_addr_tagged[31:28];
+    wire [31:0] mem_addr        = {4'b0, mem_addr_tagged[27:0]};
 
     // Address-range decode - a dedicated adder that exists ONLY for
     // LOAD/STORE addressing (unlike rv32i_core's alu_result, which is
@@ -1308,6 +1325,54 @@ module cpu_core #(
     assign bus_mem_size      = 2'b10;
     assign bus_mem_unsigned  = 1'b0;
 
+    // ==================== Memory tagging (v2.1 step 1, MTE-style) ====================
+    // One 4-bit allocation tag per 16-byte granule of the private data
+    // memory. A LOAD/STORE to private memory must carry the same tag in
+    // its pointer's top nibble, checked on the PHYSICAL granule in the
+    // cycle the access commits; a mismatch is a precise TAG_FAULT
+    // (CAUSE 5): no register write, no memory write. UART and the shared
+    // NoC window are not tagged. Like ARM MTE this catches bugs
+    // (overflow into the next allocation, use after free) with
+    // probability 15/16 per random tag - it is not an isolation
+    // boundary (the MMU is).
+    localparam TAG_GRANULES = DATA_MEM_WORDS / 4;
+    localparam TG_BITS      = $clog2(TAG_GRANULES);
+
+    wire [3:0] mtag_ptr_tag = n_porta_data[31:28];
+    wire [31:0] mtag_addr   = {4'b0, n_porta_data[27:0]};
+    wire [TG_BITS-1:0] mtag_gidx = mtag_addr[TG_BITS+3:4];
+    wire [TG_BITS-1:0] mem_gidx  = dmem_addr_final[TG_BITS+3:4];
+    wire [3:0] mem_alloc_tag, mtag_alloc_tag;
+
+    // STG/LDG name a granule by physical address: kernel-only, and the
+    // address must be inside the tagged memory.
+    wire mtag_bad = is_mtag && (mtag_funct != 2'b00) && (mtag_addr >= DATA_MEM_WORDS * 4);
+    wire stg_commit = is_mtag && (mtag_funct == 2'b01) && !cpu_stall && !any_trap && !halted_r;
+
+    generate
+        if (MTE_ENABLE) begin: g_mte
+            reg [3:0] tag_mem [0:TAG_GRANULES-1];
+            integer ti;
+            initial for (ti = 0; ti < TAG_GRANULES; ti = ti + 1) tag_mem[ti] = 4'd0;
+            always @(posedge clk)
+                if (stg_commit) tag_mem[mtag_gidx] <= mtag_ptr_tag;
+            assign mem_alloc_tag  = tag_mem[mem_gidx];
+            assign mtag_alloc_tag = tag_mem[mtag_gidx];
+        end else begin: g_no_mte
+            assign mem_alloc_tag  = 4'd0;
+            assign mtag_alloc_tag = 4'd0;
+        end
+    endgenerate
+
+    wire mte_checked = (is_load || is_store) && !is_shared_access && !is_uart_addr;
+    assign tag_fault = (MTE_ENABLE != 0) && mte_checked && !mem_stall && !mmu_fault &&
+                       (mem_ptr_tag != mem_alloc_tag);
+
+    // IRG: a random NONZERO tag (0 means "untagged"); LDG: the granule's tag
+    wire [3:0]  irg_tag     = (lfsr_q[3:0] == 4'd0) ? 4'd1 : lfsr_q[3:0];
+    wire [31:0] mtag_result = (mtag_funct == 2'b00) ? {irg_tag, n_porta_data[27:0]} :
+                                                      {mtag_alloc_tag, n_porta_data[27:0]};
+
     wire [31:0] dmem_rdata;
     // A shared-range or UART-range STORE must never ALSO land in the
     // private memory (it would otherwise silently alias into whatever
@@ -1332,7 +1397,7 @@ module cpu_core #(
         // pending STORE's we must not fire against that stale address,
         // exactly the subtlety rv32i_core/rtl/mmu.v's own module header
         // documents as a real historical bug there).
-        .we(is_store && !is_shared_access && !is_uart_addr && !mmu_walk_active && !mmu_stall),
+        .we(is_store && !is_shared_access && !is_uart_addr && !mmu_walk_active && !mmu_stall && !tag_fault),
         .rdata(dmem_rdata)
     );
 
@@ -1360,6 +1425,7 @@ module cpu_core #(
     localparam CAUSE_IRQ     = 3'b010;
     localparam CAUSE_PRIV    = 3'b011;
     localparam CAUSE_PAGE_FAULT = 3'b100;
+    localparam CAUSE_TAG_FAULT  = 3'b101; // v2.1 MTE
 
     reg [31:0] epc_r;
     reg [2:0]  cause_r;
@@ -1370,7 +1436,8 @@ module cpu_core #(
     // lives HERE, not in control_unit.v - keeps that module a pure
     // function of `instr` alone (confirmed by design review: no other
     // module needs to know the CPU's runtime state just to decode).
-    wire priv_violation = (is_rft || is_mvsr || is_ptb || is_su3mul) && (mode_r == MODE_USER); // SU3MUL reads physical memory directly
+    wire priv_violation = (is_rft || is_mvsr || is_ptb || is_su3mul || (is_mtag && mtag_funct != 2'b00)) &&
+                          (mode_r == MODE_USER); // SU3MUL/STG/LDG address physical memory directly
     // Exceptions are never maskable by ie_r (a real bug in kernel code
     // shouldn't be silently swallowed) - only the external-IRQ cause
     // below is gated by ie_r. A synchronous double-fault (the handler
@@ -1381,7 +1448,7 @@ module cpu_core #(
     // by construction (it can only ever coincide with is_load/is_store,
     // which illegal/is_syscall/priv_violation's own opcode classes
     // never are).
-    wire sync_trap = illegal || data_illegal || is_syscall || priv_violation || mmu_fault;
+    wire sync_trap = illegal || data_illegal || is_syscall || priv_violation || mmu_fault || tag_fault;
 
     // Latched, not a live level - a brief irq_in pulse must never be
     // missed even if it arrives mid-mem_stall (see below), and clearing
@@ -1433,6 +1500,7 @@ module cpu_core #(
                              is_syscall     ? CAUSE_SYSCALL :
                              priv_violation ? CAUSE_PRIV :
                              mmu_fault      ? CAUSE_PAGE_FAULT :
+                             tag_fault      ? CAUSE_TAG_FAULT :
                                               CAUSE_IRQ; // the only remaining way any_trap can be set
 
     // MVSR read direction (special -> N, via the normal write_data/
@@ -1453,6 +1521,7 @@ module cpu_core #(
                          is_baryon ? baryon_result :
                          is_meson  ? meson_result :
                          is_string ? str_d :
+                         is_mtag   ? mtag_result :
                          is_load   ? effective_dmem_rdata :
                          is_jal    ? (pc_r + 32'd4) :
                          (is_mvsr && !mvsr_dir) ? mvsr_read_data :

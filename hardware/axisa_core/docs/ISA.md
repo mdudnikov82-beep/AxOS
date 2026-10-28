@@ -47,7 +47,7 @@ at a time — each step lands with its own tests before the next starts:
 
 | Step | Feature | Status |
 |------|---------|--------|
-| 1 | **Hardware memory tagging (MTE-style)**: tag bits in pointers and per memory granule, `LOAD`/`STORE` trap on mismatch | planned |
+| 1 | **Hardware memory tagging (MTE-style)**: tag bits in pointers and per memory granule, `LOAD`/`STORE` trap on mismatch | **done** |
 | 2 | **Hardened malloc** in AxISA assembly on top of the tags and the MMU: tagged allocations, guard pages, randomized slots | planned |
 | 3 | **String theory**: Regge trajectories — the bridge from the QCD flux tube (`STRING`) to string theory, checked against real hadrons | planned |
 
@@ -115,6 +115,7 @@ bit range across classes, to keep decode simple).
 | `10000`          | QMEASURE | classical quantum-circuit-sim: probabilistic measurement/collapse |
 | `10001`          | STRING   | color flux tube: distance-dependent latency, string breaking (v2.0) |
 | `10010`          | SU3MUL   | lattice QCD: SU(3) matrix × color vector on the FPU (v2.0) |
+| `10011`          | MTAG     | memory tagging: `IRG` / `STG` / `LDG` (v2.1) |
 | others           | —        | reserved for v0.2+                        |
 
 ### ALUR — `opcode[31:27] bank[26:25] funct[24:21] rd[20:18] rs1[17:15] rs2[14:12] (unused[11:0])`
@@ -656,7 +657,7 @@ vector is deferred until that stops being true).
 Cause codes (3 bits, in the `CAUSE` special register):
 `000`=illegal instruction, `001`=`SYSCALL`, `010`=external interrupt,
 `011`=privilege violation (`RFT`/`MVSR`/`PTB`/`SU3MUL` executed in user mode),
-`100`=page fault (see "Virtual memory" below), `101`-`111` reserved.
+`100`=page fault (see "Virtual memory" below), `101`=tag fault (v2.1, see "Memory tagging"), `110`-`111` reserved.
 
 **Illegal instruction** reuses the ALREADY-EXISTING `illegal` decode
 signal (reserved ALUR/ALUI funct, reserved BARYON/MESON funct, or an
@@ -765,6 +766,61 @@ see "Scope" above). Multiple independent address spaces (one page
 table per process) are possible today by swapping `PTB` on a context
 switch, but there is no process/scheduler concept in v0.1 to drive
 that - a real v0.2+ project, not a small follow-on to this one.
+
+## Memory tagging (v2.1 step 1, MTE-style)
+
+Modelled on ARM's Memory Tagging Extension. It catches the two most
+common memory-safety bugs in C-style code — writing past the end of an
+allocation, and using memory after it was freed — in hardware, on the
+access itself.
+
+- **Pointer tag.** Bits `[31:28]` of every `LOAD`/`STORE` address are a
+  4-bit tag, not address bits: they are stripped before any address
+  decode (UART, shared window, MMU, data memory), like ARM's
+  top-byte-ignore. Addresses are therefore 28 bits. Tag 0 means
+  "untagged", so every program from before v2.1 runs unchanged.
+- **Memory tag.** Every 16-byte **granule** of the private data memory
+  has a 4-bit allocation tag in a separate tag memory (512 granules for
+  the default 8 KB; reset value 0).
+- **Check.** A `LOAD`/`STORE` to private data memory compares the
+  pointer's tag with the tag of the **physical** granule it touches —
+  after MMU translation in user mode. On a mismatch it traps with
+  **`TAG_FAULT` (CAUSE `101`)**: nothing is written to memory or to the
+  destination register, and `epc` points at the access. The UART
+  addresses and the shared NoC window are not tagged.
+
+`MTAG` — `opcode[31:27] funct[26:25] nd[24:22] ns[21:19] (unused[18:0])`,
+pointers are `N` registers:
+
+| `funct` | Assembler | Effect | Mode |
+|---------|-----------|--------|------|
+| `00` | `IRG nd, ns` | `nd = ns` with a random **nonzero** tag from the hardware LFSR | any |
+| `01` | `STG ns` | the granule `ns` points at gets `ns`'s tag | kernel |
+| `10` | `LDG nd, ns` | `nd = ns` with its tag replaced by the granule's tag | kernel |
+| `11` | — | reserved → `ILLEGAL` | |
+
+`STG`/`LDG` name a granule by physical address, so they are
+kernel-only (privilege violation in user mode — tagging user memory
+goes through the kernel), and the address must be inside the tag
+memory (`< DATA_MEM_WORDS·4`, so not the shared window) or `ILLEGAL`.
+
+How an allocator uses it: `IRG` a fresh tag for the new block, `STG`
+each of its granules, hand out the tagged pointer. An overflow into the
+next block hits a granule with a different tag; after `free`, retagging
+the block makes every old pointer fault. With 15 possible tags a bug
+escapes detection with probability 1/15 — like ARM MTE this is a
+bug-catcher, not an isolation boundary (that's the MMU's job).
+
+`sw/mte_test.axasm` shows exactly these: a tagged store/load, a stale
+untagged pointer, an overflow past the granule, `LDG`, use-after-free
+after retagging, the untagged UART window, and the illegal/privileged
+cases. `sw/mte_mmu_test.axasm` proves the check uses the translated
+physical granule.
+
+The `cpu_core` parameter `MTE_ENABLE` (default 1) can be set to 0 for
+area-constrained builds: the tag memory (`DATA_MEM_WORDS` bits — an
+eighth of the data memory) and every check disappear, `LDG` reads tag
+0 and `STG` does nothing.
 
 ## Reserved `funct` behavior (decided ahead of RTL, per design review)
 

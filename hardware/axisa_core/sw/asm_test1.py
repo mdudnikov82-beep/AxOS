@@ -169,6 +169,14 @@ def su3mul(ns, dst, src):
     return (OP_SU3MUL << 27) | (ns << 24) | (dst << 21) | (src << 18)
 
 
+# v2.1 step 1: MTAG - memory tagging (IRG=0, STG=1, LDG=2)
+OP_MTAG = 0b10011
+
+
+def mtag(funct, nd, ns):
+    return (OP_MTAG << 27) | (funct << 25) | (nd << 22) | (ns << 19)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

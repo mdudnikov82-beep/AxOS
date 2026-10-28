@@ -22,7 +22,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul,
+    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag,
     GLUON_FUNCT, GLUON_COLORS,
     write_hex,
 )
@@ -298,6 +298,19 @@ def encode_one(mnemonic, ops, iaddr, labels):
         if not (0 <= dst <= 6 and 0 <= src <= 6):
             raise AsmError("SU3MUL: dst/src must be 0..6 (each names the pair idx, idx+1)")
         return su3mul(ns, dst, src)
+
+    # v2.1 step 1: memory tagging. IRG nd, ns / STG ns / LDG nd, ns -
+    # pointers are N registers (only N touches memory)
+    if m in ('IRG', 'STG', 'LDG'):
+        want = 1 if m == 'STG' else 2
+        if len(ops) != want:
+            raise AsmError(f"{m}: expected {want} operand(s)")
+        regs = [parse_reg(o) for o in ops]
+        for (bk, r), role in zip(regs, ("nd", "ns") if want == 2 else ("ns",)):
+            require_bank(bk, r, N, m, role)
+        nd = regs[0][1] if want == 2 else 0
+        ns = regs[-1][1]
+        return mtag({'IRG': 0, 'STG': 1, 'LDG': 2}[m], nd, ns)
 
     if m == 'QMEASURE':
         if len(ops) != 2:

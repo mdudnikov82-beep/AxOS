@@ -1,0 +1,87 @@
+# AxISA v2.1 step 1 (see docs/ISA.md's "Memory tagging" section):
+# MTE-style tagging, the bugs it exists to catch, and its traps.
+# tb/tb_mte.v checks the results.
+#
+# Registers: n1 = tagged pointer, n2 = untagged pointer to 0x400,
+# n4 = sentinel 55 (blocked LOADs must not overwrite it), n5/n6 scratch.
+# The handler only touches n3 and n7: n7 += 256 + CAUSE, so at the end
+# n7 >> 8 = traps taken and n7 & 255 = sum of their causes.
+#
+# Expected traps: 4 TAG_FAULT (cause 5), 3 ILLEGAL (0), 1 PRIV (3)
+#   -> n7 = 8*256 + 23 = 2071.
+    ADDI N2, N0, 0x400
+    ADDI N4, N0, 55
+
+# untagged memory + untagged pointers still work exactly as before
+    ADDI N5, N0, 111
+    STORE N5, N2, 0          # [0x400] = 111
+    STORE N5, N2, 4          # [0x404] = 111
+    STORE N5, N2, 16         # [0x410] = 111 (next granule)
+
+# "malloc": random tag for the pointer, paint the granule with it
+    IRG N1, N2               # n1 = {random nonzero tag t, 0x400}
+    STORE N1, N2, 0x100      # [0x500] = n1, for the testbench
+    STG N1                   # granule 0x400..0x40F gets tag t
+
+    ADDI N5, N0, 222
+    STORE N5, N1, 0          # tagged store: ok, [0x400] = 222
+    LOAD N6, N1, 0           # tagged load: ok, n6 = 222
+    STORE N6, N2, 0x104      # [0x504] = 222
+
+# a stale/untagged pointer into tagged memory
+    ADDI N5, N0, 333
+    STORE N5, N2, 4          # TAG_FAULT 1 - [0x404] stays 111
+    LOAD N4, N2, 0           # TAG_FAULT 2 - n4 stays 55
+
+# buffer overflow: the tagged pointer runs past its 16-byte granule
+    STORE N5, N1, 12         # last word of the granule: ok, [0x40C] = 333
+    STORE N5, N1, 16         # TAG_FAULT 3 - [0x410] stays 111
+
+# LDG recovers the tagged pointer from an untagged one
+    LDG N6, N2               # n6 = {t, 0x400}
+    STORE N6, N2, 0x108      # [0x508] = n6 (must equal [0x500])
+
+# use after free: the allocator retags the granule (tag t+1)
+    ADDI N6, N0, 1
+    SLLI N6, N6, 28
+    ADD N6, N1, N6           # n6 = {t+1, 0x400}
+    STG N6
+    LOAD N4, N1, 0           # TAG_FAULT 4 - old pointer, n4 stays 55
+    LOAD N5, N6, 0           # new pointer: ok, n5 = 222
+    STORE N5, N2, 0x10C      # [0x50C] = 222
+
+# the UART window is not tagged: a tagged pointer to it still works
+    ADDI N6, N0, 7
+    SLLI N6, N6, 28
+    ORI N6, N6, 0x1000       # n6 = {7, UART_TX}
+    STORE N5, N6, 0          # sends 222 (0xDE), no fault
+
+# illegal: STG/LDG outside the tagged memory, reserved funct
+    ADDI N6, N0, 0x2000      # shared NoC window - not in tag memory
+    STG N6                   # ILLEGAL
+    LDG N5, N6               # ILLEGAL (n5 stays 222)
+    .word 0x9E000000         # MTAG funct 11 - ILLEGAL
+
+# user mode: IRG is fine, STG/LDG are kernel-only
+    ADDI N3, N0, 0
+    MTSMODE N3               # saved_mode = user
+    ADDI N3, N0, 0x180
+    MTEPC N3
+    RFT
+
+.org 0x180
+user_code:
+    IRG N6, N2
+    STORE N6, N2, 0x110      # [0x510] = user-mode IRG pointer
+    STG N6                   # PRIV
+    HALT N7                  # tohost = 2071
+
+.org 0x200
+handler:
+    MFCAUSE N3
+    ADDI N7, N7, 256
+    ADD N7, N7, N3           # n7 += 256 + cause
+    MFEPC N3
+    ADDI N3, N3, 4           # skip the trapping instruction
+    MTEPC N3
+    RFT

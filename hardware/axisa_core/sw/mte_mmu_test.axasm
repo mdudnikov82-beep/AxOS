@@ -1,0 +1,45 @@
+# AxISA v2.1 step 1: memory tagging under the MMU. The kernel tags the
+# PHYSICAL granule 0x1100 with tag 9; user code reaches it through
+# virtual 0x100 (page 0 -> physical page 1, as in mmu_test.axasm). The
+# tag check must use the translated physical granule: a tag-9 pointer
+# to virtual 0x100 works, an untagged one to virtual 0x104 faults. If
+# the hardware wrongly checked the VIRTUAL granule (tag 0), both
+# outcomes would flip. Handler: n7 += 256 + cause (expect 261).
+    ADDI N1, N0, 0x1040      # page table base
+    MTPTB N1
+    ADDI N2, N0, 0x1040
+    ADDI N3, N0, 0x1007      # PTE[0]: virtual page 0 -> physical page 1, R/W/V
+    STORE N3, N2, 0
+    ADDI N6, N0, 9
+    SLLI N6, N6, 28
+    ORI N6, N6, 0x1100       # kernel pointer {9, physical 0x1100}
+    STG N6                   # tag the physical granule
+    ADDI N5, N0, 0
+    MTSMODE N5               # saved_mode = user
+    MTSIE N5
+    ADDI N5, N0, 0x80
+    MTEPC N5
+    RFT
+
+.org 0x80
+user_code:
+    ADDI N1, N0, 9
+    SLLI N1, N1, 28
+    ORI N1, N1, 0x100        # {9, virtual 0x100}
+    ADDI N2, N0, 0xAB
+    STORE N2, N1, 0          # ok: lands at physical 0x1100
+    ADDI N3, N0, 0x104       # untagged virtual 0x104 -> physical 0x1104 (tag 9)
+    ADDI N4, N0, 0xCD
+    STORE N4, N3, 0          # TAG_FAULT: nothing written
+    LOAD N5, N1, 0           # ok: n5 = 0xAB
+    HALT N7                  # tohost = 256 + 5
+
+.org 0x200
+handler:
+    MFCAUSE N3
+    ADDI N7, N7, 256
+    ADD N7, N7, N3
+    MFEPC N3
+    ADDI N3, N3, 4
+    MTEPC N3
+    RFT
