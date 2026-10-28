@@ -40,7 +40,7 @@ at a time — each step lands with its own tests before the next starts:
 | 1 | **Real gluons**: the 8 GLUON codes are the 8 real gluons, with color rules enforced in hardware | **done** |
 | 2 | **BARYON/MESON combine rules + antiquarks**: `MAJ`, `EPS`, `SINGLET`, `ANTI` | **done** |
 | 3 | **Protons, neutrons and hadrons**: quark flavor codes, `BARYON QN` / `MESON QN` quantum numbers | **done** |
-| 4 | Asymptotic freedom: distance-dependent interaction latency, string breaking | planned |
+| 4 | **Asymptotic freedom**: `STRING` — interaction time grows with distance, the string breaks into new pairs | **done** |
 | 5 | `SU3MUL`: SU(3) matrix × color vector on the FPU — the core operation of lattice-QCD supercomputers | planned |
 
 **Breaking change in step 1:** GLUON's encoding and semantics changed
@@ -105,6 +105,7 @@ bit range across classes, to keep decode simple).
 | `01110`          | QHAD     | classical quantum-circuit-sim: Hadamard mix |
 | `01111`          | QCNOT    | classical quantum-circuit-sim: CNOT swap  |
 | `10000`          | QMEASURE | classical quantum-circuit-sim: probabilistic measurement/collapse |
+| `10001`          | STRING   | color flux tube: distance-dependent latency, string breaking (v2.0) |
 | others           | —        | reserved for v0.2+                        |
 
 ### ALUR — `opcode[31:27] bank[26:25] funct[24:21] rd[20:18] rs1[17:15] rs2[14:12] (unused[11:0])`
@@ -392,6 +393,51 @@ selreg field at all, just `dir` (`0`=read `PTB`→`n_reg`, `1`=write
 `n_reg`→`PTB`) and a bare 3-bit `n_reg`, the same shape as `MVSR`'s own
 `n_reg`.
 
+### STRING — `opcode[31:27] nd[26:24] bank[23:22] qa[21:19] qb[18:16] (unused[15:0])` (v2.0 step 4)
+
+Asymptotic freedom and confinement in one instruction. Two quarks of
+the same color sit at positions `qa` and `qb` (signed integers) with a
+gluon flux tube — a "string" — between them. Their distance is
+`d = |qa − qb|` (computed with a 33-bit difference, so it is exact for
+any two 32-bit values; max `2³²−1`).
+
+**Timing is the physics.** The strong coupling α_s is weak at short
+distance (asymptotic freedom — quarks close together behave almost
+free) and grows with distance. `STRING` takes **`1 + E` cycles**, where
+`E` is the number of significant bits of `d` — a logarithmic stand-in
+for the running coupling, which in real QCD also changes
+logarithmically with the distance scale:
+
+| `d` | cycles |
+|-----|--------|
+| 0 | 1 |
+| 1 | 2 |
+| 5 | 4 |
+| 1000 | 11 |
+| `0x7FFF` | 16 |
+| ≥ `0xFFFF` | 17 (max) |
+
+**String breaking.** Stretch the string far enough and it doesn't get
+stronger forever: its stored energy creates a new quark–antiquark pair
+from the vacuum and it snaps in two (this is how real collisions
+produce jets of hadrons). AxISA's break energy is `2¹⁶`: from
+`d ≥ 2¹⁶` on, `E` stops growing (saturates at 16), because the extra
+energy goes into pairs instead of a longer, slower string.
+
+**Result** in `nd` (N bank): `{pairs[31:16], segment[15:0]}` — the
+number of quark–antiquark pairs created (`d >> 16`) and the length of
+the last unbroken segment (`d & 0xFFFF`). With a power-of-two break
+energy this packing is bit-for-bit `d` itself.
+
+`bank` is shared by both ends: a flux tube joins a color and its own
+anticolor, so mismatched colors are not even encodable. `bank` = `N`
+→ `ILLEGAL` (colorless hadrons have no string). Like `QHAD`/`QMEASURE`,
+an external IRQ arriving while `STRING` runs — on its first cycle,
+mid-stall, or on its terminal cycle — is deferred until it commits
+(`sw/trap_irq_string.axasm` checks all three).
+
+Assembler: `STRING N1, R1, R2`.
+
 ## QHAD / QCNOT / QMEASURE (classical quantum-circuit-simulator extension)
 
 **Explicitly not real quantum hardware** - a real qubit needs a
@@ -577,12 +623,18 @@ invariant - real hardware would need nested-trap support (a trap
 stack, or at minimum a second EPC/CAUSE pair) to handle this safely,
 deferred to v0.2+.
 
+An instruction that takes a trap never commits its register write -
+`epc` points at it, so `RFT` will execute it again. (Until v2.0 an
+external IRQ landing on an ordinary instruction let its write through
+as well, so it effectively ran twice after `RFT`; every IRQ test now
+checks that the instruction at `epc` left no trace.)
+
 A pending external IRQ that arrives while a `LOAD`/`STORE` is stalled
 waiting for `bus_grant` (see `SHARED_MEM_BASE`) is held pending and
 only actually redirects `pc` once the stall clears - the stalled
 access is never aborted mid-flight, so interrupt latency is bounded by
 stall duration rather than needing a new "abort a grant" concept. The
-same deferral applies to an in-flight `QHAD`/`QCNOT`/`QMEASURE` (see
+same deferral applies to an in-flight `QHAD`/`QCNOT`/`QMEASURE`/`STRING` (see
 above) - an IRQ arriving anywhere during the sequence (5 cycles for
 `QHAD`/`QCNOT`, ~96 for `QMEASURE`), including exactly on its terminal
 write cycle, is held pending until the whole sequence completes, not
@@ -675,8 +727,8 @@ reserved `funct`; all 8 gluon codes are still defined.)
 ## Explicitly deferred to v0.2+ (not blocking a first working core)
 
 - Additional BARYON/MESON `funct` combine rules and antiquarks landed
-  in v2.0 step 2, quark flavor in step 3; asymptotic freedom is v2.0
-  step 4 (see "What's new in v2.0").
+  in v2.0 step 2, quark flavor in step 3, asymptotic freedom (`STRING`)
+  in step 4 (see "What's new in v2.0").
 - BRANCH/JAL immediates could be treated as pre-shifted by 2 (like
   RV32I's own branch/jump immediates), doubling their real-world range
   (±32KB→±64KB, ±8MB→±16MB) for free, since the bottom 2 bits of any

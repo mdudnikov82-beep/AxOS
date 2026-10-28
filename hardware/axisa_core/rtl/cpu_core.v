@@ -203,6 +203,7 @@ module cpu_core #(
     wire        is_qcnot, qcnot_ctrl;
     wire [2:0]  q_reg_i, q_reg_j;
 
+    wire        is_string;
     wire        is_qmeasure, qmeasure_qubit;
     wire [2:0]  qmeasure_nd;
     wire [2:0]  qm_reg_a0, qm_reg_a1, qm_reg_b0, qm_reg_b1;
@@ -211,6 +212,7 @@ module cpu_core #(
     wire [2:0]  write_addr;
     wire        reg_write, illegal;
     wire        hadron_bad; // v2.0 step 3: data-dependent ILLEGAL (BARYON/MESON QN on non-quark flavors)
+    wire        str_stall;  // v2.0 step 4: STRING's distance-dependent stall
 
     control_unit cu (
         .instr(instr),
@@ -234,6 +236,7 @@ module cpu_core #(
         .is_qhad(is_qhad), .qhad_qubit(qhad_qubit), .qhad_half(qhad_half),
         .is_qcnot(is_qcnot), .qcnot_ctrl(qcnot_ctrl),
         .q_reg_i(q_reg_i), .q_reg_j(q_reg_j),
+        .is_string(is_string),
         .is_qmeasure(is_qmeasure), .qmeasure_qubit(qmeasure_qubit), .qmeasure_nd(qmeasure_nd),
         .qm_reg_a0(qm_reg_a0), .qm_reg_a1(qm_reg_a1), .qm_reg_b0(qm_reg_b0), .qm_reg_b1(qm_reg_b1),
         .write_bank(write_bank), .write_addr(write_addr),
@@ -409,7 +412,12 @@ module cpu_core #(
     // shared gate can't drift the way 4 independently-written copies
     // of "&& !mem_stall" could (confirmed by design review before
     // this was written).
-    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !hadron_bad;
+    // !any_trap: an instruction that takes a trap must not commit -
+    // epc_r points AT it, so RFT re-executes it. Sync traps already had
+    // reg_write=0, but an external IRQ landing on an ordinary
+    // instruction used to let its write through as well, so after RFT
+    // it ran twice (found by tb_trap_irq_string.v's n6 check, v2.0).
+    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !hadron_bad && !str_stall && !any_trap;
     wire r_write_en = gated_reg_write && (write_bank == BANK_R);
     wire g_write_en = gated_reg_write && (write_bank == BANK_G);
     wire b_write_en = gated_reg_write && (write_bank == BANK_B);
@@ -617,6 +625,55 @@ module cpu_core #(
 
     assign hadron_bad = (is_baryon && baryon_funct == 3'b011 && !baryon_qn_ok) ||
                         (is_meson  && meson_funct  == 2'b10  && !meson_qn_ok);
+
+    // ==================== STRING (v2.0 step 4: asymptotic freedom) ====================
+    // d = |qa - qb|, the two quarks' positions as signed integers (33-bit
+    // difference, so |d| always fits 32 bits unsigned). The interaction
+    // takes 1 + E cycles, E = number of significant bits of d: weak and
+    // fast at short distance, slower as the coupling grows - a log-scale
+    // stand-in for the running coupling alpha_s. At d >= 2^16 the
+    // string breaks into new quark-antiquark pairs instead of stretching,
+    // so E saturates at 16 (17 cycles max). The result packs
+    // {pairs created = d >> 16, length of the last segment = d & 0xFFFF},
+    // which with a 2^16 break energy is bit-for-bit d itself.
+    wire signed [32:0] str_diff = {sel_rs1_data[31], sel_rs1_data} - {sel_rs2_data[31], sel_rs2_data};
+    wire        [31:0] str_d    = str_diff[32] ? (~str_diff[31:0] + 32'd1) : str_diff[31:0];
+    function [4:0] str_bits; // significant bits of d, saturated at 16 (string breaking)
+        input [31:0] d;
+        integer i;
+        begin
+            str_bits = 5'd0;
+            for (i = 0; i < 16; i = i + 1)
+                if (d[i]) str_bits = i + 1;
+            if (d[31:16] != 16'd0) str_bits = 5'd16;
+        end
+    endfunction
+    wire [4:0] str_extra = str_bits(str_d);
+    wire       str_go    = is_string && reg_write; // a legal STRING (illegal ones trap immediately)
+
+    // Same "gated only on !halted_r, not inside !cpu_stall" shape as
+    // q_state_r below, for the same deadlock reason. str_left_r counts
+    // the stall cycles still to go after this one.
+    reg       str_busy_r;
+    reg [4:0] str_left_r;
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            str_busy_r <= 1'b0;
+            str_left_r <= 5'd0;
+        end else if (!halted_r) begin
+            if (!str_busy_r) begin
+                if (str_go && str_extra != 5'd0) begin
+                    str_busy_r <= 1'b1;
+                    str_left_r <= str_extra - 5'd1;
+                end
+            end else if (str_left_r != 5'd0) begin
+                str_left_r <= str_left_r - 5'd1;
+            end else begin
+                str_busy_r <= 1'b0; // terminal cycle: the write commits, pc moves on
+            end
+        end
+    end
+    assign str_stall = str_go && (str_busy_r ? (str_left_r != 5'd0) : (str_extra != 5'd0));
 
     // ==================== QHAD / QCNOT (classical quantum-circuit-
     // simulator extension - design review before this was written; see
@@ -1090,7 +1147,7 @@ module cpu_core #(
     // never touch memory, so mem_stall's own components are provably
     // always 0 whenever q_stall/qm_stall is 1) - see the "QHAD / QCNOT"
     // and "QMEASURE" sections above for q_stall/qm_stall's definitions.
-    wire cpu_stall = mem_stall || q_stall || qm_stall;
+    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall;
 
     // Walker's own PTE fetch takes priority (its read must land on
     // data_mem's shared port); otherwise a translated user-mode access
@@ -1235,7 +1292,9 @@ module cpu_core #(
     // QMEASURE against a DIFFERENT random draw than the aborted
     // attempt, compounding the corruption with silent non-
     // reproducibility.
-    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure);
+    // STRING (v2.0) gets the same deferral: its write commits on the
+    // terminal cycle, so an IRQ there would make RFT redo it.
+    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string);
 
     wire [2:0] next_cause = (illegal || hadron_bad) ? CAUSE_ILLEGAL :
                              is_syscall     ? CAUSE_SYSCALL :
@@ -1260,6 +1319,7 @@ module cpu_core #(
     assign write_data = is_gluon  ? gluon_result :
                          is_baryon ? baryon_result :
                          is_meson  ? meson_result :
+                         is_string ? str_d :
                          is_load   ? effective_dmem_rdata :
                          is_jal    ? (pc_r + 32'd4) :
                          (is_mvsr && !mvsr_dir) ? mvsr_read_data :

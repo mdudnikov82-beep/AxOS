@@ -92,6 +92,7 @@ module tb_trap_irq_qhad;
             check(tohost_value, 32'd66, "tohost (handler's EPC redirect worked)");
             check(dut.n_bank.regs[3], 32'd2, "n3 (cause, expect 2=external IRQ)");
             check(dut.n_bank.regs[4], 32'd40, "n4 (EPC=0x28, instr AFTER QHAD)");
+            check(dut.n_bank.regs[6], 32'd0, "n6 (instr at EPC 0x28 must not commit)");
             check(dut.r_bank.regs[0], 32'h3F3504F3, "r0 (QHAD's own result, uncorrupted)");
             check(dut.r_bank.regs[2], 32'h3F3504F3, "r2 (QHAD's own result, uncorrupted)");
         end

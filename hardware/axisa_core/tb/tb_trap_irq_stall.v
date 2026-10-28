@@ -95,6 +95,7 @@ module tb_trap_irq_stall;
             check(tohost_value, 32'd55, "tohost (handler's EPC redirect worked)");
             check(dut.n_bank.regs[3], 32'd2, "n3 (cause, expect 2=external IRQ)");
             check(dut.n_bank.regs[4], 32'd40, "n4 (EPC=0x28, instr AFTER the store)");
+            check(dut.n_bank.regs[6], 32'd0, "n6 (instr at EPC 0x28 must not commit)");
         end
 
         if (errors == 0) $display("ALL AXISA TRAP-IRQ-STALL TESTS PASSED");

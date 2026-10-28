@@ -1,0 +1,30 @@
+# AxISA v2.0 step 4: an external IRQ arriving while STRING is still
+# running (see tb/tb_trap_irq_string.v's +IRQ_PHASE: on STRING's first
+# cycle, mid-stall, or on its terminal cycle - the same same-cycle race
+# trap_irq_qhad.axasm proved for QHAD). In every phase the trap must be
+# deferred until STRING has written n1, so EPC = 0x28 (the instruction
+# AFTER it), never 0x24. Bootstrap idiom mirrors trap_irq_qhad.axasm.
+    ADDI N1, N0, 1
+    MTSIE N1
+    ADDI N1, N0, 1
+    MTSMODE N1
+    ADDI N1, N0, 0x1C       # continue's address (word index 7)
+    MTEPC N1
+    RFT
+
+continue:
+    ADDI R1, R0, 1000       # word index 7, addr 0x1C
+    ADDI R2, R0, 0           # word index 8, addr 0x20
+    STRING N1, R1, R2        # word index 9, addr 0x24 - d=1000: 11 cycles; irq_in pulses inside it
+    ADDI N6, N0, 1           # word index 10, addr 0x28 - must NOT commit before the deferred IRQ fires
+finish:
+    ADDI N7, N0, 77          # word index 11, addr 0x2C
+    HALT N7
+
+.org 0x200
+handler:
+    MFCAUSE N3               # n3 = cause (expect 2 = external IRQ)
+    MFEPC N4                 # n4 = epc (expect 0x28 - proves STRING completed first)
+    ADDI N5, N0, 0x2C        # n5 = finish's address (word index 11)
+    MTEPC N5
+    RFT

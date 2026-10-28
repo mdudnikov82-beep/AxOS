@@ -127,6 +127,12 @@ module control_unit (
     // qm-sequencer's own independent N-write path, not through the
     // normal write_data/write_bank broadcast (reg_write stays 0 here
     // too, same reasoning as QHAD/QCNOT).
+    // STRING (v2.0 step 4, asymptotic freedom): the color flux tube
+    // between two same-color quarks. Reads through the ordinary
+    // bank/rs1_addr/rs2_addr path; cpu_core.v's string sequencer adds
+    // the distance-dependent stall cycles.
+    output reg          is_string,
+
     output reg          is_qmeasure,
     output reg          qmeasure_qubit,
     output reg  [2:0]  qmeasure_nd,
@@ -159,6 +165,7 @@ module control_unit (
     localparam OP_QHAD   = 5'b01110;
     localparam OP_QCNOT  = 5'b01111;
     localparam OP_QMEASURE = 5'b10000;
+    localparam OP_STRING   = 5'b10001;
 
     localparam BANK_R = 2'b00;
     localparam BANK_G = 2'b01;
@@ -242,6 +249,7 @@ module control_unit (
         q_reg_i        = 3'b0;
         q_reg_j        = 3'b0;
 
+        is_string      = 1'b0;
         is_qmeasure    = 1'b0;
         qmeasure_qubit = 1'b0;
         qmeasure_nd    = 3'b0;
@@ -463,6 +471,23 @@ module control_unit (
                     q_reg_i = 3'd4; q_reg_j = 3'd6; // control=q1: swap amp2<->amp3
                 end
                 // no reg_write - the q-sequencer FSM in cpu_core.v owns R-bank writes for this opcode
+            end
+
+            OP_STRING: begin
+                // opcode[31:27] nd[26:24] bank[23:22] qa[21:19] qb[18:16]
+                // One bank field for both ends: a flux tube only joins a
+                // color and its own anticolor, so mismatched colors are
+                // not even encodable. N (colorless) has no string.
+                is_string  = 1'b1;
+                bank       = instr[23:22];
+                rs1_addr   = instr[21:19];
+                rs2_addr   = instr[18:16];
+                write_bank = BANK_N;
+                write_addr = instr[26:24];
+                if (instr[23:22] == BANK_N)
+                    illegal = 1'b1;
+                else
+                    reg_write = 1'b1;
             end
 
             OP_QMEASURE: begin

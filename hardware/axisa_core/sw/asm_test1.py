@@ -153,6 +153,14 @@ def qmeasure(qubit, nd):
     return (OP_QMEASURE << 27) | (qubit << 26) | (nd << 23)
 
 
+# v2.0 step 4: STRING - color flux tube between two same-color quarks
+OP_STRING = 0b10001
+
+
+def string(nd, bank, qa, qb):
+    return (OP_STRING << 27) | (nd << 24) | (bank << 22) | (qa << 19) | (qb << 16)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:
