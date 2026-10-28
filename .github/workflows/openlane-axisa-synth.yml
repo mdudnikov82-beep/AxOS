@@ -13,7 +13,10 @@ on:
 jobs:
   synth:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    # The full (unpruned) core takes ~2h+ in OpenLane alone - detailed
+    # routing by itself took 34 min on 2026-10-28, and that run hit the
+    # old 120-minute limit at the antenna check, one of the last steps.
+    timeout-minutes: 300
 
     steps:
       - name: Checkout
@@ -58,6 +61,30 @@ jobs:
             github:efabless/openlane2#openlane -- \
             --pdk-root "$HOME/.volare" \
             config.json
+
+      - name: Key metrics (always - even if the flow failed or was cut short)
+        if: always()
+        working-directory: hardware/axisa_core/asic
+        run: |
+          RUN_DIR=$(ls -td runs/RUN_* 2>/dev/null | head -1)
+          [ -z "$RUN_DIR" ] && { echo "no run directory"; exit 0; }
+          # final/metrics.json exists only if the whole flow finished; otherwise
+          # use the newest step's state_out.json (same metrics, as far as it got)
+          M="$RUN_DIR/final/metrics.json"
+          [ -f "$M" ] || M=$(ls -t "$RUN_DIR"/*/state_out.json 2>/dev/null | head -1)
+          echo "metrics from: $M"
+          python3 - "$M" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          m = d.get("metrics", d)
+          keys = [k for k in m if any(t in k for t in (
+              "timing__setup__ws", "timing__setup__wns", "timing__hold__ws", "timing__setup_vio__count",
+              "timing__hold_vio__count", "design__die__area", "design__core__area", "design__instance__count",
+              "design__instance__area", "design__instance__utilization", "route__drc_errors",
+              "antenna__violating", "magic__drc_error", "design__lvs_error", "clock__skew"))]
+          for k in sorted(keys):
+              print(f"{k:70s} {m[k]}")
+          PY
 
       - name: Report power (OpenROAD report_power - first real number, vectorless default activity)
         working-directory: hardware/axisa_core/asic
