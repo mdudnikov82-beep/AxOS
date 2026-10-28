@@ -526,8 +526,11 @@ the colorless `N` bank, as binary32:
 `α₀ = 0.5` / `0.15`. A spin below the intercept has no real mass: the
 shared `fp_sqrt` returns its canonical NaN `0x7FC00000`. `SPIN` takes 5
 cycles; `MASS` goes through the multi-cycle `fp_sqrt` (shared with
-`QMEASURE`). `nd = ns` works (the operand is latched on the first
-cycle); external IRQs are deferred until it writes.
+`QMEASURE`). `nd = ns` works: `nd` is only written on the terminal
+cycle, after the result is computed. (The operand is also latched on
+the first cycle; a mutation test showed that latch is redundant, since
+nothing else can write `ns` while `REGGE` runs.) External IRQs are
+deferred until it writes.
 
 Checked against real particles (PDG masses) by `tools/gen_regge_test.py`
 before any RTL runs, and bit-exactly in `sw/regge_test.axasm`:

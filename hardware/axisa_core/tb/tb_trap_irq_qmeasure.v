@@ -47,6 +47,14 @@ module tb_trap_irq_qmeasure;
 
     always #5 clk = ~clk;
 
+    // Watchdog: the stimulus below wait()s for a specific internal state;
+    // if a bug means that state is never reached, fail instead of hanging.
+    initial begin
+        #200000;
+        $display("FAIL: watchdog - the test never finished (a wait() never fired)");
+        $finish;
+    end
+
     task check(input [31:0] got, input [31:0] expected, input [48*8-1:0] name);
         begin
             if (got !== expected) begin
