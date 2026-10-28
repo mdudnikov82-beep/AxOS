@@ -48,7 +48,7 @@ at a time — each step lands with its own tests before the next starts:
 | Step | Feature | Status |
 |------|---------|--------|
 | 1 | **Hardware memory tagging (MTE-style)**: tag bits in pointers and per memory granule, `LOAD`/`STORE` trap on mismatch | **done** |
-| 2 | **Hardened malloc** in AxISA assembly on top of the tags and the MMU: tagged allocations, guard pages, randomized slots | planned |
+| 2 | **Hardened malloc** in AxISA assembly on the MTE tags, plus what it needed: `JALR`, a calling convention (ABI), `.include` | **done** |
 | 3 | **String theory**: Regge trajectories — the bridge from the QCD flux tube (`STRING`) to string theory, checked against real hadrons | planned |
 
 **Breaking change in step 1:** GLUON's encoding and semantics changed
@@ -116,6 +116,7 @@ bit range across classes, to keep decode simple).
 | `10001`          | STRING   | color flux tube: distance-dependent latency, string breaking (v2.0) |
 | `10010`          | SU3MUL   | lattice QCD: SU(3) matrix × color vector on the FPU (v2.0) |
 | `10011`          | MTAG     | memory tagging: `IRG` / `STG` / `LDG` (v2.1) |
+| `10100`          | JALR     | indirect jump and link — function return / call through a pointer (v2.1) |
 | others           | —        | reserved for v0.2+                        |
 
 ### ALUR — `opcode[31:27] bank[26:25] funct[24:21] rd[20:18] rs1[17:15] rs2[14:12] (unused[11:0])`
@@ -353,7 +354,8 @@ so its handler correctly needs no adjustment at all before `RFT`. This
 is the smallest possible instruction this
 ISA can encode - there is nothing to encode, since the target comes
 from the hardware-latched `epc` register, not the instruction word.
-AxISA has no indirect-jump instruction (`JAL`'s target is always a
+(v2.1 note: `JALR` now exists — see below. This paragraph describes
+the v0.1 design.) AxISA had no indirect-jump instruction (`JAL`'s target is always a
 fixed PC-relative offset baked in at assemble time - see `JAL` above),
 so a dedicated hardware-latched return address is the only way this
 ISA can express "return to wherever execution was interrupted,"
@@ -766,6 +768,67 @@ see "Scope" above). Multiple independent address spaces (one page
 table per process) are possible today by swapping `PTB` on a context
 switch, but there is no process/scheduler concept in v0.1 to drive
 that - a real v0.2+ project, not a small follow-on to this one.
+
+### JALR — `opcode[31:27] nd[26:24] ns[23:21] imm[20:0]` (v2.1 step 2)
+
+`nd = PC + 4`, `PC = (N[ns] + sign_extend(imm)) & ~3`. Both registers are
+in `N`. `ns` is read before `nd` is written, so `nd = ns` works.
+
+Until v2.1 AxISA only had `JAL`, whose target is a fixed offset — so a
+function could never return to more than one caller, and there could
+be no libraries. `JALR` is the missing half of a function call:
+`JAL N7, func` calls, `JALR N0, N7` returns, `JALR N7, Nk` calls through
+a function pointer. The assembler accepts a label as an `ADDI`
+immediate (its absolute address) to build such pointers.
+
+### ABI — calling convention (v2.1)
+
+| Register | Role | Who saves it |
+|----------|------|--------------|
+| `n0` | zero | — |
+| `n1` | argument / return value | caller |
+| `n2`–`n5` | scratch | caller (a function may clobber them) |
+| `n6` | stack pointer (grows down) | callee (must be preserved) |
+| `n7` | return address (`JAL N7, f` / `JALR N0, N7`) | caller |
+
+A trap handler may use no register without saving it first (it can't
+know what the interrupted code was doing) — `sw/hmalloc_test.axasm`'s
+handler stores and restores `n3`/`n4`.
+
+Assembler support added with it: `.include "file"` (relative to the
+including file) to share code such as `sw/lib/hmalloc.axasm`.
+
+## Hardened malloc (v2.1 step 2)
+
+`sw/lib/hmalloc.axasm` — `malloc` / `free` in AxISA assembly, following
+GrapheneOS's hardened_malloc on the v2.1 MTE hardware. One size class:
+16 slots of 16 bytes (one granule each) at `0x800`–`0x8FF`; requests over
+16 bytes get 0. Kernel mode (it uses `STG`/`LDG`).
+
+- **Out-of-line metadata.** The in-use bitmap (`0x700`) and each slot's
+  previous allocation tag (`0x710 + 4i`) live away from the heap, so
+  overflowing a block can never corrupt the allocator.
+- **Randomized slot choice** — the scan starts at a random slot (`IRG` is
+  the program's window onto the hardware LFSR).
+- **Tags.** Every allocation gets a fresh random tag that is never 0,
+  never equal to either neighbour's tag (an overflow into the next slot
+  *always* faults, not with probability 14/15), never the tag the slot
+  had while free, and never the slot's previous allocation tag.
+- **`free`** zeroes the block, then retags it with a tag that differs
+  from the freed pointer's and from both neighbours', so every stale
+  pointer faults (use after free).
+- **`free` validates** its argument: outside the heap or not the start
+  of a slot → returns 1; slot not in use, or the pointer's tag doesn't
+  match (a double free, or a stale pointer to a slot that has since been
+  handed out again) → returns 2. A real allocator would abort the
+  program; returning a code lets the test check each case.
+
+`sw/hmalloc_test.axasm` exercises all of these, then fills the heap and
+runs 200 rounds of free + malloc; `tb/tb_hmalloc.v` monitors every one of
+the ~420 `STG`s into the heap and checks each tag rule as an invariant.
+Not done (honest limits): one size class only, and no MMU guard pages
+— the kernel-mode allocator bypasses translation, so per-granule tags
+are the guard instead.
 
 ## Memory tagging (v2.1 step 1, MTE-style)
 

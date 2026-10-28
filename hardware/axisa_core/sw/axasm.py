@@ -14,6 +14,7 @@ parsing and label resolution - genuinely new surface - instead of
 re-risking the bit-layout logic that's already been verified.
 """
 import re
+import os
 import sys
 
 from asm_test1 import (
@@ -22,7 +23,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag,
+    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr,
     GLUON_FUNCT, GLUON_COLORS,
     write_hex,
 )
@@ -109,7 +110,11 @@ def encode_one(mnemonic, ops, iaddr, labels):
         rs1_bank, rs1 = parse_reg(ops[1])
         if rd_bank != rs1_bank:
             raise AsmError(f"{m}: rd/rs1 must be the same bank")
-        imm = parse_imm(ops[2])
+        # v2.1: a label is accepted as an immediate (its absolute byte
+        # address) - how a program takes a function's address for JALR
+        imm = labels[ops[2].strip()] if ops[2].strip() in labels else parse_imm(ops[2])
+        if not -16384 <= imm <= 16383:
+            raise AsmError(f"{m}: immediate {imm} does not fit in 15 signed bits")
         return alui(rd_bank, funct, rd, rs1, imm)
 
     if m in BRANCH_FUNCT:
@@ -301,6 +306,16 @@ def encode_one(mnemonic, ops, iaddr, labels):
 
     # v2.1 step 1: memory tagging. IRG nd, ns / STG ns / LDG nd, ns -
     # pointers are N registers (only N touches memory)
+    # v2.1 step 2: JALR nd, ns, imm (imm optional) - indirect call/return
+    if m == 'JALR':
+        if len(ops) not in (2, 3):
+            raise AsmError("JALR: expected nd, ns[, imm]")
+        nd_bank, nd = parse_reg(ops[0])
+        ns_bank, ns = parse_reg(ops[1])
+        require_bank(nd_bank, nd, N, m, "nd")
+        require_bank(ns_bank, ns, N, m, "ns")
+        return jalr(nd, ns, parse_imm(ops[2]) if len(ops) == 3 else 0)
+
     if m in ('IRG', 'STG', 'LDG'):
         want = 1 if m == 'STG' else 2
         if len(ops) != want:
@@ -410,12 +425,35 @@ def assemble(lines):
     return words
 
 
+def read_source(path, _stack=()):
+    """Read an .axasm file, expanding `.include "file"` lines (path
+    relative to the including file) - v2.1, so a library such as
+    sw/lib/hmalloc.axasm can be shared between programs. Note that
+    assembler error line numbers count lines AFTER expansion."""
+    path = os.path.abspath(path)
+    if path in _stack:
+        raise AsmError(f"recursive .include of {path}")
+    out = []
+    with open(path, encoding='utf-8') as f:
+        for raw in f:
+            code = raw.split('#', 1)[0].strip()
+            if code.lower().startswith('.include'):
+                name = code[len('.include'):].strip().strip('"')
+                out += read_source(os.path.join(os.path.dirname(path), name), _stack + (path,))
+            else:
+                out.append(raw)
+    return out
+
+
 if __name__ == '__main__':
     if len(sys.argv) != 3:
         print("usage: axasm.py <in.axasm> <out.hex>")
         sys.exit(1)
-    with open(sys.argv[1]) as f:
-        src_lines = f.readlines()
+    try:
+        src_lines = read_source(sys.argv[1])
+    except AsmError as e:
+        print("ASSEMBLY ERROR:", e)
+        sys.exit(1)
     try:
         program = assemble(src_lines)
     except AsmError as e:

@@ -208,6 +208,8 @@ module cpu_core #(
     wire [2:0]  q_reg_i, q_reg_j;
 
     wire        is_string;
+    wire        is_jalr;
+    wire [2:0]  jalr_ns;
     wire        is_mtag;
     wire [1:0]  mtag_funct;
     wire [2:0]  mtag_ns;
@@ -248,6 +250,7 @@ module cpu_core #(
         .is_qcnot(is_qcnot), .qcnot_ctrl(qcnot_ctrl),
         .q_reg_i(q_reg_i), .q_reg_j(q_reg_j),
         .is_string(is_string),
+        .is_jalr(is_jalr), .jalr_ns(jalr_ns),
         .is_mtag(is_mtag), .mtag_funct(mtag_funct), .mtag_ns(mtag_ns),
         .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src),
         .is_qmeasure(is_qmeasure), .qmeasure_qubit(qmeasure_qubit), .qmeasure_nd(qmeasure_nd),
@@ -419,6 +422,8 @@ module cpu_core #(
         if (su3_active) begin n_addr_a = su3_ns; n_addr_b = su3_ns; end
         // MTAG: its pointer operand
         if (is_mtag) begin n_addr_a = mtag_ns; n_addr_b = mtag_ns; end
+        // JALR: the target base (read before nd is written - no bypass, so nd == ns works)
+        if (is_jalr) begin n_addr_a = jalr_ns; n_addr_b = jalr_ns; end
     end
 
     // ==================== Register banks ====================
@@ -1523,7 +1528,7 @@ module cpu_core #(
                          is_string ? str_d :
                          is_mtag   ? mtag_result :
                          is_load   ? effective_dmem_rdata :
-                         is_jal    ? (pc_r + 32'd4) :
+                         (is_jal || is_jalr) ? (pc_r + 32'd4) :
                          (is_mvsr && !mvsr_dir) ? mvsr_read_data :
                          (is_ptb && !ptb_dir)   ? ptb_r :
                                      alu_result; // ALUR/ALUI
@@ -1545,12 +1550,13 @@ module cpu_core #(
     wire [31:0] pc_plus4 = pc + 32'd4;
     wire [31:0] next_pc  = (is_branch && branch_taken) ? (pc_r + imm) :
                             is_jal                      ? (pc_r + jal_imm) :
+                            is_jalr                     ? ((n_porta_data + jal_imm) & ~32'd3) :
                                                            pc_plus4;
 
     // Any of these committing means instr_mem already latched a now-
     // abandoned next-sequential fetch at the same edge - the following
     // cycle must squash (see squash_r's declaration above).
-    wire is_redirect = any_trap || is_rft || (is_branch && branch_taken) || is_jal;
+    wire is_redirect = any_trap || is_rft || (is_branch && branch_taken) || is_jal || is_jalr;
 
     // Latching (irq_in itself) is independent of mem_stall/halted_r - a
     // brief pulse must be caught even mid-stall. CLEARING is gated by

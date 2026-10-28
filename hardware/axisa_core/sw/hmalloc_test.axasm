@@ -1,0 +1,129 @@
+# AxISA v2.1 step 2: hardened malloc (sw/lib/hmalloc.axasm) on the MTE
+# hardware, called through the v2.1 ABI (JAL N7 / JALR N0, N7).
+# tb/tb_hmalloc.v checks the results stored at 0x600+.
+#
+# The trap handler saves and restores the registers it uses (n3, n4) in
+# memory, like a real handler must - it can't assume the interrupted
+# code isn't using them. It counts traps at [0x6F8] as 256 + CAUSE each.
+
+# free() of a slot that was never allocated: its tag (0) matches the
+# untagged pointer, so only the bitmap check can catch this one
+    ADDI N1, N0, 0x800
+    JAL N7, free
+    STORE N1, N0, 0x628          # [0x628] = 2
+
+# p1 = malloc(16), p2 = malloc(8), malloc(17) = 0
+    ADDI N1, N0, 16
+    JAL N7, malloc
+    STORE N1, N0, 0x600          # [0x600] = p1
+    ADDI N1, N0, 8
+    JAL N7, malloc
+    STORE N1, N0, 0x604          # [0x604] = p2
+    ADDI N1, N0, 17
+    JAL N7, malloc
+    STORE N1, N0, 0x608          # [0x608] = 0 (too big)
+
+# use p1, then overflow it by one granule
+    LOAD N2, N0, 0x600
+    ADDI N3, N0, 123
+    STORE N3, N2, 0
+    LOAD N4, N2, 0
+    STORE N4, N0, 0x60C          # [0x60C] = 123
+    STORE N3, N2, 16             # TAG_FAULT 1: the next slot has a different tag
+
+# free(p1), then use after free and double free
+    LOAD N1, N0, 0x600
+    JAL N7, free
+    STORE N1, N0, 0x610          # [0x610] = 0 (ok)
+    ADDI N4, N0, 55
+    LOAD N2, N0, 0x600
+    LOAD N4, N2, 0               # TAG_FAULT 2: stale pointer, n4 stays 55
+    STORE N4, N0, 0x614          # [0x614] = 55
+    LOAD N1, N0, 0x600
+    JAL N7, free
+    STORE N1, N0, 0x618          # [0x618] = 2 (double free)
+
+# invalid frees: outside the heap, and the middle of a block
+    ADDI N1, N0, 0x404
+    JAL N7, free
+    STORE N1, N0, 0x61C          # [0x61C] = 1
+    ADDI N1, N0, 0x900
+    JAL N7, free
+    STORE N1, N0, 0x634          # [0x634] = 1 (one past the heap)
+    LOAD N1, N0, 0x604
+    ADDI N1, N1, 4
+    JAL N7, free
+    STORE N1, N0, 0x620          # [0x620] = 1
+
+# the freed block was zeroed (read it through a fresh pointer from LDG)
+    LOAD N2, N0, 0x600
+    SLLI N2, N2, 4
+    SRLI N2, N2, 4
+    LDG N2, N2
+    LOAD N4, N2, 0
+    STORE N4, N0, 0x624          # [0x624] = 0 (was 123)
+
+# fill the heap: p2 is live, so 15 more succeed and the 16th returns 0
+    STORE N0, N0, 0x630          # k = 0
+alloc_loop:
+    ADDI N1, N0, 16
+    JAL N7, malloc
+    BEQ N1, N0, alloc_done
+    LOAD N2, N0, 0x630
+    SLLI N3, N2, 2
+    STORE N1, N3, 0x640          # [0x640 + 4k] = pointer k
+    ADDI N2, N2, 1
+    STORE N2, N0, 0x630
+    JAL N0, alloc_loop
+alloc_done:
+# p1's slot has been handed out again: freeing the STALE p1 must be
+# refused - otherwise it would free somebody else's live block
+    LOAD N1, N0, 0x600
+    JAL N7, free
+    STORE N1, N0, 0x638          # [0x638] = 2
+
+# churn: 200 rounds of free + malloc on a full heap (each malloc can only
+# get the slot just freed), so the testbench's STG monitor sees ~400
+# retags and can check every tag rule as an invariant, not by luck
+    ADDI N1, N0, 200
+    STORE N1, N0, 0x63C          # rounds left
+churn:
+    LOAD N2, N0, 0x63C
+    ANDI N2, N2, 7               # table entry (round mod 8)
+    SLLI N2, N2, 2
+    STORE N2, N0, 0x6EC          # remember the entry's offset
+    LOAD N1, N2, 0x640
+    JAL N7, free
+    BNE N1, N0, churn_bad
+    ADDI N1, N0, 16
+    JAL N7, malloc
+    BEQ N1, N0, churn_bad
+    LOAD N2, N0, 0x6EC
+    STORE N1, N2, 0x640          # the new pointer replaces the old one
+    LOAD N1, N0, 0x63C
+    ADDI N1, N1, -1
+    STORE N1, N0, 0x63C
+    BNE N1, N0, churn
+    LOAD N1, N0, 0x630
+    HALT N1                      # tohost = 15
+churn_bad:
+    ADDI N1, N0, 999
+    HALT N1
+
+.org 0x200
+handler:
+    STORE N3, N0, 0x6F0          # save
+    STORE N4, N0, 0x6F4
+    MFCAUSE N3
+    LOAD N4, N0, 0x6F8
+    ADDI N4, N4, 256
+    ADD N4, N4, N3
+    STORE N4, N0, 0x6F8          # [0x6F8] += 256 + cause
+    MFEPC N3
+    ADDI N3, N3, 4               # skip the faulting access
+    MTEPC N3
+    LOAD N3, N0, 0x6F0           # restore
+    LOAD N4, N0, 0x6F4
+    RFT
+
+.include "lib/hmalloc.axasm"

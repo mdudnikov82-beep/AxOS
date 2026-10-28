@@ -177,6 +177,15 @@ def mtag(funct, nd, ns):
     return (OP_MTAG << 27) | (funct << 25) | (nd << 22) | (ns << 19)
 
 
+# v2.1 step 2: JALR nd, ns, imm - nd = PC+4, PC = (ns + imm) & ~3
+OP_JALR = 0b10100
+
+
+def jalr(nd, ns, imm):
+    assert -(1 << 20) <= imm < (1 << 20)
+    return (OP_JALR << 27) | (nd << 24) | (ns << 21) | (imm & 0x1FFFFF)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

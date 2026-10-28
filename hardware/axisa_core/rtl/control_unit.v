@@ -139,6 +139,12 @@ module control_unit (
     // MTAG (v2.1 step 1): memory tagging. funct 00 IRG nd, ns (random
     // pointer tag), 01 STG ns (set the granule's tag), 10 LDG nd, ns
     // (read the granule's tag into a pointer), 11 reserved.
+    // JALR (v2.1 step 2): indirect jump-and-link - nd = PC+4,
+    // PC = (N[jalr_ns] + imm) with the low 2 bits cleared. The return
+    // half of a function call; reuses jal_imm for its offset.
+    output reg          is_jalr,
+    output reg  [2:0]  jalr_ns,
+
     output reg          is_mtag,
     output reg  [1:0]  mtag_funct,
     output reg  [2:0]  mtag_ns,
@@ -183,6 +189,7 @@ module control_unit (
     localparam OP_STRING   = 5'b10001;
     localparam OP_SU3MUL   = 5'b10010;
     localparam OP_MTAG     = 5'b10011;
+    localparam OP_JALR     = 5'b10100;
 
     localparam BANK_R = 2'b00;
     localparam BANK_G = 2'b01;
@@ -267,6 +274,8 @@ module control_unit (
         q_reg_j        = 3'b0;
 
         is_string      = 1'b0;
+        is_jalr        = 1'b0;
+        jalr_ns        = 3'b0;
         is_mtag        = 1'b0;
         mtag_funct     = 2'b0;
         mtag_ns        = 3'b0;
@@ -512,6 +521,16 @@ module control_unit (
                     illegal = 1'b1;
                 else
                     reg_write = 1'b1;
+            end
+
+            OP_JALR: begin
+                // opcode[31:27] nd[26:24] ns[23:21] imm[20:0]
+                is_jalr    = 1'b1;
+                jalr_ns    = instr[23:21];
+                jal_imm    = {{11{instr[20]}}, instr[20:0]};
+                write_bank = BANK_N;
+                write_addr = instr[26:24];
+                reg_write  = 1'b1;
             end
 
             OP_MTAG: begin

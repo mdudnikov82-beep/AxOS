@@ -1,0 +1,128 @@
+# hmalloc - a hardened malloc for AxISA v2.1 (docs/ISA.md "Hardened
+# malloc"). Ideas from GrapheneOS's hardened_malloc, scaled down to one
+# size class on the v2.1 MTE hardware:
+#
+#  - out-of-line metadata: the in-use bitmap lives at HM_META, away from
+#    the heap, so overflowing a block can never corrupt the allocator;
+#  - randomized slot choice: the scan starts at a random slot (IRG is
+#    the only window onto the hardware LFSR);
+#  - a fresh random memory tag per allocation, never 0, never equal to
+#    either neighbour's tag (overflow into the next slot always faults),
+#    never equal to the tag the slot had while free, and never equal to
+#    the slot's PREVIOUS allocation tag (kept out of line at HM_LAST) -
+#    so a stale pointer from the last allocation of a reused slot can
+#    neither access it nor free() it;
+#  - free zeroes the block, then retags it with a new tag that differs
+#    from the freed pointer's and from both neighbours', so every
+#    pointer still holding the old tag faults (use after free) and an
+#    overflow out of a live neighbour into the free slot still faults;
+#  - free validates the pointer: outside the heap / not slot-aligned ->
+#    1, slot not in use or the pointer's tag stale -> 2 (double free).
+#
+# Heap: 16 slots x 16 bytes = one MTE granule each, at HM_BASE = 0x800.
+# Requests up to 16 bytes; bigger ones get 0. Kernel mode only (STG/LDG
+# are privileged).
+#
+# ABI (docs/ISA.md): n1 = argument / result, n2-n5 = scratch (clobbered),
+# n6 = stack pointer (preserved), n7 = return address. Call with
+#   JAL N7, malloc   /   JAL N7, free
+# Both are leaf functions: they never touch n6 or memory below HM_META.
+
+# HM_META = 0x700 (bitmap word, bit i = slot i in use)
+# HM_LAST = 0x710 + 4*i (slot i's previous allocation tag)
+# HM_BASE = 0x800, HM_END = 0x900
+
+# void *malloc(size n1) -> n1 = tagged pointer, or 0
+malloc:
+    ADDI N2, N0, 16
+    BLTU N2, N1, hm_fail         # size > 16: unsupported
+    IRG N2, N0                   # n2 = {random tag, 0}
+    SRLI N2, N2, 28              # random start slot (1..15)
+    ADDI N3, N0, 16              # slots left to try
+    LOAD N4, N0, 0x700           # n4 = bitmap
+hm_scan:
+    SRL N5, N4, N2
+    ANDI N5, N5, 1
+    BEQ N5, N0, hm_found
+    ADDI N2, N2, 1
+    ANDI N2, N2, 15              # wrap around
+    ADDI N3, N3, -1
+    BNE N3, N0, hm_scan
+hm_fail:
+    ADDI N1, N0, 0               # heap full / too big
+    JALR N0, N7
+hm_found:
+    ADDI N5, N0, 1
+    SLL N5, N5, N2
+    OR N4, N4, N5
+    STORE N4, N0, 0x700          # mark slot n2 in use
+    SLLI N1, N2, 4
+    ADDI N1, N1, 0x800           # n1 = untagged slot address
+    SLLI N2, N2, 2
+    ADDI N2, N2, 0x710           # n2 = &HM_LAST[slot]
+    LDG N5, N1                   # n5 = {tag the slot had while free, addr}
+hm_retag:
+    IRG N1, N1                   # candidate tag (never 0)
+    BEQ N1, N5, hm_retag         # same as the free-time tag: roll again
+    SRLI N4, N1, 28
+    LOAD N3, N2, 0
+    BEQ N3, N4, hm_retag         # same as this slot's previous allocation: roll again
+    ADDI N3, N1, -16
+    LDG N3, N3                   # left neighbour's tag
+    SRLI N3, N3, 28
+    BEQ N3, N4, hm_retag
+    ADDI N3, N1, 16
+    LDG N3, N3                   # right neighbour's tag
+    SRLI N3, N3, 28
+    BEQ N3, N4, hm_retag
+    STORE N4, N2, 0              # remember it for the slot's next allocation
+    STG N1                       # paint the slot (its one granule)
+    JALR N0, N7                  # return the tagged pointer
+
+# int free(void *n1) -> n1 = 0 ok, 1 invalid pointer, 2 double free / stale
+free:
+    SLLI N2, N1, 4
+    SRLI N2, N2, 4               # n2 = untagged address
+    ADDI N3, N0, 0x800
+    BLTU N2, N3, hm_invalid
+    ADDI N3, N0, 0x900
+    BGEU N2, N3, hm_invalid
+    ANDI N3, N2, 15
+    BNE N3, N0, hm_invalid       # not the start of a slot
+    ADDI N3, N2, -2048
+    SRLI N3, N3, 4               # n3 = slot index
+    LOAD N4, N0, 0x700
+    SRL N5, N4, N3
+    ANDI N5, N5, 1
+    BEQ N5, N0, hm_double        # slot is not in use
+    LDG N5, N2
+    BNE N5, N1, hm_double        # pointer's tag is stale
+    ADDI N5, N0, 1
+    SLL N5, N5, N3
+    XOR N4, N4, N5
+    STORE N4, N0, 0x700          # mark slot free
+    STORE N0, N1, 0              # zero the block through the live pointer
+    STORE N0, N1, 4
+    STORE N0, N1, 8
+    STORE N0, N1, 12
+hm_free_retag:
+    IRG N5, N2                   # new tag for the free slot...
+    BEQ N5, N1, hm_free_retag    # ...that differs from the freed pointer's,
+    SRLI N4, N5, 28
+    ADDI N3, N2, -16
+    LDG N3, N3
+    SRLI N3, N3, 28
+    BEQ N3, N4, hm_free_retag    # ...from the left neighbour's (an overflow
+    ADDI N3, N2, 16              #    out of a live block must still fault)
+    LDG N3, N3
+    SRLI N3, N3, 28
+    BEQ N3, N4, hm_free_retag    # ...and from the right neighbour's
+    STG N5                       # every old pointer now faults
+    ADDI N1, N0, 0
+    JALR N0, N7
+hm_invalid:
+    ADDI N1, N0, 1
+    JALR N0, N7
+hm_double:
+    ADDI N1, N0, 2
+    JALR N0, N7

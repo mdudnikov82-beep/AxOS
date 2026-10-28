@@ -1,0 +1,42 @@
+# AxISA v2.1 step 2: JALR - the indirect jump that makes real function
+# calls possible (JAL alone can only jump to a fixed offset, so a
+# function could never return to more than one caller). Uses the v2.1
+# ABI from docs/ISA.md: n1 = argument/result, n7 = return address.
+    ADDI N1, N0, 5
+    JAL N7, triple           # call site 1: n1 = 15
+    ADDI N2, N1, 0           # n2 = 15
+    ADDI N1, N0, 7
+    JAL N7, triple           # call site 2 - the SAME function returns here
+    ADD N2, N2, N1           # n2 = 15 + 21 = 36
+
+    ADDI N3, N0, triple      # a function pointer (label as immediate)
+    ADDI N1, N0, 2
+    JALR N7, N3              # indirect call through the pointer: n1 = 6
+    ADD N2, N2, N1           # n2 = 42
+
+    ADDI N3, N0, skip
+    JALR N4, N3, 2           # skip+2: the low 2 bits are cleared -> lands on skip; n4 = link
+after_jalr:
+    ADDI N2, N0, 999         # must be skipped
+skip:
+    ADDI N5, N0, after_jalr
+    SUB N5, N4, N5           # n5 = 0 iff the link is the word after that JALR
+    JAL N6, here             # the pc must really be word-aligned again:
+here:                        # this link would otherwise carry the stray +2
+    ANDI N6, N6, 3           # n6 = 0
+    ADD N5, N5, N6           # n5 = 0 iff both checks hold (triple clobbers n6 below)
+
+    ADDI N3, N0, pad
+    ADDI N1, N0, 1
+    JALR N7, N3, 8           # pad + 8 = triple: the offset is really added
+    ADD N2, N2, N1           # n2 = 42 + 3 = 45
+    HALT N2                  # tohost = 45
+
+pad:                         # landing here means JALR ignored its offset
+    ADDI N2, N0, 999
+    HALT N2
+
+triple:                      # n1 = 3 * n1, returns through n7
+    ADD N6, N1, N1
+    ADD N1, N6, N1
+    JALR N0, N7              # return (link discarded into n0)
