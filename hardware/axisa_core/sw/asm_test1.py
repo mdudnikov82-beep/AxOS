@@ -186,6 +186,14 @@ def jalr(nd, ns, imm):
     return (OP_JALR << 27) | (nd << 24) | (ns << 21) | (imm & 0x1FFFFF)
 
 
+# v2.1 step 3: REGGE - Regge trajectories (SPIN.M/SPIN.B/MASS.M/MASS.B)
+OP_REGGE = 0b10101
+
+
+def regge(funct, nd, ns):
+    return (OP_REGGE << 27) | (funct << 25) | (nd << 22) | (ns << 19)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

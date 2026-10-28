@@ -23,7 +23,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr,
+    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge,
     GLUON_FUNCT, GLUON_COLORS,
     write_hex,
 )
@@ -306,6 +306,20 @@ def encode_one(mnemonic, ops, iaddr, labels):
 
     # v2.1 step 1: memory tagging. IRG nd, ns / STG ns / LDG nd, ns -
     # pointers are N registers (only N touches memory)
+    # v2.1 step 3: REGGE SPIN.M|SPIN.B|MASS.M|MASS.B, nd, ns (N-bank binary32)
+    if m == 'REGGE':
+        if len(ops) != 3:
+            raise AsmError("REGGE: expected 3 operands (SPIN.M|SPIN.B|MASS.M|MASS.B, nd, ns)")
+        kinds = {'SPIN.M': 0, 'SPIN.B': 1, 'MASS.M': 2, 'MASS.B': 3}
+        kind = ops[0].upper()
+        if kind not in kinds:
+            raise AsmError(f"REGGE: unknown kind '{ops[0]}' (SPIN.M, SPIN.B, MASS.M or MASS.B)")
+        nd_bank, nd = parse_reg(ops[1])
+        ns_bank, ns = parse_reg(ops[2])
+        require_bank(nd_bank, nd, N, m, "nd")
+        require_bank(ns_bank, ns, N, m, "ns")
+        return regge(kinds[kind], nd, ns)
+
     # v2.1 step 2: JALR nd, ns, imm (imm optional) - indirect call/return
     if m == 'JALR':
         if len(ops) not in (2, 3):

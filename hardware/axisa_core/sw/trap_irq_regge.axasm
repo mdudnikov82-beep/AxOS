@@ -1,0 +1,28 @@
+# AxISA v2.1 step 3: an external IRQ arriving while REGGE MASS.B runs
+# (see tb/tb_trap_irq_regge.v's +IRQ_PHASE: its first cycle, in the
+# middle of the shared fp_sqrt, or its terminal write cycle). In every
+# phase the trap must wait until REGGE has written n2: EPC = 0x28.
+    ADDI N1, N0, 1
+    MTSIE N1
+    ADDI N1, N0, 1
+    MTSMODE N1
+    ADDI N1, N0, 0x1C       # continue's address (word index 7)
+    MTEPC N1
+    RFT
+
+continue:
+    ADDI N1, N0, 0x3FC0     # word index 7, addr 0x1C
+    SLLI N1, N1, 16          # word index 8, addr 0x20 - n1 = 1.5f (J = 3/2)
+    REGGE MASS.B, N2, N1     # word index 9, addr 0x24 - Delta(1232) mass; irq_in pulses inside it
+    ADDI N6, N0, 1           # word index 10, addr 0x28 - must NOT commit before the deferred IRQ fires
+finish:
+    ADDI N7, N0, 77          # word index 11, addr 0x2C
+    HALT N7
+
+.org 0x200
+handler:
+    MFCAUSE N3               # n3 = cause (expect 2 = external IRQ)
+    MFEPC N4                 # n4 = epc (expect 0x28 - proves REGGE completed first)
+    ADDI N5, N0, 0x2C        # n5 = finish's address (word index 11)
+    MTEPC N5
+    RFT

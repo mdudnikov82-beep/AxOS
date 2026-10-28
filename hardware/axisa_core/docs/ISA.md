@@ -49,7 +49,7 @@ at a time — each step lands with its own tests before the next starts:
 |------|---------|--------|
 | 1 | **Hardware memory tagging (MTE-style)**: tag bits in pointers and per memory granule, `LOAD`/`STORE` trap on mismatch | **done** |
 | 2 | **Hardened malloc** in AxISA assembly on the MTE tags, plus what it needed: `JALR`, a calling convention (ABI), `.include` | **done** |
-| 3 | **String theory**: Regge trajectories — the bridge from the QCD flux tube (`STRING`) to string theory, checked against real hadrons | planned |
+| 3 | **String theory**: `REGGE` — Regge trajectories of the rotating string, checked against real hadrons | **done** |
 
 **Breaking change in step 1:** GLUON's encoding and semantics changed
 completely (see below). v0.1 GLUON programs must be rewritten.
@@ -117,6 +117,7 @@ bit range across classes, to keep decode simple).
 | `10010`          | SU3MUL   | lattice QCD: SU(3) matrix × color vector on the FPU (v2.0) |
 | `10011`          | MTAG     | memory tagging: `IRG` / `STG` / `LDG` (v2.1) |
 | `10100`          | JALR     | indirect jump and link — function return / call through a pointer (v2.1) |
+| `10101`          | REGGE    | string theory: Regge trajectories, spin ↔ mass of hadrons (v2.1) |
 | others           | —        | reserved for v0.2+                        |
 
 ### ALUR — `opcode[31:27] bank[26:25] funct[24:21] rd[20:18] rs1[17:15] rs2[14:12] (unused[11:0])`
@@ -498,6 +499,54 @@ traps.
 
 Assembler: `SU3MUL N1, 2, 0` (ns, dst, src).
 
+### REGGE — `opcode[31:27] funct[26:25] nd[24:22] ns[21:19] (unused[18:0])` (v2.1 step 3)
+
+Where string theory came from. In the 1960s physicists noticed that
+hadrons made of the same quarks but spinning faster line up on straight
+**Regge trajectories**: spin `J` grows linearly with mass squared,
+`J = α₀ + α′·M²`. In 1968–70 Veneziano, Nambu, Nielsen and Susskind
+explained it with a **rotating relativistic string**: a string of
+tension `σ` spinning with its ends at the speed of light has exactly
+`J = α′·M²` with `α′ = 1/(2πσ)` — the birth of string theory. And that
+string *is* the QCD flux tube of `STRING`: AxISA's `α′ = 0.9 GeV⁻²`
+means `σ = 1/(2π·0.9) ≈ 0.177 GeV²`, the string tension lattice QCD
+measures between real quarks.
+
+Masses (GeV) and spins are properties of whole hadrons, so both live in
+the colorless `N` bank, as binary32:
+
+| `funct` | Assembler | Computes | Trajectory |
+|---------|-----------|----------|------------|
+| `00` | `SPIN.M` | `J = fl(α₀ + fl(α′·fl(M·M)))` | leading mesons (ρ, a₂, ρ₃, a₄…), `α₀ = 0.5` |
+| `01` | `SPIN.B` | same | Δ baryons, `α₀ = 0.15` |
+| `10` | `MASS.M` | `M = sqrt(fl(fl(J − α₀)·fl(1/α′)))` | mesons |
+| `11` | `MASS.B` | same | Δ baryons |
+
+`α′ = 0.9` (`0x3F666666`), `1/α′` rounded once (`0x3F8E38E4`),
+`α₀ = 0.5` / `0.15`. A spin below the intercept has no real mass: the
+shared `fp_sqrt` returns its canonical NaN `0x7FC00000`. `SPIN` takes 5
+cycles; `MASS` goes through the multi-cycle `fp_sqrt` (shared with
+`QMEASURE`). `nd = ns` works (the operand is latched on the first
+cycle); external IRQs are deferred until it writes.
+
+Checked against real particles (PDG masses) by `tools/gen_regge_test.py`
+before any RTL runs, and bit-exactly in `sw/regge_test.axasm`:
+
+| Hadron | Mass (GeV) | `SPIN` gives | Real spin |
+|--------|-----------|--------------|-----------|
+| ρ(770) | 0.775 | 1.04 | 1 |
+| a₂(1320) | 1.318 | 2.06 | 2 |
+| ρ₃(1690) | 1.689 | 3.07 | 3 |
+| a₄(1970) | 1.967 | 3.98 | 4 |
+| Δ(1232) | 1.232 | 1.52 | 3/2 |
+| Δ(1950) | 1.930 | 3.50 | 7/2 |
+| Δ(2420) | 2.420 | 5.42 | 11/2 |
+
+And backwards, `MASS.M` of `J = 5` predicts 2.24 GeV for the next meson
+on the trajectory; the measured ρ₅(2350) is at 2.33 GeV.
+
+Assembler: `REGGE SPIN.M, N2, N1`.
+
 ## QHAD / QCNOT / QMEASURE (classical quantum-circuit-simulator extension)
 
 **Explicitly not real quantum hardware** - a real qubit needs a
@@ -694,7 +743,7 @@ waiting for `bus_grant` (see `SHARED_MEM_BASE`) is held pending and
 only actually redirects `pc` once the stall clears - the stalled
 access is never aborted mid-flight, so interrupt latency is bounded by
 stall duration rather than needing a new "abort a grant" concept. The
-same deferral applies to an in-flight `QHAD`/`QCNOT`/`QMEASURE`/`STRING`/`SU3MUL` (see
+same deferral applies to an in-flight `QHAD`/`QCNOT`/`QMEASURE`/`STRING`/`SU3MUL`/`REGGE` (see
 above) - an IRQ arriving anywhere during the sequence (5 cycles for
 `QHAD`/`QCNOT`, ~96 for `QMEASURE`), including exactly on its terminal
 write cycle, is held pending until the whole sequence completes, not
