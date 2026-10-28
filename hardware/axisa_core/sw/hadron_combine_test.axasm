@@ -1,0 +1,77 @@
+# AxISA v2.0 step 2 (see docs/ISA.md's BARYON/MESON sections): the new
+# combine rules and antiquarks. Each result is STOREd to its own word
+# at 0x400+ (the N bank is too small to hold them all, and the trap
+# handler needs n3/n5/n6/n7) - tb/tb_hadron_combine.v peeks dmem.
+#
+#  - BARYON MAJ: bitwise majority of r/g/b, over a full truth table.
+#  - BARYON EPS: Levi-Civita sign of the three values' order, on a
+#    sorted triple, a cyclic rotation (+1), a single swap (-1), two equal
+#    quarks (0) and a triple with a negative value.
+#  - ANTI + MESON SINGLET: a quark plus its own antiquark is 0, and
+#    SINGLET(q, ANTI(x)) == DIFF(q, x) for the same color.
+#  - Four illegal combines (.word - the assembler refuses them): a
+#    reserved BARYON funct, SINGLET with mismatched colors, SINGLET on
+#    N, and a reserved MESON funct. All target sentinel n4.
+    ADDI N4, N0, 55          # sentinel - no illegal combine may write it
+
+# BARYON MAJ: these three bytes hold all 8 (r,g,b) bit combinations -
+# a full truth table, so any other bitwise function gives a different byte
+    ADDI R1, R0, 0xF0        # 11110000
+    ADDI G1, G0, 0xCC        # 11001100
+    ADDI B1, B0, 0xAA        # 10101010
+    BARYON MAJ, N1, R1, G1, B1
+    STORE N1, N0, 0x400      # expect 11101000 = 0xE8
+
+# BARYON EPS
+    ADDI R2, R0, 1
+    ADDI G2, G0, 2
+    ADDI B2, B0, 3
+    BARYON EPS, N1, R2, G2, B2
+    STORE N1, N0, 0x404      # (1,2,3) sorted: +1
+    ADDI R3, R0, 3
+    ADDI G3, G0, 1
+    ADDI B3, B0, 2
+    BARYON EPS, N1, R3, G3, B3
+    STORE N1, N0, 0x408      # (3,1,2) cyclic rotation: +1
+    ADDI R4, R0, 2
+    ADDI G4, G0, 1
+    ADDI B4, B0, 3
+    BARYON EPS, N1, R4, G4, B4
+    STORE N1, N0, 0x40C      # (2,1,3) one swap: -1
+    ADDI R5, R0, 4
+    ADDI G5, G0, 4
+    ADDI B5, B0, 9
+    BARYON EPS, N1, R5, G5, B5
+    STORE N1, N0, 0x410      # (4,4,9) two equal: 0
+    ADDI R6, R0, -5
+    ADDI G6, G0, 7
+    ADDI B6, B0, 0
+    BARYON EPS, N1, R6, G6, B6
+    STORE N1, N0, 0x414      # (-5,7,0) ranks (1,3,2): -1 (signed/unsigned order give the same EPS - docs/ISA.md)
+
+# antiquarks + MESON SINGLET
+    ANTI R7, R1              # r7 = anti(r1) = -0xF0
+    MESON SINGLET, N1, R1, R7
+    STORE N1, N0, 0x418      # 0xF0 + (-0xF0) = 0
+    ANTI R7, R3              # r7 = anti(r3) = -3
+    MESON SINGLET, N1, R2, R7
+    STORE N1, N0, 0x41C      # 1 + (-3) = -2
+    MESON DIFF, N1, R2, R3
+    STORE N1, N0, 0x420      # 1 - 3 = -2 (must equal the line above)
+    STORE N0, N0, 0x424      # end marker slot stays 0 (catches a stray extra store)
+
+    .word 0x1B849000         # BARYON funct 011 (reserved), nd=n4
+    .word 0x23029000         # MESON SINGLET, N4, R1, G1 - red + anti-green is not colorless
+    .word 0x2333A000         # MESON SINGLET, N4, N1, N2 - N has no color to pair
+    .word 0x25021000         # MESON funct 10 (reserved), nd=n4
+    HALT N7                  # tohost = traps taken (expect 4)
+
+.org 0x200
+handler:
+    MFCAUSE N3
+    ADD N6, N6, N3           # n6 = sum of causes (expect 0 = all ILLEGAL)
+    ADDI N7, N7, 1           # n7 = trap count
+    MFEPC N5
+    ADDI N5, N5, 4           # skip the bad instruction
+    MTEPC N5
+    RFT

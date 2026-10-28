@@ -38,7 +38,7 @@ at a time — each step lands with its own tests before the next starts:
 | Step | Feature | Status |
 |------|---------|--------|
 | 1 | **Real gluons**: the 8 GLUON codes are the 8 real gluons, with color rules enforced in hardware | **done** |
-| 2 | BARYON/MESON combine rules + antiquarks | planned |
+| 2 | **BARYON/MESON combine rules + antiquarks**: `MAJ`, `EPS`, `SINGLET`, `ANTI` | **done** |
 | 3 | Protons, neutrons and hadrons: quark flavor, real hadron construction | planned |
 | 4 | Asymptotic freedom: distance-dependent interaction latency, string breaking | planned |
 | 5 | `SU3MUL`: SU(3) matrix × color vector on the FPU — the core operation of lattice-QCD supercomputers | planned |
@@ -180,18 +180,55 @@ Source banks are IMPLICIT (not encoded): `rr` always addresses R,
 `gg` always addresses G, `bb` always addresses B — mirrors a real
 baryon always being exactly one quark of each color. Result always
 goes to `N` bank register `nd`. `funct` (3 bits) selects the combine
-rule — v0.1 defines only `funct=000`: `nd = rr + gg + bb` (plain
-32-bit wraparound sum); `funct=001`-`111` reserved for v0.2.
+rule:
+
+| `funct` | Assembler | Result | Notes |
+|---------|-----------|--------|-------|
+| `000` | `SUM` | `rr + gg + bb` | v0.1's rule, 32-bit wraparound |
+| `001` | `MAJ` | bitwise majority `(r&g) \| (g&b) \| (r&b)` | v2.0. "Color vote": each bit is what at least 2 of the 3 colors say. Same function as SHA-256's `Maj`. |
+| `010` | `EPS` | +1, −1 or 0 | v2.0. Levi-Civita symbol of the three values' order (below). |
+| `011`–`111` | — | — | reserved → `ILLEGAL` |
+
+**EPS.** A real baryon's color wavefunction is the totally
+antisymmetric `ε_ijk q_i q_j q_k` — swapping any two quarks flips its
+sign, and it vanishes if two quarks are identical. `EPS` computes the
+same symbol on the *order* of the values:
+`sgn(r−g) · sgn(g−b) · sgn(b−r)`, compared as signed integers. It is
++1 when `r < g < b` up to a cyclic rotation, −1 for an odd permutation
+of that order, 0 if any two values are equal. (Signed vs. unsigned
+comparison can never change the answer: reinterpreting the sign bit
+moves the negative values above the positive ones as a block, which is
+a cyclic rotation of three ranks — an even permutation.)
 
 ### MESON — `opcode[31:27] funct[26:25] nd[24:22] q1_bank[21:20] q1_reg[19:17] q2_bank[16:15] q2_reg[14:12] (unused[11:0])`
 
-Two explicit bank+register operands (any bank, including N) combine
-to `N` bank register `nd`. This is a simplification of real meson
-physics (a real meson is a quark and ITS OWN flavor's antiquark, which
-this ISA doesn't model as a distinct concept) — `MESON` here just
-means "the 2-source colorless-combine sibling of `BARYON`." `funct`
-(2 bits): `funct=00`: `nd = q1 - q2` (v0.1's only defined rule;
-`01`-`11` reserved).
+Two explicit bank+register operands combine to `N` bank register `nd`:
+
+| `funct` | Assembler | Result | Rule |
+|---------|-----------|--------|------|
+| `00` | `DIFF` | `q1 − q2` | v0.1's rule, any banks (including N) |
+| `01` | `SINGLET` | `q1 + q2` | v2.0. A quark `q1` and an antiquark `q2` of the **same color**. Different colors, or either operand in N → `ILLEGAL`. |
+| `10`, `11` | — | — | reserved → `ILLEGAL` |
+
+`SINGLET` is the real meson: color *c* plus anticolor *c̄* is the only
+colorless quark–antiquark pair. Red + anti-green is a color **octet** —
+literally the charge an r ḡ gluon carries — so it can't be a free
+particle, and the hardware traps it.
+
+### Antiquarks — `ANTI rd, rs` (assembler pseudo-instruction, v2.0)
+
+An antiquark is the **charge conjugate** of a quark. In AxISA it is
+stored in the same color bank as the quark, with its value negated
+(two's complement) — consistent with the diagonal gluons: in the
+conjugate representation the generators' eigenvalues flip sign, so
+anti-red has λ3 eigenvalue −1 where red has +1.
+
+`ANTI rd, rs` assembles to two real instructions in the same bank:
+`XORI rd, rs, -1` then `ADDI rd, rd, 1` (the R/G/B banks have no
+hardwired zero register to subtract from). Because `q2` of `SINGLET`
+holds an already-conjugated antiquark,
+`SINGLET(q, ANTI(x))` always equals `DIFF(q, x)` —
+`sw/hadron_combine_test.axasm` checks exactly that.
 
 ### LOAD — `opcode[31:27] nd[26:24] base_bank[23:22] base_reg[21:19] imm[18:0]`
 
@@ -565,7 +602,7 @@ that - a real v0.2+ project, not a small follow-on to this one.
 ## Reserved `funct` behavior (decided ahead of RTL, per design review)
 
 A reserved `funct` value on ALUR/ALUI (`4'b1010`-`4'b1111`), BARYON
-(`3'b001`-`3'b111`), or MESON (`2'b01`-`2'b11`) is decoded as
+(`3'b011`-`3'b111` since v2.0), or MESON (`2'b10`-`2'b11` since v2.0) is decoded as
 `illegal` and blocks `reg_write` entirely - this is an explicit,
 written decision, not left to "whatever the combinational logic's
 `default` arm happens to compute" (an earlier version of this project
@@ -579,9 +616,9 @@ reserved `funct`; all 8 gluon codes are still defined.)
 
 ## Explicitly deferred to v0.2+ (not blocking a first working core)
 
-- Additional BARYON/MESON `funct` combine rules, antiquarks, quark
-  flavor, and asymptotic freedom are no longer deferred - they are
-  v2.0 steps 2-4 (see "What's new in v2.0").
+- Additional BARYON/MESON `funct` combine rules and antiquarks landed
+  in v2.0 step 2; quark flavor and asymptotic freedom are no longer
+  deferred either - they are v2.0 steps 3-4 (see "What's new in v2.0").
 - BRANCH/JAL immediates could be treated as pre-shifted by 2 (like
   RV32I's own branch/jump immediates), doubling their real-world range
   (±32KB→±64KB, ±8MB→±16MB) for free, since the bottom 2 bits of any

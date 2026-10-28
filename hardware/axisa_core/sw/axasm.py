@@ -30,6 +30,10 @@ from asm_test1 import (
 BANK_NAMES = {'R': R, 'G': G, 'B': B, 'N': N}
 BANK_LETTERS = {v: k for k, v in BANK_NAMES.items()}
 
+# v2.0 combine rules (docs/ISA.md). A bare number is still accepted.
+BARYON_FUNCT = {'SUM': 0, 'MAJ': 1, 'EPS': 2}
+MESON_FUNCT = {'DIFF': 0, 'SINGLET': 1}
+
 ALU_FUNCT = {
     'ADD': ADD, 'SUB': SUB, 'AND': AND, 'OR': OR, 'XOR': XOR,
     'SLL': SLL, 'SRL': SRL, 'SRA': SRA, 'SLT': SLT, 'SLTU': SLTU,
@@ -137,7 +141,9 @@ def encode_one(mnemonic, ops, iaddr, labels):
     if m == 'BARYON':
         if len(ops) != 5:
             raise AsmError("BARYON: expected 5 operands (funct, nd, rr, gg, bb)")
-        funct = parse_imm(ops[0])
+        funct = BARYON_FUNCT.get(ops[0].upper())
+        if funct is None:
+            funct = parse_imm(ops[0])
         nd_bank, nd = parse_reg(ops[1])
         rr_bank, rr = parse_reg(ops[2])
         gg_bank, gg = parse_reg(ops[3])
@@ -151,11 +157,15 @@ def encode_one(mnemonic, ops, iaddr, labels):
     if m == 'MESON':
         if len(ops) != 4:
             raise AsmError("MESON: expected 4 operands (funct, nd, q1, q2)")
-        funct = parse_imm(ops[0])
+        funct = MESON_FUNCT.get(ops[0].upper())
+        if funct is None:
+            funct = parse_imm(ops[0])
         nd_bank, nd = parse_reg(ops[1])
         q1_bank, q1 = parse_reg(ops[2])
         q2_bank, q2 = parse_reg(ops[3])
         require_bank(nd_bank, nd, N, m, "nd")
+        if funct == MESON_FUNCT['SINGLET'] and (q1_bank != q2_bank or q1_bank == N):
+            raise AsmError("MESON SINGLET: quark and antiquark must be the same color (R, G or B)")
         return meson(funct, nd, q1_bank, q1, q2_bank, q2)
 
     if m == 'LOAD':
@@ -331,6 +341,17 @@ def assemble(lines):
             while addr < target:
                 instrs.append((addr, 'ADDI', ['N0', 'N0', '0'], lineno))
                 addr += 4
+            continue
+
+        if mnemonic.upper() == 'ANTI':
+            # v2.0 pseudo-instruction: antiquark = charge conjugate =
+            # two's-complement negation, done as two real ALUI ops
+            # (R/G/B have no hardwired zero register to SUB from).
+            if len(operands) != 2:
+                raise AsmError(f"line {lineno}: ANTI expects 2 operands (rd, rs)")
+            instrs.append((addr, 'XORI', [operands[0], operands[1], '-1'], lineno))
+            instrs.append((addr + 4, 'ADDI', [operands[0], operands[0], '1'], lineno))
+            addr += 8
             continue
 
         instrs.append((addr, mnemonic, operands, lineno))

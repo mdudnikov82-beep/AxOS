@@ -172,6 +172,7 @@ module cpu_core #(
 
     wire        is_baryon;
     wire [2:0]  baryon_rr, baryon_gg, baryon_bb;
+    wire [2:0]  baryon_funct;
 
     wire        is_meson;
     wire [1:0]  meson_funct;
@@ -219,7 +220,7 @@ module cpu_core #(
         .is_gluon(is_gluon), .gluon_funct(gluon_funct),
         .gluon_rs1_bank(gluon_rs1_bank), .gluon_rs1_reg(gluon_rs1_reg),
         .gluon_rs2_bank(gluon_rs2_bank), .gluon_rs2_reg(gluon_rs2_reg),
-        .is_baryon(is_baryon), .baryon_rr(baryon_rr), .baryon_gg(baryon_gg), .baryon_bb(baryon_bb),
+        .is_baryon(is_baryon), .baryon_rr(baryon_rr), .baryon_gg(baryon_gg), .baryon_bb(baryon_bb), .baryon_funct(baryon_funct),
         .is_meson(is_meson), .meson_funct(meson_funct),
         .meson_q1_bank(meson_q1_bank), .meson_q1_reg(meson_q1_reg),
         .meson_q2_bank(meson_q2_bank), .meson_q2_reg(meson_q2_reg),
@@ -528,8 +529,28 @@ module cpu_core #(
                                (gluon_funct == 3'd7) ? gluon_l8 : gluon_v;
 
     // ==================== BARYON / MESON ====================
-    wire [31:0] baryon_result = baryon_rr_data + baryon_gg_data + baryon_bb_data;
-    wire [31:0] meson_result  = meson_q1_data - meson_q2_data;
+    // v2.0 (docs/ISA.md): SUM; MAJ = bitwise majority ("color vote", the
+    // same function as SHA-256's Maj); EPS = Levi-Civita symbol of the
+    // three values' order: sgn(r-g)*sgn(g-b)*sgn(b-r), +1 for r<g<b
+    // cyclically, -1 anti-cyclically, 0 if any two are equal - totally
+    // antisymmetric, like a real baryon's color wavefunction eps_ijk.
+    wire signed [31:0] b_r = baryon_rr_data, b_g = baryon_gg_data, b_b = baryon_bb_data;
+    wire eps_any_eq = (b_r == b_g) || (b_g == b_b) || (b_b == b_r);
+    // sgn product is negative iff an odd number of the 3 differences
+    // are negative (none is zero once eps_any_eq is ruled out)
+    wire eps_neg = (b_r < b_g) ^ (b_g < b_b) ^ (b_b < b_r);
+    wire [31:0] baryon_eps = eps_any_eq ? 32'd0 : (eps_neg ? 32'hFFFFFFFF : 32'd1);
+    wire [31:0] baryon_maj = (baryon_rr_data & baryon_gg_data) | (baryon_gg_data & baryon_bb_data) |
+                             (baryon_rr_data & baryon_bb_data);
+    wire [31:0] baryon_result = (baryon_funct == 3'b001) ? baryon_maj :
+                                (baryon_funct == 3'b010) ? baryon_eps :
+                                baryon_rr_data + baryon_gg_data + baryon_bb_data;
+    // DIFF = q1 - q2 (v0.1, any banks); SINGLET = q + qbar, where q2
+    // already holds the antiquark (charge-conjugated, i.e. negated) -
+    // so SINGLET(q, ANTI(x)) == DIFF(q, x). control_unit.v enforces
+    // SINGLET's same-color rule.
+    wire [31:0] meson_result  = (meson_funct == 2'b01) ? meson_q1_data + meson_q2_data :
+                                                         meson_q1_data - meson_q2_data;
 
     // ==================== QHAD / QCNOT (classical quantum-circuit-
     // simulator extension - design review before this was written; see
