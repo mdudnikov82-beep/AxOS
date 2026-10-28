@@ -22,6 +22,62 @@ at all" from "what's the real achievable Fmax" - exactly the same
 reasoning `nextpnr-ecp5 --freq` used on the FPGA side (an input
 target to report slack against, not a hard requirement).
 
+## CURRENT (2026-10-28): the real, full AxISA v2.1 core - read this first
+
+**Every number in the sections below this one describes a PRUNED core.**
+The old `cpu_core_top.v` baked `sw/test1.hex` (15 words: ALUR/ALUI/
+BRANCH/HALT only) into `instr_mem` as a constant ROM. Yosys then proved
+everything that program never reaches unreachable and deleted it: the
+September netlist had 982 flip-flops in total - no data memory at all,
+no trap state (epc/cause/mode), no MMU, no QMEASURE, half of the G/B
+register banks. The claim below that "the FPU/sequencer stays in the
+netlist regardless of the program" was wrong.
+
+Fix: `instr_mem` now has a write port (`imem_load_we/addr/data`), the
+wrapper passes `INSTR_INIT_FILE("")`, and the program is loaded through
+that port while reset is held (`tb_gatelevel_power.v` does this). With
+a loadable program nothing is provably dead. Memories are ASIC-only
+128 words each (512 bytes) - there is still no SRAM macro, so every
+memory bit is a flip-flop.
+
+Run 40764232976 (commit `8f43089`), `CLOCK_PERIOD` 100ns,
+`FP_SIZING` relative, `FP_CORE_UTIL` 40, flow complete in ~2h35m:
+
+| | Sept 2026 (pruned) | **Oct 2026 (full core)** |
+|---|---|---|
+| std cells (excl. fill/tap) | 7,568 | **87,089** total instances, 45,219 after synthesis |
+| flip-flops | 982 | **11,094** |
+| cell area | 83,638 µm² | **763,372 µm²** |
+| die | 450×450 µm | **1223×1223 µm ≈ 1.50 mm²** (52.5% util.) |
+| hold buffers | - | 10,783 (0 hold violations left) |
+| DRC / LVS | pass / pass | **0 / 0** (magic DRC, route DRC, LVS) |
+| antenna | 15 pins / 9 nets | **272 pins / 207 nets** (still open) |
+
+**Timing** (0 setup and 0 hold violations in all 9 corners at 100ns):
+
+| corner | worst setup slack | critical path | Fmax estimate |
+|---|---|---|---|
+| ss 100°C 1.60V (signoff worst) | 16.89 ns | 83.1 ns | **≈12.0 MHz** |
+| tt 25°C 1.80V | 57.05 ns | 43.0 ns | ≈23.3 MHz |
+| ff -40°C 1.95V | 65.29 ns | 34.7 ns | ≈28.8 MHz |
+
+Fmax here is `1 / (period - worst slack)`, an estimate from one run,
+not a bisection like the September 55ns figure: at a tighter period the
+resizer works harder, so the real limit can be a little better. The
+comparable September number (all-corner signoff) is 18.18 MHz for the
+pruned core; the full core is about 1.5x slower, mostly because the
+paths now go through the real trap/MMU/MTE logic and much larger
+register-file and memory muxes.
+
+**Power** (OpenROAD `report_power`, typical corner):
+- vectorless (default activity): **94.2 mW** (combinational 89.6%).
+- gate-level VCD of `test1.hex` loaded through the load port: **9.83 mW**
+  (sequential 45.9%, clock tree 38.3%). The gate-level netlist halted
+  after 17 cycles with `tohost=200`, matching RTL. As before, this
+  workload is tiny, so the number is mostly the idle cost of clocking
+  11k flip-flops, not a typical operating power. Note the tb clock is
+  10ns while the SDC says 100ns (OpenSTA warns `STA-1452`).
+
 ## RESOLVED (2026-08-21): first successful AxISA ASIC synthesis - real numbers
 
 Took 5 real dispatches of `.github/workflows/openlane-axisa-synth.yml`
@@ -267,8 +323,9 @@ a real next step if a single defensible power figure is needed.
 1. **No SRAM macro** - `instr_mem`/`data_mem` synthesized as plain
    flip-flops via `sky130_fd_sc_hd` (no on-chip memory macro exists in
    this flow yet - would need OpenRAM or a pre-hardened SRAM IP, a
-   separate, larger follow-up). The 7,568-cell/83,637.72µm² result
-   above already includes this real cost, it isn't hidden.
+   separate, larger follow-up). The full core's 11,094 flip-flops are
+   mostly the two 128-word memories (8,192 bits) plus the 4 register
+   banks - an SRAM macro would shrink the die a lot.
 2. **Antenna violations** - real, present in at least some
    configurations (see tables above), not deliberately fixed.
 3. **Fmax found is specific to this exact floorplan/DIE_AREA/placement
@@ -282,6 +339,5 @@ a real next step if a single defensible power figure is needed.
    real but near-idle/trivial workload) are both real but neither is a
    credible "typical operating power" figure on its own - would need a
    longer, computationally-active program's VCD for that.
-5. **55ns Fmax is only bounded to a 5ns bracket** (50ns fails, 55ns
-   passes) - not narrowed further by choice, not because tighter
-   bisection isn't possible.
+5. **The full core's ~12 MHz is an estimate from slack**, not a
+   bisection - a run at ~85ns would confirm it (each run takes ~2.5h).
