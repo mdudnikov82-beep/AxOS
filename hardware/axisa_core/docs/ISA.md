@@ -1,9 +1,50 @@
-# AxISA v0.1 — Instruction Set Architecture Specification
+# AxISA v2.0 — Instruction Set Architecture Specification
 
-A from-scratch 32-bit ISA (not RISC-V, not derived from it) themed
+A from-scratch 32-bit ISA (not RISC-V, not derived from it) built
 around quantum chromodynamics (QCD). This document is the single
 source of truth for encoding and semantics — RTL, the assembler, and
 testbenches all must match it exactly.
+
+## The physics AxISA is built on
+
+QCD is the theory of the strong force. Its rules map onto the ISA
+directly:
+
+- **Color charge.** Quarks carry one of three colors — red, green,
+  blue. These are the `R`, `G`, `B` register banks. Antiquarks carry
+  the matching anticolors.
+- **SU(3).** Color is a 3-dimensional complex space, and the strong
+  force is the symmetry group SU(3) acting on it: 3×3 unitary matrices
+  with determinant 1.
+- **Gluons.** The force carriers. There are exactly 8 — one for each
+  generator of SU(3) (the Gell-Mann matrices λ1…λ8). Six of them carry
+  a color and a different anticolor and *change* a quark's color; two
+  (λ3, λ8) are diagonal and leave the color alone.
+- **Confinement.** A lone colored quark is never observed. Only
+  colorless (color-singlet) combinations exist freely: a **baryon**
+  (red + green + blue, e.g. the proton and neutron) or a **meson**
+  (color + its anticolor). In AxISA, only the colorless `N` bank can
+  reach memory or the outside world.
+- **Asymptotic freedom.** The strong force is weak at short distance
+  and grows with distance; pull two quarks far enough apart and the
+  "string" between them breaks, creating a new quark–antiquark pair.
+
+## What's new in v2.0
+
+v0.1 used QCD names over placeholder arithmetic (every GLUON was an XOR
+with a constant). v2.0 gives the names real physical meaning, one step
+at a time — each step lands with its own tests before the next starts:
+
+| Step | Feature | Status |
+|------|---------|--------|
+| 1 | **Real gluons**: the 8 GLUON codes are the 8 real gluons, with color rules enforced in hardware | **done** |
+| 2 | BARYON/MESON combine rules + antiquarks | planned |
+| 3 | Protons, neutrons and hadrons: quark flavor, real hadron construction | planned |
+| 4 | Asymptotic freedom: distance-dependent interaction latency, string breaking | planned |
+| 5 | `SU3MUL`: SU(3) matrix × color vector on the FPU — the core operation of lattice-QCD supercomputers | planned |
+
+**Breaking change in step 1:** GLUON's encoding and semantics changed
+completely (see below). v0.1 GLUON programs must be rewritten.
 
 ## Registers
 
@@ -26,8 +67,9 @@ ordinary read/write registers.
 **Confinement rule**: only the `N` bank can touch memory (`LOAD`/
 `STORE`) or report a result via `HALT`. A raw quark value (`R`/`G`/`B`)
 can never leave the register file directly — it must first be combined
-into a colorless value via `GLUON` (partial, still not confirmed
-colorless — see below), `BARYON`, or `MESON`. This is structural, not
+into a colorless value via `BARYON` or `MESON`. (In v0.1, `GLUON` could
+also write `N`; v2.0's real gluons only ever move quarks between color
+banks.) This is structural, not
 a runtime check: `LOAD`'s `nd`, `STORE`'s `ns`, and `HALT`'s
 `tohost_reg` are all bare 3-bit indices with no bank-tag field
 anywhere near them (confirmed by design review) - they can only ever
@@ -48,7 +90,7 @@ bit range across classes, to keep decode simple).
 |------------------|----------|------------------------------------------|
 | `00000`          | ALUR     | bank-tagged register-register ALU        |
 | `00001`          | ALUI     | bank-tagged register-immediate ALU       |
-| `00010`          | GLUON    | inter-bank (quark-quark) combine          |
+| `00010`          | GLUON    | quark absorbs one of the 8 gluons (v2.0)   |
 | `00011`          | BARYON   | 3-quark (R+G+B) combine → N               |
 | `00100`          | MESON    | 2-quark combine → N                       |
 | `00101`          | LOAD     | N-bank load from memory                   |
@@ -88,29 +130,49 @@ uniform thing). SLL/SRL/SRA use **`imm[4:0]`** (5 bits, covering the
 full 0-31 shift range a 32-bit register needs) as the shift amount;
 the rest of the 15-bit immediate is unused for shifts.
 
-### GLUON — `opcode[31:27] funct[26:24] rd_bank[23:22] rd_reg[21:19] rs1_bank[18:17] rs1_reg[16:14] rs2_bank[13:12] rs2_reg[11:9] (unused[8:0])`
+### GLUON — `opcode[31:27] gluon[26:24] rd[23:21] rs_bank[20:19] rs[18:16] (unused[15:0])` (v2.0)
 
-Real QCD has exactly 8 gluons (the SU(3) adjoint representation) —
-`funct` is 3 bits, one code per gluon, each defining a distinct
-combining rule for `rs1 OP rs2 -> rd`. `rd_bank`, `rs1_bank`,
-`rs2_bank` are independently encoded (any of R/G/B/N) — **v0.1
-deliberately does NOT enforce `rs1_bank != rs2_bank`**: design review
-confirmed the same-bank case is computationally harmless (it needs
-no more read/write ports than ALUR already requires) and forbidding
-it would cost real decode logic for a case that can't cause any actual
-hardware problem, so it's a decided permanent non-feature, not an
-open question. All 8 gluon functions compute `rd = rs1 ^ rs2 ^ CONST[funct]`
-for v0.1 (a fixed per-gluon XOR constant) — deliberately the simplest
-possible real operation that still gives each of the 8 gluons a
-distinct, checkable behavior; richer per-gluon semantics are a
-natural v0.2 extension once the basic plumbing is proven.
+A quark `rs` (bank `rs_bank`) absorbs one of the 8 gluons. The result —
+the same quark after the interaction — is written to register `rd` of
+the bank the quark ends up in. `rs` itself is left unchanged.
 
-`CONST` table (arbitrary but fixed, chosen for easy hand-verification
-in tests — low popcount, distinct):
-`funct=0: 0x00000000` (this "gluon" is a plain XOR combine)
-`funct=1: 0x00000001` `funct=2: 0x00000002` `funct=3: 0x00000004`
-`funct=4: 0x00000008` `funct=5: 0x00000010` `funct=6: 0x00000020`
-`funct=7: 0x00000040`
+**Off-diagonal gluons** carry color *c1* and anticolor *c̄2*. Only a
+quark of color *c2* can absorb one, and it comes out with color *c1*.
+The value passes through unchanged — only the color (bank) changes:
+
+| `gluon` | Name | Assembler | Absorbed by | Quark becomes |
+|---------|------|-----------|-------------|---------------|
+| `000` | r ḡ | `RG` | green | red   |
+| `001` | g r̄ | `GR` | red   | green |
+| `010` | r b̄ | `RB` | blue  | red   |
+| `011` | b r̄ | `BR` | red   | blue  |
+| `100` | g b̄ | `GB` | blue  | green |
+| `101` | b ḡ | `BG` | green | blue  |
+
+**Diagonal gluons** keep the quark's color (destination bank =
+`rs_bank`) and multiply the value by the Gell-Mann eigenvalue for that
+color:
+
+| `gluon` | Name | Assembler | red | green | blue |
+|---------|------|-----------|-----|-------|------|
+| `110` | λ3 | `L3` | ×1 | ×−1 | ×0 |
+| `111` | λ8 | `L8` | ×1 | ×1 | ×−2 |
+
+λ8 is really `diag(1, 1, −2)/√3`; AxISA drops the `1/√3` to stay in
+exact integers. Both matrices are **traceless** (eigenvalues sum to 0),
+so if red, green and blue quarks hold the same value, applying either
+diagonal gluon to all three and then `BARYON`-summing gives exactly 0.
+`sw/gluon_test.axasm` checks this invariant.
+
+**Color rules (trap `ILLEGAL`, CAUSE=0, nothing written):**
+- `rs_bank` = `N`: gluons couple only to color charge, and `N` holds
+  colorless hadrons.
+- An off-diagonal gluon on a quark of the wrong color (e.g. `RG` on a
+  red quark).
+
+Assembler: `GLUON <gluon>, rd, rs` — e.g. `GLUON RG, R4, G1` turns green
+quark `g1` red into `r4`. The assembler rejects the illegal cases; use
+`.word` to emit one deliberately.
 
 ### BARYON — `opcode[31:27] funct[26:24] nd[23:21] rr[20:18] gg[17:15] bb[14:12] (unused[11:0])`
 
@@ -511,16 +573,15 @@ had a comment on `alu.v` claiming `control_unit` already covered this
 for ALUR/ALUI when it actually didn't - fixed by adding the real
 check, not by softening the comment). GLUON has no reserved `funct` -
 all 8 codes are defined (real QCD has exactly 8 gluons), so there is
-nothing to reject.
+nothing to reject on that ground. (v2.0: GLUON now has illegal cases, but they come
+from the color rules — wrong-color or colorless source — not from a
+reserved `funct`; all 8 gluon codes are still defined.)
 
 ## Explicitly deferred to v0.2+ (not blocking a first working core)
 
-- Additional BARYON/MESON `funct` combine rules beyond the one each
-  defined here.
-- "Asymptotic freedom" as a real timing effect (interaction latency
-  that varies with operand value difference) - a fun idea, not
-  attempted until the core datapath itself is proven.
-- Any notion of an actual antiquark register or flavor beyond color.
+- Additional BARYON/MESON `funct` combine rules, antiquarks, quark
+  flavor, and asymptotic freedom are no longer deferred - they are
+  v2.0 steps 2-4 (see "What's new in v2.0").
 - BRANCH/JAL immediates could be treated as pre-shifted by 2 (like
   RV32I's own branch/jump immediates), doubling their real-world range
   (±32KB→±64KB, ±8MB→±16MB) for free, since the bottom 2 bits of any
@@ -546,8 +607,8 @@ Confirmed by design review before any RTL was written:
   sufficient for every instruction in this spec - no single
   instruction ever needs a 3rd simultaneous access to one bank (worked
   out by checking peak per-bank demand across every format: ALUR/
-  BRANCH need 2R+1W or 2R+0W to one bank; GLUON's same-bank case tops
-  out at the same 2R+1W; BARYON needs only 1R from each of R/G/B plus
+  BRANCH need 2R+1W or 2R+0W to one bank; GLUON (v2.0) needs only 1R
+  from one bank + 1W to one bank; BARYON needs only 1R from each of R/G/B plus
   1W to N; LOAD/STORE/JAL/HALT all need less). **This claim is true
   PER CYCLE, not per instruction** - `QHAD`/`QCNOT` (see above) each
   need 4 registers of the `R` bank across their whole 5-cycle sequence,

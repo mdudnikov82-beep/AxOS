@@ -4,9 +4,9 @@
 // into a running N-bank accumulator via ordinary ALUR adds, so the
 // final tohost value can only be right if every step upstream
 // computed correctly - not just proof that the core "ran without
-// crashing." r3 (GLUON's same-bank-R, worst-case 2R+1W result) is
-// checked separately via direct hierarchical peek, since it's an
-// R-bank result milestone 2 still has no way to surface through
+// crashing." b3 (GLUON lambda8 on a blue quark, v2.0 real gluons) is
+// checked separately via direct hierarchical peek, since it's a
+// B-bank result milestone 2 still has no way to surface through
 // tohost directly (same reasoning tb_cpu.v already uses for R/G/B).
 `timescale 1ns/1ps
 
@@ -43,7 +43,7 @@ module tb_cpu2;
 
     initial begin
         errors = 0;
-        if (!$value$plusargs("EXPECT_TOHOST=%d", expect_tohost)) expect_tohost = 324;
+        if (!$value$plusargs("EXPECT_TOHOST=%d", expect_tohost)) expect_tohost = 332;
         if (!$value$plusargs("MAX_CYCLES=%d", max_cycles)) max_cycles = 60;
 
         clk = 0;
@@ -63,7 +63,7 @@ module tb_cpu2;
         end else begin
             $display("Halted after %0d cycles. tohost=%0d", cycle_count, tohost_value);
             check(tohost_value, expect_tohost, "tohost (BARYON+MESON+GLUON+LOAD/STORE+JAL chain)");
-            check(dut.r_bank.regs[3], 32'd3, "r3 (GLUON same-bank R, 2R+1W, direct peek)");
+            check(dut.b_bank.regs[3], -32'sd20, "b3 (GLUON lambda8 on blue = -2*b1, direct peek)");
         end
 
         if (errors == 0) $display("ALL AXISA MILESTONE-2 TESTS PASSED");

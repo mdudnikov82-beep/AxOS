@@ -23,6 +23,7 @@ from asm_test1 import (
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
     rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure,
+    GLUON_FUNCT, GLUON_COLORS,
     write_hex,
 )
 
@@ -111,14 +112,27 @@ def encode_one(mnemonic, ops, iaddr, labels):
         target = resolve_target(ops[2], labels)
         return branch(rs1_bank, BRANCH_FUNCT[m], rs1, rs2, target - iaddr)
 
+    # v2.0 real gluons: GLUON <gluon>, rd, rs  e.g. GLUON RG, R4, G1
+    # (an r-antig gluon turns green quark g1 into red quark r4). The
+    # assembler enforces the color rules the hardware traps on; use
+    # .word to deliberately emit an illegal one.
     if m == 'GLUON':
-        if len(ops) != 4:
-            raise AsmError("GLUON: expected 4 operands (funct, rd, rs1, rs2)")
-        funct = parse_imm(ops[0])
+        if len(ops) != 3:
+            raise AsmError("GLUON: expected 3 operands (gluon, rd, rs)")
+        name = ops[0].upper()
+        if name not in GLUON_FUNCT:
+            raise AsmError(f"GLUON: unknown gluon '{ops[0]}' (one of {', '.join(GLUON_FUNCT)})")
         rd_bank, rd = parse_reg(ops[1])
-        rs1_bank, rs1 = parse_reg(ops[2])
-        rs2_bank, rs2 = parse_reg(ops[3])
-        return gluon(funct, rd_bank, rd, rs1_bank, rs1, rs2_bank, rs2)
+        rs_bank, rs = parse_reg(ops[2])
+        if rs_bank == N:
+            raise AsmError("GLUON: gluons don't couple to colorless N registers")
+        if name in GLUON_COLORS:
+            need, becomes = GLUON_COLORS[name]
+            if rs_bank != need or rd_bank != becomes:
+                raise AsmError(f"GLUON {name}: needs a {'RGB'[need]} source and a {'RGB'[becomes]} destination")
+        elif rd_bank != rs_bank:
+            raise AsmError(f"GLUON {name}: diagonal gluons keep the color - rd/rs must be the same bank")
+        return gluon(GLUON_FUNCT[name], rd, rs_bank, rs)
 
     if m == 'BARYON':
         if len(ops) != 5:

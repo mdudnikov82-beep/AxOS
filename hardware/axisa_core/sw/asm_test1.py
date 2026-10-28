@@ -53,9 +53,14 @@ def halt(tohost_reg):
 
 # ==================== Milestone 2 (see docs/ISA.md) ====================
 
-def gluon(funct, rd_bank, rd_reg, rs1_bank, rs1_reg, rs2_bank, rs2_reg):
-    return ((OP_GLUON << 27) | (funct << 24) | (rd_bank << 22) | (rd_reg << 19) |
-            (rs1_bank << 17) | (rs1_reg << 14) | (rs2_bank << 12) | (rs2_reg << 9))
+# v2.0 real gluons (docs/ISA.md): funct = which of the 8 gluons.
+GLUON_FUNCT = {'RG': 0, 'GR': 1, 'RB': 2, 'BR': 3, 'GB': 4, 'BG': 5, 'L3': 6, 'L8': 7}
+# Off-diagonal gluon -> (bank of the only quark that can absorb it, bank it becomes)
+GLUON_COLORS = {'RG': (G, R), 'GR': (R, G), 'RB': (B, R), 'BR': (R, B), 'GB': (B, G), 'BG': (G, B)}
+
+
+def gluon(funct, rd, rs_bank, rs):
+    return (OP_GLUON << 27) | (funct << 24) | (rd << 21) | (rs_bank << 19) | (rs << 16)
 
 
 def baryon(funct, nd, rr, gg, bb):

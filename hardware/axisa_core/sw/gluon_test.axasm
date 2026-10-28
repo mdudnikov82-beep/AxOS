@@ -1,0 +1,61 @@
+# AxISA v2.0 real gluons (see docs/ISA.md's GLUON section). Exercises
+# all 8 gluons and both color-rule traps:
+#
+#  - the 6 off-diagonal gluons, as two full color round trips in
+#    opposite directions (r->g->b->r and r->b->g->r) with different
+#    values, so a gluon wired to the wrong bank can't hide;
+#  - lambda3/lambda8 on one quark of each color, checked individually
+#    AND through the traceless invariant: equal red+green+blue values
+#    must BARYON-sum to exactly 0 after either diagonal gluon;
+#  - lambda8 with rd == rs (in-place) on every color;
+#  - two deliberately illegal gluons (.word - the assembler refuses
+#    them): r-antig on a RED quark (only green can absorb it), and
+#    lambda3 on an N register (gluons don't couple to colorless
+#    hadrons). Both must trap with CAUSE=0 and write nothing - the
+#    first targets sentinel r7, the second targets n7, the trap counter
+#    itself, so a leaked write would wreck the final count.
+    ADDI R1, R0, 7
+    ADDI R3, R0, 11
+    ADDI R5, R0, 13
+    ADDI G5, G0, 13
+    ADDI B5, B0, 13
+    ADDI R7, R0, 99          # sentinel for illegal_wrong_color
+
+# off-diagonal, round trip 1: red -> green -> blue -> red
+    GLUON GR, G1, R1         # g1 = 7
+    GLUON BG, B1, G1         # b1 = 7
+    GLUON RB, R2, B1         # r2 = 7
+
+# off-diagonal, round trip 2 (the other 3 gluons): red -> blue -> green -> red
+    GLUON BR, B2, R3         # b2 = 11
+    GLUON GB, G2, B2         # g2 = 11
+    GLUON RG, R4, G2         # r4 = 11
+
+# lambda3 = diag(1, -1, 0)
+    GLUON L3, R6, R5         # r6 = 13
+    GLUON L3, G6, G5         # g6 = -13
+    GLUON L3, B6, B5         # b6 = 0
+    BARYON 0, N2, R6, G6, B6 # n2 = 13 - 13 + 0 = 0 (traceless)
+    MESON 0, N1, R6, G6      # n1 = 13 - (-13) = 26 (proves the sum above isn't 0 by accident)
+
+# lambda8 = diag(1, 1, -2), in place
+    GLUON L8, R5, R5         # r5 = 13
+    GLUON L8, G5, G5         # g5 = 13
+    GLUON L8, B5, B5         # b5 = -26
+    BARYON 0, N4, R5, G5, B5 # n4 = 13 + 13 - 26 = 0 (traceless)
+
+illegal_wrong_color:
+    .word 0x10E10000         # GLUON RG, R7, R1 - a red quark can't absorb r-antig
+illegal_colorless:
+    .word 0x16F90000         # GLUON L3, N7, N1 - gluons don't couple to N
+    HALT N7                  # tohost = number of traps taken (expect 2)
+
+.org 0x200
+handler:
+    MFCAUSE N3
+    ADD N6, N6, N3           # n6 = sum of causes (expect 0 = both ILLEGAL)
+    ADDI N7, N7, 1           # n7 = trap count
+    MFEPC N5
+    ADDI N5, N5, 4           # skip the bad instruction
+    MTEPC N5
+    RFT

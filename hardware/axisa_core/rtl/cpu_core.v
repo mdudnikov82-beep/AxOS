@@ -16,8 +16,9 @@
 // written, worked through every instruction's worst case): each bank
 // gets its OWN 2-port read-address mux (r_addr_a/r_addr_b etc. below),
 // decided per-opcode. This was proven to never exceed the existing
-// 2 read + 1 write ports per bank - the global worst case is GLUON's
-// rs1_bank==rs2_bank==rd_bank case (2R+1W to one bank), and STORE's
+// 2 read + 1 write ports per bank - the global worst case was v0.1
+// GLUON's rs1_bank==rs2_bank==rd_bank case (2R+1W to one bank; v2.0's
+// real gluons read just one register, driven as rs1==rs2), and STORE's
 // base_bank==N case is 2R+0W to N (ties, doesn't exceed, the read
 // side). Every mux branch below is gated on its own is_* flag from
 // control_unit.v, never inferred by "which bits happen to match" -
@@ -474,9 +475,6 @@ module cpu_core #(
     wire [31:0] gluon_rs1_data = (gluon_rs1_bank == BANK_R) ? r_porta_data :
                                   (gluon_rs1_bank == BANK_G) ? g_porta_data :
                                   (gluon_rs1_bank == BANK_B) ? b_porta_data : n_porta_data;
-    wire [31:0] gluon_rs2_data = (gluon_rs2_bank == BANK_R) ? r_portb_data :
-                                  (gluon_rs2_bank == BANK_G) ? g_portb_data :
-                                  (gluon_rs2_bank == BANK_B) ? b_portb_data : n_portb_data;
 
     wire [31:0] meson_q1_data = (meson_q1_bank == BANK_R) ? r_porta_data :
                                  (meson_q1_bank == BANK_G) ? g_porta_data :
@@ -515,17 +513,19 @@ module cpu_core #(
     alu ax (.a(sel_rs1_data), .b(alu_b), .funct(alu_funct), .result(alu_result));
 
     // ==================== GLUON ====================
-    // 8 gluons, one fixed XOR constant each (docs/ISA.md) - deliberately
-    // the simplest real per-gluon-distinct operation for v0.1.
-    wire [31:0] gluon_const = (gluon_funct == 3'd0) ? 32'h00000000 :
-                               (gluon_funct == 3'd1) ? 32'h00000001 :
-                               (gluon_funct == 3'd2) ? 32'h00000002 :
-                               (gluon_funct == 3'd3) ? 32'h00000004 :
-                               (gluon_funct == 3'd4) ? 32'h00000008 :
-                               (gluon_funct == 3'd5) ? 32'h00000010 :
-                               (gluon_funct == 3'd6) ? 32'h00000020 :
-                                                        32'h00000040; // funct==7
-    wire [31:0] gluon_result = gluon_rs1_data ^ gluon_rs2_data ^ gluon_const;
+    // v2.0 real gluons (docs/ISA.md). The 6 off-diagonal gluons only
+    // change the quark's color (control_unit.v picks the destination
+    // bank) - the value itself passes through. The 2 diagonal ones scale
+    // it by their Gell-Mann eigenvalue for the quark's color:
+    //   lambda3 = diag( 1, -1,  0)   lambda8 = diag( 1, 1, -2) (x sqrt(3), integer form)
+    // Both are traceless, so a red+green+blue triple with equal values
+    // always sums to 0 afterwards - the color-singlet invariant.
+    wire [31:0] gluon_v = gluon_rs1_data;
+    wire [31:0] gluon_l3 = (gluon_rs1_bank == BANK_R) ? gluon_v :
+                           (gluon_rs1_bank == BANK_G) ? -gluon_v : 32'd0;
+    wire [31:0] gluon_l8 = (gluon_rs1_bank == BANK_B) ? -(gluon_v << 1) : gluon_v;
+    wire [31:0] gluon_result = (gluon_funct == 3'd6) ? gluon_l3 :
+                               (gluon_funct == 3'd7) ? gluon_l8 : gluon_v;
 
     // ==================== BARYON / MESON ====================
     wire [31:0] baryon_result = baryon_rr_data + baryon_gg_data + baryon_bb_data;

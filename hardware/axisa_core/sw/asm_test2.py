@@ -9,9 +9,9 @@ Also deliberately exercises the "explicitly legal, easy to get wrong"
 degenerate cases flagged by this project's own design review before
 any RTL was written:
   - MESON with q1_bank==q2_bank==N (a real same-bank double-read)
-  - GLUON with rs1_bank==rs2_bank==rd_bank (worst-case 2R+1W to ONE
-    bank in a single cycle - written to R, checked via direct
-    hierarchical peek like milestone 1 did for R/G/B)
+  - v2.0 real gluons: an off-diagonal one (r-antig: green quark g1
+    becomes red r4) and both diagonal ones (lambda3 on green negates,
+    lambda8 on blue scales by -2, checked via direct peek of b3)
   - STORE with base_bank==N (STORE's own double-read: the value-to-
     store `ns` and the address register `base_reg` are two DIFFERENT
     N registers read in the same cycle - the asymmetric case LOAD
@@ -22,7 +22,7 @@ any RTL was written:
 import sys
 from asm_test1 import (
     R, G, B, N, ADD,
-    addi, add, gluon, baryon, meson, load, store, jal, halt, write_hex,
+    addi, add, gluon, GLUON_FUNCT, baryon, meson, load, store, jal, halt, write_hex,
 )
 
 if __name__ == "__main__":
@@ -45,10 +45,12 @@ if __name__ == "__main__":
         meson(0, 2, N, 3, N, 1),      # n2 = n3-n1 = 50-21 = 29 (same-bank==N double-read)
         add(N, 1, 1, 2),               # n1 = 21+29 = 50
 
-        gluon(0, N, 2, R, 1, G, 1),   # n2 = r1^g1^CONST[0] = 5^3^0 = 6 (general, different banks)
+        gluon(GLUON_FUNCT['RG'], 4, G, 1),  # r4 = g1 = 3 (r-antig: the green quark turns red)
+        gluon(GLUON_FUNCT['L3'], 4, G, 1),  # g4 = -g1 = -3 (lambda3 eigenvalue for green is -1)
+        meson(0, 2, R, 4, G, 4),      # n2 = r4-g4 = 3-(-3) = 6
         add(N, 1, 1, 2),               # n1 = 50+6 = 56
 
-        gluon(1, R, 3, R, 1, R, 2),   # r3 = r1^r2^CONST[1] = 5^7^1 = 3 (same-bank R, 2R+1W worst case - checked via peek)
+        gluon(GLUON_FUNCT['L8'], 3, B, 1),  # b3 = -2*b1 = -20 (lambda8 eigenvalue for blue is -2) - checked via peek
 
         addi(N, 4, 0, 300),       # n4 = 300 (address constant for the N-base LOAD/STORE test)
 
@@ -62,7 +64,7 @@ if __name__ == "__main__":
 
         jal(2, 8),                 # n2 = PC_of_this+4 (link); PC = PC_of_this+8 (skip next instr)
         addi(N, 2, 0, 999),        # MUST be skipped - would corrupt n2 to 999 if JAL's skip failed
-        add(N, 1, 1, 2),               # n1 = 224 + n2 (n2 must be the link address, 100, not 999)
+        add(N, 1, 1, 2),               # n1 = 224 + n2 (n2 must be the link address, 108, not 999) = 332
 
         halt(1),                   # tohost = n1 (see tb/tb_cpu2.v for the hand-computed expected value)
     ]

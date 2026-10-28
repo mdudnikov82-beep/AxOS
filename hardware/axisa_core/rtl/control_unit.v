@@ -159,11 +159,27 @@ module control_unit (
     localparam OP_QCNOT  = 5'b01111;
     localparam OP_QMEASURE = 5'b10000;
 
+    localparam BANK_R = 2'b00;
+    localparam BANK_G = 2'b01;
+    localparam BANK_B = 2'b10;
     localparam BANK_N = 2'b11;
+
+    // GLUON funct: the 8 gluons (docs/ISA.md). GL_XY = color X, anticolor Y.
+    localparam GL_RG = 3'd0;
+    localparam GL_GR = 3'd1;
+    localparam GL_RB = 3'd2;
+    localparam GL_BR = 3'd3;
+    localparam GL_GB = 3'd4;
+    localparam GL_BG = 3'd5;
+    localparam GL_L3 = 3'd6;
+    localparam GL_L8 = 3'd7;
 
     wire [4:0] opcode = instr[31:27];
 
+    reg [1:0] gl_need_bank; // GLUON: the only source bank that can absorb this gluon
+
     always @(*) begin
+        gl_need_bank   = 2'b0;
         bank           = 2'b0;
         alu_funct      = 4'b0;
         branch_funct   = 3'b0;
@@ -271,15 +287,34 @@ module control_unit (
             end
 
             OP_GLUON: begin
+                // v2.0 real gluons (docs/ISA.md): one source quark, one
+                // destination. rs2 mirrors rs1 so cpu_core.v's existing
+                // per-bank read-port muxing needs no new case.
                 is_gluon       = 1'b1;
                 gluon_funct    = instr[26:24];
-                write_bank     = instr[23:22];
-                write_addr     = instr[21:19];
-                gluon_rs1_bank = instr[18:17];
-                gluon_rs1_reg  = instr[16:14];
-                gluon_rs2_bank = instr[13:12];
-                gluon_rs2_reg  = instr[11:9];
-                reg_write      = 1'b1; // all 8 funct codes are defined (docs/ISA.md) - no reserved case
+                write_addr     = instr[23:21];
+                gluon_rs1_bank = instr[20:19];
+                gluon_rs1_reg  = instr[18:16];
+                gluon_rs2_bank = instr[20:19];
+                gluon_rs2_reg  = instr[18:16];
+                // Off-diagonal gluon c1-anti(c2): only a quark of color c2
+                // can absorb it, and it comes out as color c1. Diagonal
+                // gluons (lambda3/lambda8) keep the quark's color.
+                case (instr[26:24])
+                    GL_RG:   begin gl_need_bank = BANK_G; write_bank = BANK_R; end
+                    GL_GR:   begin gl_need_bank = BANK_R; write_bank = BANK_G; end
+                    GL_RB:   begin gl_need_bank = BANK_B; write_bank = BANK_R; end
+                    GL_BR:   begin gl_need_bank = BANK_R; write_bank = BANK_B; end
+                    GL_GB:   begin gl_need_bank = BANK_B; write_bank = BANK_G; end
+                    GL_BG:   begin gl_need_bank = BANK_G; write_bank = BANK_B; end
+                    default: begin gl_need_bank = instr[20:19]; write_bank = instr[20:19]; end // L3/L8
+                endcase
+                // Gluons couple only to color charge: an N-bank (colorless)
+                // source, or a quark of the wrong color, is illegal.
+                if (instr[20:19] == BANK_N || instr[20:19] != gl_need_bank)
+                    illegal = 1'b1;
+                else
+                    reg_write = 1'b1;
             end
 
             OP_BARYON: begin
