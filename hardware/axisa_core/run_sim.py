@@ -7,7 +7,7 @@
 #
 # Usage:
 #   python run_sim.py            all fast tests (everything except the mesh)
-#   python run_sim.py --mesh     ONLY the 1023-core 3D mesh (several minutes)
+#   python run_sim.py --mesh     ONLY a generated 1023-core 8x8x16 mesh (several minutes)
 #   python run_sim.py --all      fast tests, then the mesh
 #   python run_sim.py qmeasure   only tests whose name contains "qmeasure"
 #
@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -96,12 +97,24 @@ FAST_TESTS = [
       "tohost=342, translated STORE/LOAD + recoverable page fault", asm=[axasm("mmu_test")]),
 ]
 
+# CI-sized mesh, generated fresh into a temp dir. The committed
+# rtl/soc_top.v is the 22x11x19 (4597-core) scale record, which no longer
+# fits a GitHub runner's RAM since the core grew (FPU, QHAD/QCNOT,
+# fp_div/fp_sqrt/QMEASURE) - the runner gets shut down mid-compile. Use
+# .github/workflows/axisa-mesh.yml for big-mesh experiments instead.
+MESH_DIMS = ("8", "8", "16")  # 1023 cores + 1 memory node
+MESH_DIR = os.path.join(tempfile.gettempdir(), "axisa_mesh_%sx%sx%s" % MESH_DIMS)
+MESH_SOC = os.path.join(MESH_DIR, "soc_top.v")
+MESH_TB = os.path.join(MESH_DIR, "tb_soc.v")
+
 MESH_TESTS = [
-    T("mesh_1023", "tb/tb_soc.v", "PASS: cross-core communication verified",
+    T("mesh_1023", MESH_TB, "PASS: cross-core communication verified",
       "c0=127, c1=77, c2-c1022=200 - 1023 cores, real X+Y+Z routing",
       asm=[axasm("shared_producer"), axasm("shared_consumer"),
-           ["sw/asm_test1.py", "sw/test1.hex"]],
-      src=CORE + NOC + ["rtl/soc_top.v"]),
+           ["sw/asm_test1.py", "sw/test1.hex"],
+           ["tools/gen_soc_top.py", *MESH_DIMS, MESH_SOC],
+           ["tools/gen_tb_soc.py", *MESH_DIMS, MESH_TB]],
+      src=CORE + NOC + [MESH_SOC]),
 ]
 
 
@@ -168,6 +181,8 @@ def main():
 
     iverilog, vvp = find_tool("iverilog"), find_tool("vvp")
     check_illegal_opcode_is_free()
+    if any(t in MESH_TESTS for t in tests):
+        os.makedirs(MESH_DIR, exist_ok=True)
     outdir = HERE  # out_*.vvp are gitignored, same place run_sim.bat put them
 
     failed = []
