@@ -27,8 +27,16 @@ module tb_gatelevel_power;
     // Same standalone-core tie-offs as every other cpu_core_top
     // testbench in this project (no shared bus, no UART stimulus,
     // no interrupt - test1.hex needs none of these).
+    // v2.1: the netlist has no baked-in program any more - load
+    // sw/test1.hex through the instr_mem load port while reset is held.
+    reg         load_we;
+    reg  [31:0] load_addr, load_data;
+    reg  [31:0] prog [0:127];
+    integer     w;
+
     cpu_core_top dut (
         .clk(clk), .reset(reset),
+        .imem_load_we(load_we), .imem_load_addr(load_addr), .imem_load_data(load_data),
         .halted(halted), .tohost_value(tohost_value),
         .irq_in(1'b0),
         .bus_req(bus_req), .bus_addr(bus_addr), .bus_write_data(bus_write_data),
@@ -50,6 +58,15 @@ module tb_gatelevel_power;
         clk = 0;
         reset = 1;
         cycle_count = 0;
+        load_we = 1'b0; load_addr = 32'b0; load_data = 32'b0;
+        for (w = 0; w < 128; w = w + 1) prog[w] = 32'h0e000000; // ADDI n0,n0,0 (NOP) padding
+        $readmemh("../sw/test1.hex", prog);
+        for (w = 0; w < 128; w = w + 1) begin
+            @(negedge clk);
+            load_we = 1'b1; load_addr = w * 4; load_data = prog[w];
+        end
+        @(negedge clk);
+        load_we = 1'b0;
         @(posedge clk); @(posedge clk);
         reset = 0;
 

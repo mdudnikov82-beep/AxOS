@@ -16,7 +16,7 @@
         "dir::cpu_core_top.v"
     ],
     "CLOCK_PORT": "clk",
-    "CLOCK_PERIOD": 55,
-    "FP_SIZING": "absolute",
-    "DIE_AREA": "0 0 450 450"
+    "CLOCK_PERIOD": 100,
+    "FP_SIZING": "relative",
+    "FP_CORE_UTIL": 40
 }

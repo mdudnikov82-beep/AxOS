@@ -76,6 +76,7 @@ module tt_um_axisa_core (
         .INSTR_INIT_FILE("../sw/mini_shell_loop.hex")
     ) core (
         .clk(clk), .reset(reset),
+        .imem_load_we(1'b0), .imem_load_addr(32'b0), .imem_load_data(32'b0), // program is baked in here
         .halted(halted), .tohost_value(tohost_value),
         .irq_in(1'b0),
         .bus_req(), .bus_addr(), .bus_write_data(),

@@ -35,6 +35,7 @@ module cpu_core_fpga_top (
         .INSTR_INIT_FILE("sw/test1.hex")
     ) core (
         .clk(clk), .reset(reset),
+        .imem_load_we(1'b0), .imem_load_addr(32'b0), .imem_load_data(32'b0), // program is baked in here
         .halted(halted), .tohost_value(tohost_value),
         .irq_in(irq_in),
         .bus_req(bus_req), .bus_addr(bus_addr), .bus_write_data(bus_write_data),

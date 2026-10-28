@@ -44,12 +44,23 @@ module instr_mem #(
     input  wire        clk,
     input  wire [31:0] addr,   // byte address (word-aligned - addr[1:0] ignored)
     input  wire        stall,  // SYNC_READ=1 only - hold instr steady (see header comment)
+    // Program-load write port (v2.1). Lets a chip receive its program
+    // from outside instead of baking it in as a ROM constant - which is
+    // also what keeps synthesis honest: with a constant ROM, Yosys
+    // proves whatever the baked-in program never does unreachable and
+    // deletes it. Left unconnected (z) in simulation testbenches = no write.
+    input  wire        load_we,
+    input  wire [31:0] load_addr,  // byte address
+    input  wire [31:0] load_data,
     output wire [31:0] instr
 );
     reg [31:0] mem [0:MEM_WORDS-1];
 
     initial begin
         if (INIT_FILE != "") $readmemh(INIT_FILE, mem);
+    end
+    always @(posedge clk) begin
+        if (load_we) mem[load_addr[31:2]] <= load_data;
     end
 
     generate

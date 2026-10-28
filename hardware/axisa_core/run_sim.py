@@ -125,6 +125,13 @@ FAST_TESTS = [
     T("trap_irq_regge_2", "tb/tb_trap_irq_regge.v", "ALL AXISA TRAP-IRQ-REGGE TESTS PASSED",
       "IRQ on REGGE's terminal cycle deferred until it writes, EPC=0x28",
       asm=[axasm("trap_irq_regge")], plusargs=["+IRQ_PHASE=2"]),
+    # The ASIC wrapper at RTL level: program loaded through the instr_mem
+    # load port, 128-word memories - the same testbench later runs on
+    # OpenLane's gate-level netlist (openlane-axisa-synth.yml).
+    T("asic_top", "tb_gatelevel_power.v", "ALL AXISA GATE-LEVEL POWER TESTS PASSED",
+      "ASIC wrapper (RTL): test1.hex loaded via the load port, 128-word memories",
+      asm=[["sw/asm_test1.py", "sw/test1.hex"]],
+      src=["../" + f for f in CORE] + ["cpu_core_top.v"], cwd="asic"),
     T("trap_illegal", "tb/tb_trap_illegal.v", "ALL AXISA TRAP-ILLEGAL TESTS PASSED",
       "tohost=88, CAUSE/EPC captured, R/G/B/N survived", asm=[axasm("trap_illegal")]),
     T("trap_syscall", "tb/tb_trap_syscall.v", "ALL AXISA TRAP-SYSCALL TESTS PASSED",

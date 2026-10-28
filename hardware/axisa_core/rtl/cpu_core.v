@@ -81,6 +81,12 @@ module cpu_core #(
     parameter MTE_ENABLE    = 1,
     parameter PT_INDEX_BITS = 4
 ) (
+    // v2.1 program-load port into instr_mem (see instr_mem.v) - real
+    // chips (and the ASIC wrapper) load their program from outside.
+    // Simulation testbenches leave it unconnected.
+    input  wire        imem_load_we,
+    input  wire [31:0] imem_load_addr,
+    input  wire [31:0] imem_load_data,
     input  wire        clk,
     input  wire        reset,
     output wire         halted,
@@ -155,7 +161,9 @@ module cpu_core #(
 
     wire [31:0] instr_fetched;
     instr_mem #(.MEM_WORDS(INSTR_MEM_WORDS), .INIT_FILE(INSTR_INIT_FILE), .SYNC_READ(1)) imem (
-        .clk(clk), .addr(pc), .stall(cpu_stall), .instr(instr_fetched)
+        .clk(clk), .addr(pc), .stall(cpu_stall),
+        .load_we(imem_load_we), .load_addr(imem_load_addr), .load_data(imem_load_data),
+        .instr(instr_fetched)
     );
     wire [31:0] instr = squash_r ? 32'b0 : instr_fetched;
 
