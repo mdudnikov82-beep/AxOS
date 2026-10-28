@@ -1,0 +1,47 @@
+name: AxISA Simulation Suite
+
+# Runs hardware/axisa_core/run_sim.py - the same test list run_sim.bat
+# uses locally. Before this workflow existed, no CI job ran the AxISA
+# sims at all, so a70fad3 (QMEASURE claiming opcode 10000) silently
+# broke trap_illegal while CI stayed green.
+on:
+  push:
+    paths:
+      - "hardware/axisa_core/**"
+      - ".github/workflows/axisa-sim.yml"
+  pull_request:
+    paths:
+      - "hardware/axisa_core/**"
+      - ".github/workflows/axisa-sim.yml"
+  workflow_dispatch:
+
+jobs:
+  fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog
+        run: sudo apt-get update -qq && sudo apt-get install -y iverilog
+
+      - name: Run fast tests (everything except the mesh)
+        working-directory: hardware/axisa_core
+        run: python3 run_sim.py
+
+  # Separate job so the fast results come back in ~1 min instead of
+  # waiting on the 1023-core soc_top.v compile (several minutes).
+  mesh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Icarus Verilog
+        run: sudo apt-get update -qq && sudo apt-get install -y iverilog
+
+      - name: Run 1023-core 3D mesh
+        working-directory: hardware/axisa_core
+        run: python3 run_sim.py --mesh
