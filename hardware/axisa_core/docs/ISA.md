@@ -39,7 +39,7 @@ at a time — each step lands with its own tests before the next starts:
 |------|---------|--------|
 | 1 | **Real gluons**: the 8 GLUON codes are the 8 real gluons, with color rules enforced in hardware | **done** |
 | 2 | **BARYON/MESON combine rules + antiquarks**: `MAJ`, `EPS`, `SINGLET`, `ANTI` | **done** |
-| 3 | Protons, neutrons and hadrons: quark flavor, real hadron construction | planned |
+| 3 | **Protons, neutrons and hadrons**: quark flavor codes, `BARYON QN` / `MESON QN` quantum numbers | **done** |
 | 4 | Asymptotic freedom: distance-dependent interaction latency, string breaking | planned |
 | 5 | `SU3MUL`: SU(3) matrix × color vector on the FPU — the core operation of lattice-QCD supercomputers | planned |
 
@@ -187,7 +187,8 @@ rule:
 | `000` | `SUM` | `rr + gg + bb` | v0.1's rule, 32-bit wraparound |
 | `001` | `MAJ` | bitwise majority `(r&g) \| (g&b) \| (r&b)` | v2.0. "Color vote": each bit is what at least 2 of the 3 colors say. Same function as SHA-256's `Maj`. |
 | `010` | `EPS` | +1, −1 or 0 | v2.0. Levi-Civita symbol of the three values' order (below). |
-| `011`–`111` | — | — | reserved → `ILLEGAL` |
+| `011` | `QN` | packed quantum numbers | v2.0 step 3, see "Quark flavor and hadrons" |
+| `100`–`111` | — | — | reserved → `ILLEGAL` |
 
 **EPS.** A real baryon's color wavefunction is the totally
 antisymmetric `ε_ijk q_i q_j q_k` — swapping any two quarks flips its
@@ -208,7 +209,8 @@ Two explicit bank+register operands combine to `N` bank register `nd`:
 |---------|-----------|--------|------|
 | `00` | `DIFF` | `q1 − q2` | v0.1's rule, any banks (including N) |
 | `01` | `SINGLET` | `q1 + q2` | v2.0. A quark `q1` and an antiquark `q2` of the **same color**. Different colors, or either operand in N → `ILLEGAL`. |
-| `10`, `11` | — | — | reserved → `ILLEGAL` |
+| `10` | `QN` | packed quantum numbers | v2.0 step 3. Same color rule as `SINGLET`; see "Quark flavor and hadrons" |
+| `11` | — | — | reserved → `ILLEGAL` |
 
 `SINGLET` is the real meson: color *c* plus anticolor *c̄* is the only
 colorless quark–antiquark pair. Red + anti-green is a color **octet** —
@@ -229,6 +231,62 @@ hardwired zero register to subtract from). Because `q2` of `SINGLET`
 holds an already-conjugated antiquark,
 `SINGLET(q, ANTI(x))` always equals `DIFF(q, x)` —
 `sw/hadron_combine_test.axasm` checks exactly that.
+
+### Quark flavor and hadrons (v2.0 step 3)
+
+Besides color, every quark has a **flavor**. A quark register can hold a
+flavor code — an antiquark holds the negated code (exactly what `ANTI`
+produces):
+
+| Code | Flavor | Assembler | Charge | Other quantum number |
+|------|--------|-----------|--------|----------------------|
+| 1 | up      | `UP`      | +2/3 | isospin I3 = +1/2 |
+| 2 | down    | `DOWN`    | −1/3 | isospin I3 = −1/2 |
+| 3 | strange | `STRANGE` | −1/3 | strangeness S = −1 |
+| 4 | charm   | `CHARM`   | +2/3 | charm C = +1 |
+| 5 | bottom  | `BOTTOM`  | −1/3 | bottomness B′ = −1 |
+| 6 | top     | `TOP`     | +2/3 | (never in a hadron, see below) |
+
+The names work anywhere an immediate does: `ADDI R1, R0, UP`,
+`ADDI R2, R0, -STRANGE`.
+
+`BARYON QN, nd, rr, gg, bb` and `MESON QN, nd, q1, q2` build a hadron
+from those quarks and write its quantum numbers to `nd`, packed as
+4-bit two's-complement fields:
+
+| Bits | `[3:0]` | `[7:4]` | `[11:8]` | `[15:12]` | `[19:16]` | `[23:20]` | `[27:24]` | `[31:28]` |
+|------|---------|---------|----------|-----------|-----------|-----------|-----------|-----------|
+| Field | charge Q | baryon number B | strangeness S | charm C | bottomness B′ | topness T (always 0) | 2·I3 | 0 |
+
+Examples (all checked by `sw/hadrons_test.axasm`):
+
+| Hadron | Quarks | Result word | Meaning |
+|--------|--------|-------------|---------|
+| proton p | u u d | `0x01000011` | Q=+1, B=1, 2·I3=+1 |
+| neutron n | u d d | `0x0F000010` | Q=0, B=1, 2·I3=−1 |
+| Δ⁺⁺ | u u u | `0x03000012` | Q=+2 |
+| Ω⁻ | s s s | `0x00000D1F` | Q=−1, S=−3 |
+| antiproton | ū ū d̄ | `0x0F0000FF` | Q=−1, B=−1 |
+| π⁺ | u d̄ | `0x02000001` | Q=+1, B=0, 2·I3=+2 |
+| K⁺ | u s̄ | `0x01000101` | Q=+1, S=+1 |
+
+**`ILLEGAL` (CAUSE=0, nothing written)** — unlike every other illegal
+case in AxISA, these depend on the register *values*, not just the
+instruction bits, so `cpu_core.v` raises them (`hadron_bad`) alongside
+`control_unit.v`'s decode-time ones:
+
+- an operand that isn't a flavor code (0, 7, −7, …);
+- `BARYON QN` mixing quarks and antiquarks (q q q̄ is not a color singlet);
+- `MESON QN` that isn't exactly one quark and one antiquark (either
+  order), or whose two operands are different colors / in `N`;
+- any **top** quark or antiquark. The top decays in about 5·10⁻²⁵ s,
+  before the strong force can bind it, so no top hadron exists in
+  nature. That is why the T field is always 0.
+
+The charge is computed in thirds and divided by 3; for any legal
+hadron the sum is always a multiple of 3 (each quark is ≡ 2 mod 3 in
+thirds, three of them sum to ≡ 0, and a quark plus an antiquark
+cancel mod 3).
 
 ### LOAD — `opcode[31:27] nd[26:24] base_bank[23:22] base_reg[21:19] imm[18:0]`
 
@@ -602,7 +660,7 @@ that - a real v0.2+ project, not a small follow-on to this one.
 ## Reserved `funct` behavior (decided ahead of RTL, per design review)
 
 A reserved `funct` value on ALUR/ALUI (`4'b1010`-`4'b1111`), BARYON
-(`3'b011`-`3'b111` since v2.0), or MESON (`2'b10`-`2'b11` since v2.0) is decoded as
+(`3'b100`-`3'b111` since v2.0), or MESON (`2'b11` since v2.0) is decoded as
 `illegal` and blocks `reg_write` entirely - this is an explicit,
 written decision, not left to "whatever the combinational logic's
 `default` arm happens to compute" (an earlier version of this project
@@ -617,8 +675,8 @@ reserved `funct`; all 8 gluon codes are still defined.)
 ## Explicitly deferred to v0.2+ (not blocking a first working core)
 
 - Additional BARYON/MESON `funct` combine rules and antiquarks landed
-  in v2.0 step 2; quark flavor and asymptotic freedom are no longer
-  deferred either - they are v2.0 steps 3-4 (see "What's new in v2.0").
+  in v2.0 step 2, quark flavor in step 3; asymptotic freedom is v2.0
+  step 4 (see "What's new in v2.0").
 - BRANCH/JAL immediates could be treated as pre-shifted by 2 (like
   RV32I's own branch/jump immediates), doubling their real-world range
   (±32KB→±64KB, ±8MB→±16MB) for free, since the bottom 2 bits of any

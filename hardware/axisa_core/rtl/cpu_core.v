@@ -210,6 +210,7 @@ module cpu_core #(
     wire [1:0]  write_bank;
     wire [2:0]  write_addr;
     wire        reg_write, illegal;
+    wire        hadron_bad; // v2.0 step 3: data-dependent ILLEGAL (BARYON/MESON QN on non-quark flavors)
 
     control_unit cu (
         .instr(instr),
@@ -408,7 +409,7 @@ module cpu_core #(
     // shared gate can't drift the way 4 independently-written copies
     // of "&& !mem_stall" could (confirmed by design review before
     // this was written).
-    wire gated_reg_write = reg_write && !mem_stall && !squash_r;
+    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !hadron_bad;
     wire r_write_en = gated_reg_write && (write_bank == BANK_R);
     wire g_write_en = gated_reg_write && (write_bank == BANK_G);
     wire b_write_en = gated_reg_write && (write_bank == BANK_B);
@@ -542,15 +543,80 @@ module cpu_core #(
     wire [31:0] baryon_eps = eps_any_eq ? 32'd0 : (eps_neg ? 32'hFFFFFFFF : 32'd1);
     wire [31:0] baryon_maj = (baryon_rr_data & baryon_gg_data) | (baryon_gg_data & baryon_bb_data) |
                              (baryon_rr_data & baryon_bb_data);
+    // ---- v2.0 step 3: flavor quantum numbers (docs/ISA.md) ----
+    // A quark register holds a flavor code u=1 d=2 s=3 c=4 b=5 t=6; an
+    // antiquark holds the negated code (ANTI). QN packs the hadron's
+    // quantum numbers into 4-bit signed fields:
+    //   [3:0] Q  [7:4] B  [11:8] S  [15:12] C  [19:16] B'  [23:20] T(=0)  [27:24] 2*I3
+    // The top quark decays (~5e-25 s) before it can hadronize, so a QN
+    // with a top/antitop traps ILLEGAL and T is always 0 - kept as a
+    // field so the layout covers all six flavors' quantum numbers.
+    // fl_field(f, k) = one quantum number of one quark (k: 0=3*Q 1=S
+    // 2=C 3=B' 5=2*I3), sign-flipped for an antiquark.
+    function [3:0] fl_field;
+        input [31:0] f;
+        input [2:0]  k;
+        reg   [2:0]  a;
+        reg   [3:0]  v;
+        begin
+            a = f[31] ? (~f[2:0] + 3'd1) : f[2:0]; // |f| - only meaningful once fl_valid(f)
+            case (k)
+                3'd0:    v = (a == 3'd1 || a == 3'd4 || a == 3'd6) ? 4'd2 : 4'hF; // u,c,t +2/3 - d,s,b -1/3
+                3'd1:    v = (a == 3'd3) ? 4'hF : 4'd0;                         // s: S = -1
+                3'd2:    v = (a == 3'd4) ? 4'd1 : 4'd0;                         // c: C = +1
+                3'd3:    v = (a == 3'd5) ? 4'hF : 4'd0;                         // b: B' = -1
+                3'd4:    v = 4'd0;                                              // T: top never hadronizes
+                default: v = (a == 3'd1) ? 4'd1 : (a == 3'd2) ? 4'hF : 4'd0;    // u: +1, d: -1 (2*I3)
+            endcase
+            fl_field = f[31] ? (~v + 4'd1) : v;
+        end
+    endfunction
+    function fl_valid; // a quark/antiquark that can be bound into a hadron: u d s c b, not t
+        input [31:0] f;
+        fl_valid = ($signed(f) >= 1 && $signed(f) <= 5) || ($signed(f) >= -5 && $signed(f) <= -1);
+    endfunction
+    // charge: the 3*Q sum of a real hadron is always a multiple of 3
+    function [3:0] div3;
+        input [3:0] x;
+        div3 = (x == 4'd6) ? 4'd2 : (x == 4'd3) ? 4'd1 : (x == 4'hD) ? 4'hF : (x == 4'hA) ? 4'hE : 4'd0;
+    endfunction
+
+    wire bq_all_quark = !baryon_rr_data[31] && !baryon_gg_data[31] && !baryon_bb_data[31];
+    wire bq_all_anti  =  baryon_rr_data[31] &&  baryon_gg_data[31] &&  baryon_bb_data[31];
+    wire baryon_qn_ok = fl_valid(baryon_rr_data) && fl_valid(baryon_gg_data) && fl_valid(baryon_bb_data) &&
+                        (bq_all_quark || bq_all_anti); // qqq or anti-qqq only
+    wire [3:0] bqf [0:5];
+    genvar gk;
+    generate for (gk = 0; gk < 6; gk = gk + 1) begin : g_bqn
+        assign bqf[gk] = fl_field(baryon_rr_data, gk) + fl_field(baryon_gg_data, gk) + fl_field(baryon_bb_data, gk);
+    end endgenerate
+    wire [31:0] baryon_qn = {4'd0, bqf[5], bqf[4], bqf[3], bqf[2], bqf[1],
+                             bq_all_anti ? 4'hF : 4'd1, div3(bqf[0])};
+
     wire [31:0] baryon_result = (baryon_funct == 3'b001) ? baryon_maj :
                                 (baryon_funct == 3'b010) ? baryon_eps :
+                                (baryon_funct == 3'b011) ? baryon_qn :
                                 baryon_rr_data + baryon_gg_data + baryon_bb_data;
     // DIFF = q1 - q2 (v0.1, any banks); SINGLET = q + qbar, where q2
     // already holds the antiquark (charge-conjugated, i.e. negated) -
     // so SINGLET(q, ANTI(x)) == DIFF(q, x). control_unit.v enforces
     // SINGLET's same-color rule.
+    // QN: one quark + one antiquark (either order), same color (checked
+    // in control_unit.v). Baryon number is 0 by construction.
+    wire meson_qn_ok = fl_valid(meson_q1_data) && fl_valid(meson_q2_data) &&
+                       (meson_q1_data[31] != meson_q2_data[31]);
+    wire [3:0] mqf [0:5];
+    generate for (gk = 0; gk < 6; gk = gk + 1) begin : g_mqn
+        assign mqf[gk] = fl_field(meson_q1_data, gk) + fl_field(meson_q2_data, gk);
+    end endgenerate
+    wire [31:0] meson_qn = {4'd0, mqf[5], mqf[4], mqf[3], mqf[2], mqf[1], 4'd0, div3(mqf[0])};
+
     wire [31:0] meson_result  = (meson_funct == 2'b01) ? meson_q1_data + meson_q2_data :
+                                (meson_funct == 2'b10) ? meson_qn :
                                                          meson_q1_data - meson_q2_data;
+
+    assign hadron_bad = (is_baryon && baryon_funct == 3'b011 && !baryon_qn_ok) ||
+                        (is_meson  && meson_funct  == 2'b10  && !meson_qn_ok);
 
     // ==================== QHAD / QCNOT (classical quantum-circuit-
     // simulator extension - design review before this was written; see
@@ -1125,7 +1191,7 @@ module cpu_core #(
     // by construction (it can only ever coincide with is_load/is_store,
     // which illegal/is_syscall/priv_violation's own opcode classes
     // never are).
-    wire sync_trap = illegal || is_syscall || priv_violation || mmu_fault;
+    wire sync_trap = illegal || hadron_bad || is_syscall || priv_violation || mmu_fault;
 
     // Latched, not a live level - a brief irq_in pulse must never be
     // missed even if it arrives mid-mem_stall (see below), and clearing
@@ -1171,7 +1237,7 @@ module cpu_core #(
     // reproducibility.
     wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure);
 
-    wire [2:0] next_cause = illegal        ? CAUSE_ILLEGAL :
+    wire [2:0] next_cause = (illegal || hadron_bad) ? CAUSE_ILLEGAL :
                              is_syscall     ? CAUSE_SYSCALL :
                              priv_violation ? CAUSE_PRIV :
                              mmu_fault      ? CAUSE_PAGE_FAULT :

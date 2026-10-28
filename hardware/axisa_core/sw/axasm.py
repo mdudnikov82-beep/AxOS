@@ -31,8 +31,11 @@ BANK_NAMES = {'R': R, 'G': G, 'B': B, 'N': N}
 BANK_LETTERS = {v: k for k, v in BANK_NAMES.items()}
 
 # v2.0 combine rules (docs/ISA.md). A bare number is still accepted.
-BARYON_FUNCT = {'SUM': 0, 'MAJ': 1, 'EPS': 2}
-MESON_FUNCT = {'DIFF': 0, 'SINGLET': 1}
+BARYON_FUNCT = {'SUM': 0, 'MAJ': 1, 'EPS': 2, 'QN': 3}
+MESON_FUNCT = {'DIFF': 0, 'SINGLET': 1, 'QN': 2}
+# v2.0 step 3: quark flavor codes, usable anywhere an immediate is
+# (ADDI R1, R0, UP). An antiquark is the negated code: -UP, or ANTI.
+FLAVOR = {'UP': 1, 'DOWN': 2, 'STRANGE': 3, 'CHARM': 4, 'BOTTOM': 5, 'TOP': 6}
 
 ALU_FUNCT = {
     'ADD': ADD, 'SUB': SUB, 'AND': AND, 'OR': OR, 'XOR': XOR,
@@ -71,6 +74,9 @@ def require_bank(bank, reg, expected, mnemonic, role):
 
 def parse_imm(tok):
     tok = tok.strip()
+    name = tok.lstrip('-').upper()
+    if name in FLAVOR:
+        return -FLAVOR[name] if tok.startswith('-') else FLAVOR[name]
     return int(tok, 0)  # supports decimal and 0x.. , including a leading '-'
 
 
@@ -164,8 +170,8 @@ def encode_one(mnemonic, ops, iaddr, labels):
         q1_bank, q1 = parse_reg(ops[2])
         q2_bank, q2 = parse_reg(ops[3])
         require_bank(nd_bank, nd, N, m, "nd")
-        if funct == MESON_FUNCT['SINGLET'] and (q1_bank != q2_bank or q1_bank == N):
-            raise AsmError("MESON SINGLET: quark and antiquark must be the same color (R, G or B)")
+        if funct in (MESON_FUNCT['SINGLET'], MESON_FUNCT['QN']) and (q1_bank != q2_bank or q1_bank == N):
+            raise AsmError(f"MESON {ops[0]}: quark and antiquark must be the same color (R, G or B)")
         return meson(funct, nd, q1_bank, q1, q2_bank, q2)
 
     if m == 'LOAD':

@@ -60,10 +60,10 @@
     STORE N1, N0, 0x420      # 1 - 3 = -2 (must equal the line above)
     STORE N0, N0, 0x424      # end marker slot stays 0 (catches a stray extra store)
 
-    .word 0x1B849000         # BARYON funct 011 (reserved), nd=n4
+    .word 0x1C849000         # BARYON funct 100 (reserved), nd=n4
     .word 0x23029000         # MESON SINGLET, N4, R1, G1 - red + anti-green is not colorless
     .word 0x2333A000         # MESON SINGLET, N4, N1, N2 - N has no color to pair
-    .word 0x25021000         # MESON funct 10 (reserved), nd=n4
+    .word 0x27021000         # MESON funct 11 (reserved), nd=n4
     HALT N7                  # tohost = traps taken (expect 4)
 
 .org 0x200

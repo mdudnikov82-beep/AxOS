@@ -60,11 +60,11 @@ module control_unit (
     output reg  [2:0]  baryon_rr,
     output reg  [2:0]  baryon_gg,
     output reg  [2:0]  baryon_bb,
-    output reg  [2:0]  baryon_funct, // v2.0: 000=SUM 001=MAJ 010=EPS (docs/ISA.md)
+    output reg  [2:0]  baryon_funct, // v2.0: 000=SUM 001=MAJ 010=EPS 011=QN (docs/ISA.md)
 
     // MESON
     output reg          is_meson,
-    output reg  [1:0]  meson_funct, // v2.0: 00=DIFF 01=SINGLET (docs/ISA.md); 10/11 reserved
+    output reg  [1:0]  meson_funct, // v2.0: 00=DIFF 01=SINGLET 10=QN (docs/ISA.md); 11 reserved
     output reg  [1:0]  meson_q1_bank,
     output reg  [2:0]  meson_q1_reg,
     output reg  [1:0]  meson_q2_bank,
@@ -321,13 +321,13 @@ module control_unit (
 
             OP_BARYON: begin
                 is_baryon = 1'b1;
-                baryon_funct = instr[26:24]; // 000 SUM, 001 MAJ, 010 EPS; 011-111 reserved
+                baryon_funct = instr[26:24]; // 000 SUM, 001 MAJ, 010 EPS, 011 QN; 100-111 reserved
                 write_bank = BANK_N;
                 write_addr = instr[23:21];
                 baryon_rr  = instr[20:18];
                 baryon_gg  = instr[17:15];
                 baryon_bb  = instr[14:12];
-                if (instr[26:24] > 3'b010) begin
+                if (instr[26:24] > 3'b011) begin
                     illegal = 1'b1;
                 end else begin
                     reg_write = 1'b1;
@@ -343,11 +343,12 @@ module control_unit (
                 meson_q1_reg  = instr[19:17];
                 meson_q2_bank = instr[16:15];
                 meson_q2_reg  = instr[14:12];
-                // SINGLET: a quark and an antiquark of the SAME color are
-                // the only colorless pair - red + anti-green is a color
-                // octet (a gluon's charge), and N holds no color at all.
-                if (meson_funct[1] ||
-                    (meson_funct == 2'b01 && (instr[21:20] != instr[16:15] || instr[21:20] == BANK_N))) begin
+                // SINGLET/QN: a quark and an antiquark of the SAME color
+                // are the only colorless pair - red + anti-green is a
+                // color octet (a gluon's charge), and N holds no color at
+                // all. (QN's flavor checks are data-dependent - cpu_core.v.)
+                if (meson_funct == 2'b11 ||
+                    (meson_funct != 2'b00 && (instr[21:20] != instr[16:15] || instr[21:20] == BANK_N))) begin
                     illegal = 1'b1;
                 end else begin
                     reg_write = 1'b1;
