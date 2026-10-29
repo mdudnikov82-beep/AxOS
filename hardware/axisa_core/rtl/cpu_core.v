@@ -231,6 +231,8 @@ module cpu_core #(
     wire        is_metro, metro_weight;
     wire        is_linkmul, lm_daga, lm_dagb;
     wire        is_reunit;
+    wire        is_sweep;
+    wire [1:0]  sw_l1;
     wire [2:0]  ru_ns;
     wire        rx_active, rx_stall; // v2.3 step 2 rx-sequencer (see the REUNIT section)
     wire [2:0]  lm_na, lm_nb, lm_nc;
@@ -275,7 +277,7 @@ module cpu_core #(
         .is_regge(is_regge), .regge_funct(regge_funct), .regge_ns(regge_ns),
         .is_jalr(is_jalr), .jalr_ns(jalr_ns),
         .is_mtag(is_mtag), .mtag_funct(mtag_funct), .mtag_ns(mtag_ns),
-        .is_plaq(is_plaq), .is_reunit(is_reunit), .ru_ns(ru_ns), .is_linkmul(is_linkmul), .lm_daga(lm_daga), .lm_dagb(lm_dagb),
+        .is_plaq(is_plaq), .is_reunit(is_reunit), .ru_ns(ru_ns), .is_sweep(is_sweep), .sw_l1(sw_l1), .is_linkmul(is_linkmul), .lm_daga(lm_daga), .lm_dagb(lm_dagb),
         .lm_na(lm_na), .lm_nb(lm_nb), .lm_nc(lm_nc), .is_metro(is_metro), .metro_weight(metro_weight),
         .metro_na(metro_na), .metro_nb(metro_nb), .metro_nbeta(metro_nbeta),
         .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src),
@@ -939,6 +941,12 @@ module cpu_core #(
     // to su_res first and are written to C at the end (MW, one word per
     // cycle), so C may be A or B or overlap them: every read comes first.
     reg        su_lm_r;
+    // SWEEP (v2.3 step 3): PLAQ over every site (x, y) of a periodic L x L
+    // lattice, one trace accumulated across all sites. Link U_mu(x, y) is at
+    // base + 72 * (2 * (y L + x) + mu); the square at (x, y) is
+    // U1 = U_0(x, y), U2 = U_1(x+1, y), U3 = U_0(x, y+1), U4 = U_1(x, y).
+    reg        su_sw_r;
+    reg [1:0]  su_sx, su_sy, su_l1;
     reg [31:0] su_bb_r, su_cb_r;   // B and C bases (A is su_base_r)
     reg [31:0] su_res [0:17];      // C row-major: word 2(3i+j) = Re, +1 = Im
     reg [4:0]  su_w_r;
@@ -949,14 +957,18 @@ module cpu_core #(
     wire lm_bad_a = (n_porta_data[1:0] != 2'b00) || (n_porta_data > UART_TX_ADDR - 32'd72);
     wire lm_bad_b = (n_portb_data[1:0] != 2'b00) || (n_portb_data > UART_TX_ADDR - 32'd72);
     wire lm_bad_c = (n_portc_data[1:0] != 2'b00) || (n_portc_data > UART_TX_ADDR - 32'd72);
+    // SWEEP's lattice: 2 L^2 links of 72 bytes = 144 L^2 bytes
+    wire [31:0] sw_bytes = (sw_l1 == 2'd0) ? 32'd144 : (sw_l1 == 2'd1) ? 32'd576 :
+                           (sw_l1 == 2'd2) ? 32'd1296 : 32'd2304;
     assign su3_bad = (su_state_r == SU_IDLE) && (
+                     (is_sweep && ((n_porta_data[1:0] != 2'b00) || (n_porta_data > UART_TX_ADDR - sw_bytes))) ||
                      ((is_su3mul || is_plaq) &&
                       ((n_porta_data[1:0] != 2'b00) ||
                        (n_porta_data > UART_TX_ADDR - (is_plaq ? 32'd288 : 32'd72)))) ||
                      (is_linkmul && (lm_bad_a || lm_bad_b || lm_bad_c)));
-    wire su3_go = (is_su3mul || is_plaq || is_linkmul) && (su_state_r == SU_IDLE) && !sync_trap;
+    wire su3_go = (is_su3mul || is_plaq || is_linkmul || is_sweep) && (su_state_r == SU_IDLE) && !sync_trap;
 
-    assign su3_active = (su_state_r != SU_IDLE) || is_su3mul || is_plaq || is_linkmul;
+    assign su3_active = (su_state_r != SU_IDLE) || is_su3mul || is_plaq || is_linkmul || is_sweep;
     wire   su_last_mw = (su_state_r == SU_MW) && (su_w_r == 5'd17);
     assign su3_stall  = (su_state_r == SU_IDLE) ? su3_go :
                         (su_state_r != SU_W5 && su_state_r != SU_PW && !su_last_mw);
@@ -978,7 +990,16 @@ module cpu_core #(
     // cycles (fa_wait), and data_mem's synchronous read must still hold Im
     // in the second one, when su_b_r takes it.
     wire        su3_mem_rd = (su_state_r == SU_LRE) || (su_state_r == SU_LIM) || (su_state_r == SU_A);
-    wire [31:0] su3_addr   = su_mbase + {27'd0, su_mat, 3'b000} * 32'd9 + {25'd0, su_k, 3'b000} +
+    // SWEEP: the link this phase needs, with periodic wrap-around
+    wire [1:0]  sw_x1   = (su_sx == su_l1) ? 2'd0 : su_sx + 2'd1;
+    wire [1:0]  sw_y1   = (su_sy == su_l1) ? 2'd0 : su_sy + 2'd1;
+    wire [1:0]  sw_x    = (su_mat == 2'd1) ? sw_x1 : su_sx;       // U2 sits at x+1
+    wire [1:0]  sw_y    = (su_mat == 2'd2) ? sw_y1 : su_sy;       // U3 sits at y+1
+    wire [3:0]  sw_site = sw_y * ({1'b0, su_l1} + 3'd1) + {2'b00, sw_x};
+    wire [4:0]  sw_li   = {sw_site, su_mat[0]};                   // mu = 1 for U2, U4
+    wire [31:0] sw_off  = {21'd0, sw_li, 6'b0} + {24'd0, sw_li, 3'b0}; // 72 * link index
+    wire [31:0] su_moff = su_sw_r ? sw_off : {27'd0, su_mat, 3'b000} * 32'd9;
+    wire [31:0] su3_addr   = su_mbase + su_moff + {25'd0, su_k, 3'b000} +
                              ((su_state_r == SU_LIM || su_state_r == SU_A) ? 32'd4 : 32'd0);
     wire [31:0] su_im_in   = {dmem_rdata[31] ^ su_conj, dmem_rdata[30:0]};
 
@@ -992,7 +1013,11 @@ module cpu_core #(
 
     wire [31:0] su_mul_a = (su_state_r == SU_PM) ? su_tr_r :
                            (su_state_r == SU_A || su_state_r == SU_C) ? su_a_r : su_b_r;
-    wire [31:0] su_mul_b = (su_state_r == SU_PM) ? PL_THIRD :
+    // fl(1/3), or SWEEP's fl(1/(3 L^2)) for L = 1..4
+    wire [31:0] su_scale = !su_sw_r ? PL_THIRD :
+                           (su_l1 == 2'd0) ? 32'h3EAAAAAB : (su_l1 == 2'd1) ? 32'h3DAAAAAB :
+                           (su_l1 == 2'd2) ? 32'h3D17B426 : 32'h3CAAAAAB;
+    wire [31:0] su_mul_b = (su_state_r == SU_PM) ? su_scale :
                            (su_state_r == SU_A || su_state_r == SU_D) ? su_cr  : su_dr;
     wire [31:0] su_add_a = (su_state_r == SU_D) ? su_accre_r : (su_state_r == SU_F) ? su_accim_r : su_p1_r;
     wire [31:0] su_add_b = (su_state_r == SU_D) ? su_tre_r   : (su_state_r == SU_F) ? su_tim_r   : su_p2_r;
@@ -1011,6 +1036,7 @@ module cpu_core #(
             su_vre0_r <= 32'b0; su_vim0_r <= 32'b0; su_vre1_r <= 32'b0;
             su_vim1_r <= 32'b0; su_vre2_r <= 32'b0; su_vim2_r <= 32'b0;
             su_tr_r <= 32'b0; su_cr <= 32'b0; su_dr <= 32'b0;
+            su_sw_r <= 1'b0; su_sx <= 2'd0; su_sy <= 2'd0; su_l1 <= 2'd0;
             su_lm_r <= 1'b0; su_bb_r <= 32'b0; su_cb_r <= 32'b0; su_w_r <= 5'd0;
             for (su_ri = 0; su_ri < 18; su_ri = su_ri + 1) su_res[su_ri] <= 32'b0;
         end else if (!halted_r && !fa_wait) begin
@@ -1019,7 +1045,9 @@ module cpu_core #(
                     su_base_r  <= n_porta_data;
                     su_i_r     <= 2'd0; su_j_r <= 2'd0;
                     su_accre_r <= 32'b0; su_accim_r <= 32'b0; // +0.0
-                    su_pl_r    <= is_plaq;
+                    su_pl_r    <= is_plaq || is_sweep;
+                    su_sw_r    <= is_sweep;
+                    su_sx      <= 2'd0; su_sy <= 2'd0; su_l1 <= sw_l1;
                     su_lm_r    <= is_linkmul;
                     su_bb_r    <= n_portb_data;
                     su_cb_r    <= n_portc_data;
@@ -1076,6 +1104,13 @@ module cpu_core #(
                         su_ph_r    <= 2'd0;
                         su_kk_r    <= su_kk_r + 2'd1;
                         su_state_r <= (su_kk_r == 2'd2) ? SU_PM : SU_LRE;
+                        if (su_kk_r == 2'd2 && su_sw_r && !(su_sx == su_l1 && su_sy == su_l1)) begin
+                            // SWEEP: next site (x fastest), same running trace
+                            su_kk_r    <= 2'd0;
+                            su_sx      <= (su_sx == su_l1) ? 2'd0 : su_sx + 2'd1;
+                            if (su_sx == su_l1) su_sy <= su_sy + 2'd1;
+                            su_state_r <= SU_LRE;
+                        end
                     end else begin // row i finished
                         case (su_i_r)
                             2'd0:    begin su_ore0_r <= su_accre_r; su_oim0_r <= q_addsub_result; end
@@ -1900,7 +1935,7 @@ module cpu_core #(
     // lives HERE, not in control_unit.v - keeps that module a pure
     // function of `instr` alone (confirmed by design review: no other
     // module needs to know the CPU's runtime state just to decode).
-    wire priv_violation = (is_rft || is_mvsr || is_ptb || is_su3mul || is_plaq || is_linkmul || is_reunit || (is_mtag && mtag_funct != 2'b00)) &&
+    wire priv_violation = (is_rft || is_mvsr || is_ptb || is_su3mul || is_plaq || is_linkmul || is_reunit || is_sweep || (is_mtag && mtag_funct != 2'b00)) &&
                           (mode_r == MODE_USER); // SU3MUL/STG/LDG address physical memory directly
     // Exceptions are never maskable by ie_r (a real bug in kernel code
     // shouldn't be silently swallowed) - only the external-IRQ cause
@@ -1958,7 +1993,7 @@ module cpu_core #(
     // reproducibility.
     // STRING (v2.0) gets the same deferral: its write commits on the
     // terminal cycle, so an IRQ there would make RFT redo it.
-    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul && !is_plaq && !is_linkmul && !is_reunit && !is_regge && !is_metro);
+    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul && !is_plaq && !is_linkmul && !is_reunit && !is_sweep && !is_regge && !is_metro);
 
     wire [2:0] next_cause = (illegal || data_illegal) ? CAUSE_ILLEGAL :
                              is_syscall     ? CAUSE_SYSCALL :
@@ -1987,7 +2022,7 @@ module cpu_core #(
                          is_string ? str_d :
                          is_mtag   ? mtag_result :
                          is_regge  ? rg_p_r :
-                         is_plaq   ? su_tr_r :
+                         (is_plaq || is_sweep) ? su_tr_r :
                          is_metro  ? mx_result :
                          is_load   ? effective_dmem_rdata :
                          (is_jal || is_jalr) ? (pc_r + 32'd4) :

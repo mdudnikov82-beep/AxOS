@@ -230,6 +230,16 @@ def reunit(ns):
     return (OP_REUNIT << 27) | (ns << 24)
 
 
+
+# v2.3 step 3: SWEEP nd, ns, L - average plaquette of a periodic L x L lattice
+OP_SWEEP = 0b11010
+
+
+def sweep(nd, ns, l):
+    assert 1 <= l <= 4
+    return (OP_SWEEP << 27) | (nd << 24) | (ns << 21) | ((l - 1) << 19)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

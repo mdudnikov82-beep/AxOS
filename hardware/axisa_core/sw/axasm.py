@@ -23,7 +23,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq, metro, linkmul, reunit,
+    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq, metro, linkmul, reunit, sweep,
     GLUON_FUNCT, GLUON_COLORS,
     write_hex,
 )
@@ -303,6 +303,20 @@ def encode_one(mnemonic, ops, iaddr, labels):
         if not (0 <= dst <= 6 and 0 <= src <= 6):
             raise AsmError("SU3MUL: dst/src must be 0..6 (each names the pair idx, idx+1)")
         return su3mul(ns, dst, src)
+
+    # v2.3 step 3: SWEEP nd, ns, L - average plaquette of the periodic L x L
+    # lattice at N[ns] (L = 1..4) into N[nd]
+    if m == 'SWEEP':
+        if len(ops) != 3:
+            raise AsmError("SWEEP: expected 3 operands (nd, ns, L)")
+        nd_bank, nd = parse_reg(ops[0])
+        ns_bank, ns = parse_reg(ops[1])
+        require_bank(nd_bank, nd, N, m, "nd")
+        require_bank(ns_bank, ns, N, m, "ns")
+        l = parse_imm(ops[2])
+        if not 1 <= l <= 4:
+            raise AsmError("SWEEP: L must be 1..4")
+        return sweep(nd, ns, l)
 
     # v2.3 step 2: REUNIT ns - the matrix at N[ns] back onto SU(3), in place
     if m == 'REUNIT':

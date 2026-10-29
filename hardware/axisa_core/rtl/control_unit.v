@@ -166,6 +166,10 @@ module control_unit (
     // REUNIT (v2.3 step 2): pull the 3x3 complex matrix at N[ru_ns] back
     // onto SU(3), in place (microcoded - see tools/reunit_ucode.py)
     output reg          is_reunit,
+    // SWEEP (v2.3 step 3): the average plaquette of a whole periodic L x L
+    // lattice at N[su3_ns] into N[nd]; sw_l1 = L - 1
+    output reg          is_sweep,
+    output reg  [1:0]  sw_l1,
     output reg  [2:0]  ru_ns,
     output reg          lm_daga, lm_dagb,
     output reg  [2:0]  lm_na, lm_nb, lm_nc,
@@ -220,6 +224,7 @@ module control_unit (
     localparam OP_METRO    = 5'b10111;
     localparam OP_LINKMUL  = 5'b11000;
     localparam OP_REUNIT   = 5'b11001;
+    localparam OP_SWEEP    = 5'b11010;
 
     localparam BANK_R = 2'b00;
     localparam BANK_G = 2'b01;
@@ -315,6 +320,8 @@ module control_unit (
         is_plaq        = 1'b0;
         is_linkmul     = 1'b0;
         is_reunit      = 1'b0;
+        is_sweep       = 1'b0;
+        sw_l1          = 2'b0;
         ru_ns          = 3'b0;
         lm_daga        = 1'b0;
         lm_dagb        = 1'b0;
@@ -617,6 +624,17 @@ module control_unit (
                 su3_src   = instr[20:18];
                 if (instr[23:21] == 3'd7 || instr[20:18] == 3'd7)
                     illegal = 1'b1;
+            end
+
+            OP_SWEEP: begin
+                // opcode[31:27] nd[26:24] ns[23:21] L-1[20:19]. Runs PLAQ's
+                // sequencer over every site; N[nd] written on its terminal cycle.
+                is_sweep   = 1'b1;
+                sw_l1      = instr[20:19];
+                su3_ns     = instr[23:21];
+                write_bank = BANK_N;
+                write_addr = instr[26:24];
+                reg_write  = 1'b1;
             end
 
             OP_REUNIT: begin
