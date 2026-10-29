@@ -23,7 +23,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq, metro, linkmul,
+    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq, metro, linkmul, reunit,
     GLUON_FUNCT, GLUON_COLORS,
     write_hex,
 )
@@ -303,6 +303,14 @@ def encode_one(mnemonic, ops, iaddr, labels):
         if not (0 <= dst <= 6 and 0 <= src <= 6):
             raise AsmError("SU3MUL: dst/src must be 0..6 (each names the pair idx, idx+1)")
         return su3mul(ns, dst, src)
+
+    # v2.3 step 2: REUNIT ns - the matrix at N[ns] back onto SU(3), in place
+    if m == 'REUNIT':
+        if len(ops) != 1:
+            raise AsmError("REUNIT: expected 1 operand (ns)")
+        bank, r = parse_reg(ops[0])
+        require_bank(bank, r, N, m, "ns")
+        return reunit(r)
 
     # v2.3 step 1: LINKMUL nc, na, nb - C = A * B, 3x3 complex matrices in
     # memory at the N registers' addresses; a trailing ^ means the

@@ -163,6 +163,10 @@ module control_unit (
     // LINKMUL (v2.3 step 1): C = A' * B', 3x3 complex matrices in memory at
     // N[nc], N[na], N[nb]; A' = A or A^dag, B' = B or B^dag.
     output reg          is_linkmul,
+    // REUNIT (v2.3 step 2): pull the 3x3 complex matrix at N[ru_ns] back
+    // onto SU(3), in place (microcoded - see tools/reunit_ucode.py)
+    output reg          is_reunit,
+    output reg  [2:0]  ru_ns,
     output reg          lm_daga, lm_dagb,
     output reg  [2:0]  lm_na, lm_nb, lm_nc,
     // METRO (v2.2 step 2): the Metropolis step. dS = beta*(P_old - P_new);
@@ -215,6 +219,7 @@ module control_unit (
     localparam OP_PLAQ     = 5'b10110;
     localparam OP_METRO    = 5'b10111;
     localparam OP_LINKMUL  = 5'b11000;
+    localparam OP_REUNIT   = 5'b11001;
 
     localparam BANK_R = 2'b00;
     localparam BANK_G = 2'b01;
@@ -309,6 +314,8 @@ module control_unit (
         mtag_ns        = 3'b0;
         is_plaq        = 1'b0;
         is_linkmul     = 1'b0;
+        is_reunit      = 1'b0;
+        ru_ns          = 3'b0;
         lm_daga        = 1'b0;
         lm_dagb        = 1'b0;
         lm_na          = 3'b0;
@@ -610,6 +617,13 @@ module control_unit (
                 su3_src   = instr[20:18];
                 if (instr[23:21] == 3'd7 || instr[20:18] == 3'd7)
                     illegal = 1'b1;
+            end
+
+            OP_REUNIT: begin
+                // opcode[31:27] ns[26:24]; the rx-sequencer owns every
+                // read and write, reg_write stays 0
+                is_reunit = 1'b1;
+                ru_ns     = instr[26:24];
             end
 
             OP_LINKMUL: begin

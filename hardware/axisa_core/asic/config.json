@@ -8,6 +8,7 @@
         "dir::../rtl/control_unit.v",
         "dir::../rtl/fp_addsub2.v",
         "dir::../rtl/fp_mul2.v",
+        "dir::../rtl/reunit_rom.v",
         "dir::../rtl/fp_sqrt.v",
         "dir::../rtl/fp_div.v",
         "dir::../rtl/lfsr.v",

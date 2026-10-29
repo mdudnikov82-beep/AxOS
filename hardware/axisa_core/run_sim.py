@@ -25,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 CORE = [
     "rtl/alu.v", "rtl/regbank.v", "rtl/instr_mem.v", "rtl/data_mem.v",
-    "rtl/control_unit.v", "rtl/fp_addsub.v", "rtl/fp_addsub2.v", "rtl/fp_mul.v", "rtl/fp_mul2.v", "rtl/fp_sqrt.v",
+    "rtl/control_unit.v", "rtl/fp_addsub.v", "rtl/fp_addsub2.v", "rtl/fp_mul.v", "rtl/fp_mul2.v", "rtl/reunit_rom.v", "rtl/fp_sqrt.v",
     "rtl/fp_div.v", "rtl/lfsr.v", "rtl/cpu_core.v", "rtl/mmu.v",
 ]
 NOC = ["rtl/shared_mem_backing.v", "rtl/router.v",
@@ -125,6 +125,18 @@ FAST_TESTS = [
     T("trap_irq_linkmul_2", "tb/tb_trap_irq_linkmul.v", "ALL AXISA TRAP-IRQ-LINKMUL TESTS PASSED",
       "IRQ on LINKMUL's last result write deferred until C is written, EPC=0x28",
       asm=[axasm("trap_irq_linkmul")], plusargs=["+IRQ_PHASE=2"]),
+    T("reunit", "tb/tb_reunit.v", "ALL AXISA REUNIT TESTS PASSED",
+      "v2.3: matrices back onto SU(3) bit-exact (microcode model), drift after 30 LINKMULs, 3 traps",
+      asm=[axasm("reunit_test")]),
+    T("trap_irq_reunit_0", "tb/tb_trap_irq_reunit.v", "ALL AXISA TRAP-IRQ-REUNIT TESTS PASSED",
+      "IRQ on REUNIT's first cycle deferred until it finishes, EPC=0x28",
+      asm=[axasm("trap_irq_reunit")], plusargs=["+IRQ_PHASE=0"]),
+    T("trap_irq_reunit_1", "tb/tb_trap_irq_reunit.v", "ALL AXISA TRAP-IRQ-REUNIT TESTS PASSED",
+      "IRQ on REUNIT's square root deferred until it finishes, EPC=0x28",
+      asm=[axasm("trap_irq_reunit")], plusargs=["+IRQ_PHASE=1"]),
+    T("trap_irq_reunit_2", "tb/tb_trap_irq_reunit.v", "ALL AXISA TRAP-IRQ-REUNIT TESTS PASSED",
+      "IRQ on REUNIT's last write deferred until it finishes, EPC=0x28",
+      asm=[axasm("trap_irq_reunit")], plusargs=["+IRQ_PHASE=2"]),
     T("metro", "tb/tb_metro.v", "ALL AXISA METRO TESTS PASSED",
       "v2.2: Metropolis step - bit-exact Boltzmann weights, accept rates, cycle counts",
       asm=[axasm("metro_test")]),

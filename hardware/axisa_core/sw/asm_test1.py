@@ -221,6 +221,15 @@ def linkmul(daga, dagb, nc, na, nb):
     return (OP_LINKMUL << 27) | (daga << 26) | (dagb << 25) | (nc << 22) | (na << 19) | (nb << 16)
 
 
+
+# v2.3 step 2: REUNIT ns - pull the matrix at N[ns] back onto SU(3)
+OP_REUNIT = 0b11001
+
+
+def reunit(ns):
+    return (OP_REUNIT << 27) | (ns << 24)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

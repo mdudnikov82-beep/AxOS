@@ -230,6 +230,9 @@ module cpu_core #(
     wire        fa_wait;      // v2.2: a sequencer waits for the two-stage adder
     wire        is_metro, metro_weight;
     wire        is_linkmul, lm_daga, lm_dagb;
+    wire        is_reunit;
+    wire [2:0]  ru_ns;
+    wire        rx_active, rx_stall; // v2.3 step 2 rx-sequencer (see the REUNIT section)
     wire [2:0]  lm_na, lm_nb, lm_nc;
     wire [2:0]  metro_na, metro_nb, metro_nbeta;
     wire        mx_active, mx_stall; // v2.2 step 2 mx-sequencer (see the METRO section)
@@ -272,7 +275,7 @@ module cpu_core #(
         .is_regge(is_regge), .regge_funct(regge_funct), .regge_ns(regge_ns),
         .is_jalr(is_jalr), .jalr_ns(jalr_ns),
         .is_mtag(is_mtag), .mtag_funct(mtag_funct), .mtag_ns(mtag_ns),
-        .is_plaq(is_plaq), .is_linkmul(is_linkmul), .lm_daga(lm_daga), .lm_dagb(lm_dagb),
+        .is_plaq(is_plaq), .is_reunit(is_reunit), .ru_ns(ru_ns), .is_linkmul(is_linkmul), .lm_daga(lm_daga), .lm_dagb(lm_dagb),
         .lm_na(lm_na), .lm_nb(lm_nb), .lm_nc(lm_nc), .is_metro(is_metro), .metro_weight(metro_weight),
         .metro_na(metro_na), .metro_nb(metro_nb), .metro_nbeta(metro_nbeta),
         .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src),
@@ -455,6 +458,8 @@ module cpu_core #(
         // LINKMUL: all three matrix bases on the decode cycle (port C is its own)
         n_addr_c = lm_nc;
         if (is_linkmul) begin n_addr_a = lm_na; n_addr_b = lm_nb; end
+        // REUNIT: the matrix base
+        if (is_reunit) begin n_addr_a = ru_ns; n_addr_b = ru_ns; end
     end
 
     // ==================== Register banks ====================
@@ -700,7 +705,7 @@ module cpu_core #(
 
     assign data_illegal = (is_baryon && baryon_funct == 3'b011 && !baryon_qn_ok) ||
                           (is_meson  && meson_funct  == 2'b10  && !meson_qn_ok) ||
-                          su3_bad || mtag_bad;
+                          su3_bad || mtag_bad || rx_bad;
 
     // ==================== STRING (v2.0 step 4: asymptotic freedom) ====================
     // d = |qa - qb|, the two quarks' positions as signed integers (33-bit
@@ -853,9 +858,9 @@ module cpu_core #(
     // add/mul pair, isolated from ALUR/etc." true across the whole
     // family instead of instantiating a second, redundant pair.
     // SU3MUL's su-sequencer shares the same pair (mutually exclusive too).
-    wire [31:0] fpaddsub_in_a = mx_active ? mx_add_a : rg_active ? rg_add_a : su3_active ? su_add_a : qm_active ? qm_add_a : q_add_a;
-    wire [31:0] fpaddsub_in_b = mx_active ? mx_add_b : rg_active ? rg_add_b : su3_active ? su_add_b : qm_active ? qm_add_b : q_add_b;
-    wire        fpaddsub_in_sub = mx_active ? mx_add_sub : rg_active ? rg_add_sub : su3_active ? su_add_sub : qm_active ? qm_add_sub : q_add_sub;
+    wire [31:0] fpaddsub_in_a = rx_active ? rx_x : mx_active ? mx_add_a : rg_active ? rg_add_a : su3_active ? su_add_a : qm_active ? qm_add_a : q_add_a;
+    wire [31:0] fpaddsub_in_b = rx_active ? rx_y : mx_active ? mx_add_b : rg_active ? rg_add_b : su3_active ? su_add_b : qm_active ? qm_add_b : q_add_b;
+    wire        fpaddsub_in_sub = rx_active ? (rx_op == RX_OP_SUB) : mx_active ? mx_add_sub : rg_active ? rg_add_sub : su3_active ? su_add_sub : qm_active ? qm_add_sub : q_add_sub;
 
     // v2.2: two pipeline stages (fp_addsub2.v) - the result for this
     // cycle's inputs appears next cycle; see fa_wait at the end of the file.
@@ -868,8 +873,8 @@ module cpu_core #(
     // used INDEPENDENTLY (squaring components, then later scaling a
     // survivor component by qm_scale) - see the qm_mul_a/qm_mul_b mux
     // in the QMEASURE section below.
-    wire [31:0] fpmul_in_a = mx_active ? mx_mul_a : rg_active ? rg_mul_a : su3_active ? su_mul_a : qm_active ? qm_mul_a : q_s_r;
-    wire [31:0] fpmul_in_b = mx_active ? mx_mul_b : rg_active ? rg_mul_b : su3_active ? su_mul_b : qm_active ? qm_mul_b : Q_INV_SQRT2;
+    wire [31:0] fpmul_in_a = rx_active ? rx_x : mx_active ? mx_mul_a : rg_active ? rg_mul_a : su3_active ? su_mul_a : qm_active ? qm_mul_a : q_s_r;
+    wire [31:0] fpmul_in_b = rx_active ? rx_y : mx_active ? mx_mul_b : rg_active ? rg_mul_b : su3_active ? su_mul_b : qm_active ? qm_mul_b : Q_INV_SQRT2;
 
     // v2.2: two pipeline stages (fp_mul2.v), like the adder - see fa_wait.
     wire [31:0] q_mul_result;
@@ -1341,17 +1346,17 @@ module cpu_core #(
     // still 0), same discipline as rv32i_core/rtl/cpu_core.v's own
     // fpu_div_start/fpu_sqrt_start.
     // REGGE's MASS path shares the same unit (mutually exclusive with QMEASURE).
-    wire fp_sqrt_start = ((qm_state_r == QM_SQRT) || rg_sqrt_req) && !fp_sqrt_busy;
+    wire fp_sqrt_start = ((qm_state_r == QM_SQRT) || rg_sqrt_req || rx_sqrt_req) && !fp_sqrt_busy;
     wire [31:0] fp_sqrt_result;
     fp_sqrt qm_fpsqrt (
-        .clk(clk), .reset(reset), .start(fp_sqrt_start), .a(rg_active ? rg_p_r : qm_p_survived),
+        .clk(clk), .reset(reset), .start(fp_sqrt_start), .a(rx_active ? rx_x : rg_active ? rg_p_r : qm_p_survived),
         .busy(fp_sqrt_busy), .done(fp_sqrt_done), .result(fp_sqrt_result)
     );
 
-    wire fp_div_start = (qm_state_r == QM_DIV) && !fp_div_busy;
+    wire fp_div_start = ((qm_state_r == QM_DIV) || rx_div_req) && !fp_div_busy;
     wire [31:0] fp_div_result;
     fp_div qm_fpdiv (
-        .clk(clk), .reset(reset), .start(fp_div_start), .a(Q_ONE), .b(qm_sqrtval),
+        .clk(clk), .reset(reset), .start(fp_div_start), .a(rx_active ? rx_x : Q_ONE), .b(rx_active ? rx_y : qm_sqrtval),
         .busy(fp_div_busy), .done(fp_div_done), .result(fp_div_result)
     );
 
@@ -1497,7 +1502,7 @@ module cpu_core #(
     // never touch memory, so mem_stall's own components are provably
     // always 0 whenever q_stall/qm_stall is 1) - see the "QHAD / QCNOT"
     // and "QMEASURE" sections above for q_stall/qm_stall's definitions.
-    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall || su3_stall || rg_stall || mx_stall || fa_wait;
+    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall || su3_stall || rg_stall || mx_stall || rx_stall || fa_wait;
 
     // Walker's own PTE fetch takes priority (its read must land on
     // data_mem's shared port); otherwise a translated user-mode access
@@ -1506,7 +1511,8 @@ module cpu_core #(
     // elsewhere and whose private-array read here is simply discarded
     // below) passes the raw address through unchanged - identical to
     // rv32i_core/rtl/cpu_core.v's own dmem_addr muxing.
-    wire [31:0] dmem_addr_final = su3_mem_rd      ? su3_addr :      // SU3MUL matrix fetch (kernel-only, physical)
+    wire [31:0] dmem_addr_final = rx_mem         ? rx_addr :       // REUNIT load / store (kernel-only, physical)
+                                   su3_mem_rd      ? su3_addr :      // SU3MUL matrix fetch (kernel-only, physical)
                                    su_mw           ? su_mw_addr :    // LINKMUL result write (kernel-only, physical)
                                    mmu_walk_active ? mmu_walk_addr :
                                    mmu_is_access   ? mmu_paddr    :
@@ -1713,6 +1719,76 @@ module cpu_core #(
         end
     end
 
+    // ==================== REUNIT (v2.3 step 2: back onto SU(3)) ====================
+    // Rounding drifts a link off SU(3) after many products; every lattice
+    // code pulls it back: normalize row 0 (u), Gram-Schmidt row 1 (v)
+    // against it and normalize, and recompute row 2 as conj(u x v) so that
+    // det = 1. That is 127 floating-point steps, so REUNIT is microcoded:
+    // rtl/reunit_rom.v, GENERATED by tools/reunit_ucode.py, which the test
+    // model also executes. 23 scratch registers hold the matrix (S0..S17)
+    // and temporaries; micro-operand 31 reads 1.0.
+    //   LD:  18 words in from N[ns] (synchronous read: address k, data k-1)
+    //   RUN: one micro-op at a time - MUL/ADD/SUB on the shared two-stage
+    //        FPU (fa_wait), SQRT/DIV on the shared fp_sqrt/fp_div
+    //   ST:  18 words back; the last write is the terminal cycle
+    localparam RX_IDLE = 3'd0, RX_LD = 3'd1, RX_RUN = 3'd2, RX_SQ = 3'd3, RX_DV = 3'd4, RX_ST = 3'd5;
+    localparam [2:0] RX_OP_MUL = 3'd0, RX_OP_ADD = 3'd1, RX_OP_SUB = 3'd2, RX_OP_SQRT = 3'd3,
+                     RX_OP_DIV = 3'd4, RX_OP_END = 3'd7;
+    reg [2:0]  rx_state_r;
+    reg [4:0]  rx_k;
+    reg [7:0]  rx_pc;
+    reg [31:0] rx_base;
+    reg [31:0] rx_s [0:22];
+    integer    rx_i;
+
+    wire [17:0] rx_word;
+    reunit_rom rx_rom (.addr(rx_pc), .word(rx_word));
+    wire [2:0]  rx_op = rx_word[17:15];
+    wire [4:0]  rx_d  = rx_word[14:10];
+    wire [4:0]  rx_a  = rx_word[9:5];
+    wire [4:0]  rx_b  = rx_word[4:0];
+    wire [31:0] rx_x  = (rx_a == 5'd31) ? 32'h3F800000 : rx_s[rx_a];
+    wire [31:0] rx_y  = (rx_b == 5'd31) ? 32'h3F800000 : rx_s[rx_b];
+
+    wire rx_bad   = is_reunit && (rx_state_r == RX_IDLE) &&
+                    ((n_porta_data[1:0] != 2'b00) || (n_porta_data > UART_TX_ADDR - 32'd72));
+    wire rx_go    = is_reunit && (rx_state_r == RX_IDLE) && !sync_trap;
+    assign rx_active = (rx_state_r != RX_IDLE) || is_reunit;
+    wire rx_st    = (rx_state_r == RX_ST);
+    assign rx_stall = (rx_state_r == RX_IDLE) ? rx_go : !(rx_st && rx_k == 5'd17);
+    wire rx_sqrt_req = (rx_state_r == RX_SQ);
+    wire rx_div_req  = (rx_state_r == RX_DV);
+    wire rx_mem   = (rx_state_r == RX_LD && rx_k <= 5'd17) || rx_st;
+    wire [31:0] rx_addr = rx_base + {25'd0, rx_k, 2'b00};
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            rx_state_r <= RX_IDLE; rx_k <= 5'd0; rx_pc <= 8'd0; rx_base <= 32'b0;
+            for (rx_i = 0; rx_i < 23; rx_i = rx_i + 1) rx_s[rx_i] <= 32'b0;
+        end else if (!halted_r && !fa_wait) begin
+            case (rx_state_r)
+                RX_IDLE: if (rx_go) begin rx_base <= n_porta_data; rx_k <= 5'd0; rx_state_r <= RX_LD; end
+                RX_LD: begin
+                    if (rx_k != 5'd0) rx_s[rx_k - 5'd1] <= dmem_rdata;
+                    if (rx_k == 5'd18) begin rx_pc <= 8'd0; rx_state_r <= RX_RUN; end
+                    else rx_k <= rx_k + 5'd1;
+                end
+                RX_RUN: case (rx_op)
+                    RX_OP_MUL:  begin rx_s[rx_d] <= q_mul_result;    rx_pc <= rx_pc + 8'd1; end
+                    RX_OP_ADD,
+                    RX_OP_SUB:  begin rx_s[rx_d] <= q_addsub_result; rx_pc <= rx_pc + 8'd1; end
+                    RX_OP_SQRT: rx_state_r <= RX_SQ;
+                    RX_OP_DIV:  rx_state_r <= RX_DV;
+                    default:    begin rx_k <= 5'd0; rx_state_r <= RX_ST; end // END
+                endcase
+                RX_SQ: if (fp_sqrt_done) begin rx_s[rx_d] <= fp_sqrt_result; rx_pc <= rx_pc + 8'd1; rx_state_r <= RX_RUN; end
+                RX_DV: if (fp_div_done)  begin rx_s[rx_d] <= fp_div_result;  rx_pc <= rx_pc + 8'd1; rx_state_r <= RX_RUN; end
+                default: if (rx_k == 5'd17) rx_state_r <= RX_IDLE; // RX_ST: last word written, pc moves on
+                         else rx_k <= rx_k + 5'd1;
+            endcase
+        end
+    end
+
     // ==================== Memory tagging (v2.1 step 1, MTE-style) ====================
     // One 4-bit allocation tag per 16-byte granule of the private data
     // memory. A LOAD/STORE to private memory must carry the same tag in
@@ -1777,7 +1853,7 @@ module cpu_core #(
     // is set.
     data_mem #(.MEM_WORDS(DATA_MEM_WORDS), .SYNC_READ(1)) dmem (
         .clk(clk), .addr(dmem_addr_final),
-        .wdata(su_mw ? su_mw_data : store_value),
+        .wdata(rx_st ? rx_s[rx_k] : su_mw ? su_mw_data : store_value),
         // !mmu_walk_active blocks a STORE's write from landing during
         // the walker's own PTE-fetch cycle; !mmu_stall additionally
         // blocks it during S_FILL (mmu.v's walk_active has already
@@ -1785,7 +1861,7 @@ module cpu_core #(
         // pending STORE's we must not fire against that stale address,
         // exactly the subtlety rv32i_core/rtl/mmu.v's own module header
         // documents as a real historical bug there).
-        .we((is_store && !is_shared_access && !is_uart_addr && !mmu_walk_active && !mmu_stall && !tag_fault) || su_mw),
+        .we((is_store && !is_shared_access && !is_uart_addr && !mmu_walk_active && !mmu_stall && !tag_fault) || su_mw || rx_st),
         .rdata(dmem_rdata)
     );
 
@@ -1824,7 +1900,7 @@ module cpu_core #(
     // lives HERE, not in control_unit.v - keeps that module a pure
     // function of `instr` alone (confirmed by design review: no other
     // module needs to know the CPU's runtime state just to decode).
-    wire priv_violation = (is_rft || is_mvsr || is_ptb || is_su3mul || is_plaq || is_linkmul || (is_mtag && mtag_funct != 2'b00)) &&
+    wire priv_violation = (is_rft || is_mvsr || is_ptb || is_su3mul || is_plaq || is_linkmul || is_reunit || (is_mtag && mtag_funct != 2'b00)) &&
                           (mode_r == MODE_USER); // SU3MUL/STG/LDG address physical memory directly
     // Exceptions are never maskable by ie_r (a real bug in kernel code
     // shouldn't be silently swallowed) - only the external-IRQ cause
@@ -1882,7 +1958,7 @@ module cpu_core #(
     // reproducibility.
     // STRING (v2.0) gets the same deferral: its write commits on the
     // terminal cycle, so an IRQ there would make RFT redo it.
-    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul && !is_plaq && !is_linkmul && !is_regge && !is_metro);
+    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul && !is_plaq && !is_linkmul && !is_reunit && !is_regge && !is_metro);
 
     wire [2:0] next_cause = (illegal || data_illegal) ? CAUSE_ILLEGAL :
                              is_syscall     ? CAUSE_SYSCALL :
@@ -2073,7 +2149,9 @@ module cpu_core #(
                   (qm_state_r >= QM_W0 && qm_state_r <= QM_W3) ||
                   ((su_state_r == SU_A && !((su_pl_r || su_lm_r) && su_ph_r == 2'd0)) || su_state_r == SU_B || su_state_r == SU_PM) ||
                   (rg_state_r == RG_X && !rg_mass) || (rg_state_r == RG_Y) ||
-                  (mx_state_r == MX_BETA || mx_state_r == MX_Y || mx_state_r == MX_HM);
+                  (mx_state_r == MX_BETA || mx_state_r == MX_Y || mx_state_r == MX_HM) ||
+                  // REUNIT's add/sub/mul micro-ops
+                  (rx_state_r == RX_RUN && rx_op <= RX_OP_SUB);
     reg  fa_ready_r;
     always @(posedge clk or posedge reset) begin
         if (reset)          fa_ready_r <= 1'b0;
