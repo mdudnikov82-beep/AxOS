@@ -6,11 +6,11 @@
 // the `any_trap` guard extension (`&& !is_qhad && !is_qcnot`) has no
 // prior test pattern to copy exactly.
 //
-// Pulses irq_in directly on the cycle dut.q_state_r==4 (Q_S4, QHAD's
-// terminal write cycle) - a whitebox peek, matching this project's own
+// Pulses irq_in directly on the cycle dut.q_state_r==6 (Q_S6, QHAD's
+// terminal write cycle since v2.2 registered its operands - Q_S4 for QCNOT) - a whitebox peek, matching this project's own
 // established style (tb_trap_irq_squash.v peeks dut.squash_r the same
 // way). If cpu_core.v's fix is correct: (1) QHAD's own results (r0/r2)
-// are the correct, uncorrupted amplitudes - proving the whole 5-cycle
+// are the correct, uncorrupted amplitudes - proving the whole 7-cycle
 // sequence completed for real before the trap was allowed to land: not
 // just "didn't hang", but produced the right numbers; (2) EPC captures
 // word index 10's address (0x28, the plain ADDI right after QHAD), NOT
@@ -79,10 +79,10 @@ module tb_trap_irq_qhad;
         @(posedge clk); @(posedge clk);
         reset = 0;
 
-        // Wait for QHAD's terminal cycle (Q_S4=3'd4), then pulse
+        // Wait for QHAD's terminal cycle (Q_S6=3'd6), then pulse
         // irq_in exactly then - the specific same-cycle race the
         // any_trap fix addresses.
-        wait (dut.q_state_r === 3'd4);
+        wait (dut.q_state_r === 3'd6);
         irq_in = 1'b1;
         @(posedge clk);
         irq_in = 1'b0;

@@ -639,8 +639,10 @@ w = q · 2^(−n)                                         # exponent field − n
 (`5·10⁻⁶` at `dS = 87`) — far below anything a Markov chain notices. If
 `dS ≤ 0`, `w = 1` with no arithmetic.
 
-**Timing:** `WEIGHT` 18 cycles (4 if `dS ≤ 0`, 5 if `w = 0`); `ACCEPT`
-one more for the draw (19 / 5 / 6). Not privileged — it touches no
+**Timing:** `WEIGHT` 19 cycles (5 if `dS ≤ 0`, 6 if `w = 0`); `ACCEPT`
+one more for the draw (20 / 6 / 7). The first cycle only latches
+`P_old`/`P_new` and the second latches `β`: the FPU never takes an
+operand straight off the register file (see "Timing" below). Not privileged — it touches no
 memory. External IRQs are deferred until it writes.
 
 **Tested two ways.** `sw/metro_test.axasm` checks 36 weights bit for bit
@@ -664,6 +666,29 @@ matrices; the program measures all 8 plaquettes with `PLAQ`, then runs
 The allowed band per candidate is 1.5× the worst deviation of 400
 chains simulated in Python with a perfect random source — measured, not
 guessed. Mutation testing: 10 of 10 mutants killed.
+
+### Timing: the FPU only sees flip-flops (v2.2)
+
+The first real synthesis of the whole core (sky130, 2026-10-28) gave
+≈12 MHz in the slow corner. A logic-depth map of its netlist showed why:
+every product of the shared `fp_mul` was timed through `fp_addsub` as
+well, because `QHAD` fed the sum straight into the multiplier in the
+same cycle, and that mux path exists no matter which instruction runs.
+On top of that, `QHAD` and `METRO` fed register-file reads straight into
+`fp_addsub` (decode → register file → FPU in one cycle). v2.2 cuts both:
+
+- `QHAD` latches α (decode cycle) and β (S1), adds/subtracts in S2–S5
+  into a register, and multiplies by `1/√2` and writes in S3–S6:
+  **7 cycles** (was 5). `QCNOT` has no arithmetic and keeps 5.
+- `METRO` latches `P_old`/`P_new`, then `β`, before using them: +1 cycle.
+- `METRO`'s two small shifts are written as `case` muxes: as `<<`/`>>`
+  Yosys merged them into the ALU's barrel shifter (they never run
+  together) and dragged the ALU's operand path into METRO's.
+
+Longest register-to-register path (Yosys `ltp`, generic gates):
+**215 → 124** levels. What is left is `fp_addsub` itself (~106 levels);
+the next longest, with the FPU taken out, is the integer path decode →
+register file → address → trap check → write enable (93).
 
 ### REGGE — `opcode[31:27] funct[26:25] nd[24:22] ns[21:19] (unused[18:0])` (v2.1 step 3)
 
@@ -740,7 +765,7 @@ NaN/infinity/subnormal are out of scope). There is no dedicated `LOAD`
 constant via `ADDI`+`SLLI` (see `sw/qhad_test.axasm`).
 
 **`QHAD`/`QCNOT` were the first genuinely multi-cycle instructions in
-this ISA** (5 cycles each) - AxISA's register banks have exactly 2
+this ISA** (5 cycles each; `QHAD` is 7 since v2.2 - see "Timing" below) - AxISA's register banks have exactly 2
 read + 1 write port per bank, and only one write port total
 system-wide, so neither instruction (each touches 4 `R`-bank
 registers) can complete in one cycle. `QMEASURE` (below) is the third
@@ -913,8 +938,8 @@ only actually redirects `pc` once the stall clears - the stalled
 access is never aborted mid-flight, so interrupt latency is bounded by
 stall duration rather than needing a new "abort a grant" concept. The
 same deferral applies to an in-flight `QHAD`/`QCNOT`/`QMEASURE`/`STRING`/`SU3MUL`/`PLAQ`/`METRO`/`REGGE` (see
-above) - an IRQ arriving anywhere during the sequence (5 cycles for
-`QHAD`/`QCNOT`, ~96 for `QMEASURE`), including exactly on its terminal
+above) - an IRQ arriving anywhere during the sequence (7 cycles for
+`QHAD`, 5 for `QCNOT`, ~96 for `QMEASURE`), including exactly on its terminal
 write cycle, is held pending until the whole sequence completes, not
 taken against the instruction's own address (which would make `RFT`
 re-execute the entire sequence from scratch, reading its own

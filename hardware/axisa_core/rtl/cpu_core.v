@@ -445,8 +445,8 @@ module cpu_core #(
         if (is_jalr) begin n_addr_a = jalr_ns; n_addr_b = jalr_ns; end
         // REGGE: the mass / spin operand
         if (is_regge) begin n_addr_a = regge_ns; n_addr_b = regge_ns; end
-        // METRO: P_old / P_new on the decode cycle, then beta
-        if (is_metro) begin n_addr_a = (mx_state_r == MX_BETA) ? metro_nbeta : metro_na; n_addr_b = metro_nb; end
+        // METRO: P_old / P_new on the decode cycle, beta on the next
+        if (is_metro) begin n_addr_a = (mx_state_r == MX_SUB) ? metro_nbeta : metro_na; n_addr_b = metro_nb; end
     end
 
     // ==================== Register banks ====================
@@ -753,7 +753,18 @@ module cpu_core #(
     // in this core - proven minimal at 5 cycles (4 writes, 1/cycle,
     // plus a mandatory write-free first read cycle so nothing is
     // clobbered before it's read).
-    localparam Q_IDLE = 3'd0, Q_S1 = 3'd1, Q_S2 = 3'd2, Q_S3 = 3'd3, Q_S4 = 3'd4;
+    //
+    //
+    // v2.2: QHAD now takes 7 cycles, so the FPU only ever sees flip-flops.
+    // Its sum used to feed fp_mul in the same cycle (addsub -> mul ->
+    // write); that mux path existed for EVERY fp_mul user, so static
+    // timing charged SU3MUL/QMEASURE/REGGE/METRO's products with a full
+    // fp_addsub too - the core's critical path. And S1 added beta straight
+    // off the R-bank read port (decode -> register file -> fp_addsub).
+    // Now: IDLE latches alpha, S1 latches beta, S2..S5 add/subtract into
+    // q_s_r, S3..S6 multiply it by 1/sqrt(2) and write. QCNOT (no
+    // arithmetic) keeps its 5 cycles and its S1..S4 writes.
+    localparam Q_IDLE = 3'd0, Q_S1 = 3'd1, Q_S2 = 3'd2, Q_S3 = 3'd3, Q_S4 = 3'd4, Q_S5 = 3'd5, Q_S6 = 3'd6;
     reg [2:0] q_state_r;
 
     // Gated only on !halted_r, deliberately NOT nested inside a
@@ -770,7 +781,9 @@ module cpu_core #(
                 Q_S1:    q_state_r <= Q_S2;
                 Q_S2:    q_state_r <= Q_S3;
                 Q_S3:    q_state_r <= Q_S4;
-                Q_S4:    q_state_r <= Q_IDLE;
+                Q_S4:    q_state_r <= is_qhad ? Q_S5 : Q_IDLE;
+                Q_S5:    q_state_r <= Q_S6;
+                Q_S6:    q_state_r <= Q_IDLE;
                 default: q_state_r <= Q_IDLE;
             endcase
         end
@@ -784,17 +797,21 @@ module cpu_core #(
     // mem_stall's own sub-terms already use).
     wire q_active = (q_state_r != Q_IDLE) || is_qhad || is_qcnot;
     wire q_stall  = (q_state_r == Q_S1) || (q_state_r == Q_S2) || (q_state_r == Q_S3) ||
+                     (q_state_r == Q_S4 && is_qhad) || (q_state_r == Q_S5) ||
                      (q_state_r == Q_IDLE && (is_qhad || is_qcnot));
 
     // Scratch amplitude holding registers: T0/T1 = alpha's Re/Im
     // (latched from the decode-cycle read), T2/T3 = beta's Re/Im
     // (latched from the S1-cycle read). Same update-timing reasoning
     // as q_state_r above.
-    reg [31:0] q_t0, q_t1, q_t2, q_t3;
+    // q_s_r: QHAD's registered sum/difference, multiplied by 1/sqrt(2)
+    // in the NEXT state (S2's sum is written in S3, ..., S5's in S6).
+    reg [31:0] q_t0, q_t1, q_t2, q_t3, q_s_r;
     always @(posedge clk or posedge reset) begin
         if (reset) begin
-            q_t0 <= 32'b0; q_t1 <= 32'b0; q_t2 <= 32'b0; q_t3 <= 32'b0;
+            q_t0 <= 32'b0; q_t1 <= 32'b0; q_t2 <= 32'b0; q_t3 <= 32'b0; q_s_r <= 32'b0;
         end else if (!halted_r) begin
+            if (q_state_r != Q_IDLE) q_s_r <= q_addsub_result;
             if (q_state_r == Q_IDLE && (is_qhad || is_qcnot)) begin
                 q_t0 <= r_porta_data; // alpha Re
                 q_t1 <= r_portb_data; // alpha Im
@@ -807,21 +824,16 @@ module cpu_core #(
 
     // QHAD's shared arithmetic: new_alpha=(alpha+beta)*k,
     // new_beta=(alpha-beta)*k, k=1/sqrt(2). One fp_addsub/fp_mul pair,
-    // muxed per-step - "read -> addsub -> mul -> write" fits one cycle
-    // exactly like ALUR's "read -> ALU -> write", so the arithmetic
-    // itself adds zero extra cycles beyond the 5-cycle write-port
-    // floor. QCNOT bypasses both entirely (pure register move).
+    // muxed per-step: S2..S5 add/subtract into q_s_r, S3..S6 multiply it
+    // by 1/sqrt(2) and write (see Q_S5 above). QCNOT bypasses both
+    // entirely (pure register move).
     localparam [31:0] Q_INV_SQRT2 = 32'h3F3504F3; // IEEE-754 binary32 for 1/sqrt(2)
 
-    wire [31:0] q_add_a = (q_state_r == Q_S1) ? q_t0 :
-                           (q_state_r == Q_S2) ? q_t1 :
-                           (q_state_r == Q_S3) ? q_t0 :
-                                                  q_t1; // Q_S4
-    wire [31:0] q_add_b = (q_state_r == Q_S1) ? r_porta_data :
-                           (q_state_r == Q_S2) ? q_t3 :
-                           (q_state_r == Q_S3) ? q_t2 :
-                                                  q_t3; // Q_S4
-    wire        q_add_sub = (q_state_r == Q_S3) || (q_state_r == Q_S4); // SUB for beta's new value, ADD for alpha's
+    // S2: a.re + b.re   S3: a.im + b.im   S4: a.re - b.re   S5: a.im - b.im
+    wire [31:0] q_add_a = (q_state_r == Q_S2 || q_state_r == Q_S4) ? q_t0 : q_t1;
+    wire [31:0] q_add_b = (q_state_r == Q_S2) ? q_t2 : (q_state_r == Q_S3) ? q_t3 :
+                           (q_state_r == Q_S4) ? q_t2 : q_t3;
+    wire        q_add_sub = (q_state_r == Q_S4) || (q_state_r == Q_S5); // SUB for beta's new value, ADD for alpha's
 
     // Shared fp_addsub/fp_mul instances are ALSO used by the QMEASURE
     // qm-sequencer below (see that section) - QHAD/QCNOT's own q_active
@@ -843,7 +855,7 @@ module cpu_core #(
     // used INDEPENDENTLY (squaring components, then later scaling a
     // survivor component by qm_scale) - see the qm_mul_a/qm_mul_b mux
     // in the QMEASURE section below.
-    wire [31:0] fpmul_in_a = mx_active ? mx_mul_a : rg_active ? rg_mul_a : su3_active ? su_mul_a : qm_active ? qm_mul_a : q_addsub_result;
+    wire [31:0] fpmul_in_a = mx_active ? mx_mul_a : rg_active ? rg_mul_a : su3_active ? su_mul_a : qm_active ? qm_mul_a : q_s_r;
     wire [31:0] fpmul_in_b = mx_active ? mx_mul_b : rg_active ? rg_mul_b : su3_active ? su_mul_b : qm_active ? qm_mul_b : Q_INV_SQRT2;
 
     wire [31:0] q_mul_result;
@@ -1047,12 +1059,14 @@ module cpu_core #(
                                       (q_state_r == Q_S3) ? q_t0 :
                                                              q_t1; // Q_S4
 
-    wire        q_write_en   = (q_state_r == Q_S1) || (q_state_r == Q_S2) ||
-                                (q_state_r == Q_S3) || (q_state_r == Q_S4);
-    wire [2:0]  q_write_addr = (q_state_r == Q_S1) ? q_reg_i :
-                                (q_state_r == Q_S2) ? (q_reg_i + 3'd1) :
-                                (q_state_r == Q_S3) ? q_reg_j :
-                                                       (q_reg_j + 3'd1); // Q_S4
+    // QCNOT writes in S1..S4; QHAD two states later, S3..S6.
+    wire [2:0]  q_wstep      = is_qhad ? q_state_r - 3'd2 : q_state_r; // 1..4 = i, i+1, j, j+1
+    wire        q_write_en   = (q_wstep == 3'd1) || (q_wstep == 3'd2) ||
+                                (q_wstep == 3'd3) || (q_wstep == 3'd4);
+    wire [2:0]  q_write_addr = (q_wstep == 3'd1) ? q_reg_i :
+                                (q_wstep == 3'd2) ? (q_reg_i + 3'd1) :
+                                (q_wstep == 3'd3) ? q_reg_j :
+                                                     (q_reg_j + 3'd1); // 4
     wire [31:0] q_write_data = is_qcnot ? q_qcnot_write_data : q_mul_result;
 
     // ==================== QMEASURE (third member of the classical
@@ -1511,11 +1525,14 @@ module cpu_core #(
     // binary32's normal range) gives w = 0; the result never goes
     // subnormal (flushed, like the rest of the FPU).
     //
-    // IDLE: d = Pold - Pnew   BETA: x = beta*d   Y: x <= 0 -> w = 1, else
+    // Every FPU operand comes from a flip-flop, never straight off the
+    // register file (that path was the core's longest after QHAD's):
+    // IDLE: latch Pold, Pnew   SUB: d = Pold - Pnew, latch beta
+    // BETA: x = beta*d   Y: x <= 0 -> w = 1, else
     // y = x*log2e   SPLIT: n, t (or w = 0)   HM/HA x6: q = q*t + c_k
     // SC: w = q * 2^-n   R: r = fl(1.rand23 - 1) (ACCEPT only)   W: write.
     localparam MX_IDLE = 4'd0, MX_BETA = 4'd1, MX_Y = 4'd2, MX_SPLIT = 4'd3, MX_HM = 4'd4,
-               MX_HA = 4'd5, MX_SC = 4'd6, MX_R = 4'd7, MX_W = 4'd8;
+               MX_HA = 4'd5, MX_SC = 4'd6, MX_R = 4'd7, MX_W = 4'd8, MX_SUB = 4'd9;
     localparam [31:0] MX_ONE   = 32'h3F800000;
     localparam [31:0] MX_LOG2E = 32'h3FB8AA3B;   // fl(log2 e)
     reg [3:0]  mx_state_r;
@@ -1541,9 +1558,25 @@ module cpu_core #(
     // n = the top s+1 bits of 1.m, and 1 + t = 1.(m << s) exactly.
     wire [7:0]  mx_ye  = mx_x_r[30:23];          // MX_SPLIT: mx_x_r holds y
     wire [2:0]  mx_s   = mx_ye[2:0] - 3'd7;      // e - 127 (= e + 1 mod 8)
-    wire [23:0] mx_ym  = {1'b1, mx_x_r[22:0]};
-    wire [6:0]  mx_n   = mx_ym >> (5'd23 - {2'b00, mx_s});
-    wire [31:0] mx_z   = {1'b0, 8'd127, mx_x_r[22:0] << mx_s};
+    // Written as a case, not << / >>: Yosys's resource sharing would
+    // otherwise merge these shifts with the ALU's barrel shifter (they
+    // are never active together) and route METRO through the ALU's
+    // decode -> register-file operand path - the longest path in the
+    // core when it happened.
+    reg [6:0]  mx_n;
+    reg [22:0] mx_zm;
+    always @(*) begin
+        case (mx_s)
+            3'd0:    begin mx_n = 7'd1;                      mx_zm = mx_x_r[22:0]; end
+            3'd1:    begin mx_n = {6'd1, mx_x_r[22]};        mx_zm = {mx_x_r[21:0], 1'b0}; end
+            3'd2:    begin mx_n = {5'd1, mx_x_r[22:21]};     mx_zm = {mx_x_r[20:0], 2'b0}; end
+            3'd3:    begin mx_n = {4'd1, mx_x_r[22:20]};     mx_zm = {mx_x_r[19:0], 3'b0}; end
+            3'd4:    begin mx_n = {3'd1, mx_x_r[22:19]};     mx_zm = {mx_x_r[18:0], 4'b0}; end
+            3'd5:    begin mx_n = {2'd1, mx_x_r[22:18]};     mx_zm = {mx_x_r[17:0], 5'b0}; end
+            default: begin mx_n = {1'b1, mx_x_r[22:17]};     mx_zm = {mx_x_r[16:0], 6'b0}; end
+        endcase
+    end
+    wire [31:0] mx_z   = {1'b0, 8'd127, mx_zm};
     wire        mx_big = (mx_ye >= 8'd134);      // y >= 128
     wire        mx_y_lt1 = (mx_ye < 8'd127);
 
@@ -1551,13 +1584,13 @@ module cpu_core #(
     wire [7:0]  mx_qe    = mx_q_r[30:23];
     wire [31:0] mx_scaled = (mx_qe > {1'b0, mx_n_r}) ? {1'b0, mx_qe - {1'b0, mx_n_r}, mx_q_r[22:0]} : 32'b0;
 
-    wire [31:0] mx_add_a = (mx_state_r == MX_IDLE) ? n_porta_data :
+    wire [31:0] mx_add_a = (mx_state_r == MX_SUB) ? mx_x_r :
                            (mx_state_r == MX_SPLIT) ? mx_z :
                            (mx_state_r == MX_R) ? {1'b0, 8'd127, lfsr_q[31:9]} : mx_p_r;
-    wire [31:0] mx_add_b = (mx_state_r == MX_IDLE) ? n_portb_data :
+    wire [31:0] mx_add_b = (mx_state_r == MX_SUB) ? mx_d_r :
                            (mx_state_r == MX_HA) ? mx_coef : MX_ONE;
     wire        mx_add_sub = (mx_state_r != MX_HA);
-    wire [31:0] mx_mul_a = (mx_state_r == MX_BETA) ? n_porta_data :
+    wire [31:0] mx_mul_a = (mx_state_r == MX_BETA) ? mx_t_r :
                            (mx_state_r == MX_Y) ? mx_x_r : mx_q_r;
     wire [31:0] mx_mul_b = (mx_state_r == MX_BETA) ? mx_d_r :
                            (mx_state_r == MX_Y) ? MX_LOG2E : mx_t_r;
@@ -1576,7 +1609,10 @@ module cpu_core #(
             mx_p_r <= 32'b0; mx_w_r <= 32'b0; mx_r_r <= 32'b0;
         end else if (!halted_r) begin
             case (mx_state_r)
-                MX_IDLE: if (mx_go) begin mx_d_r <= q_addsub_result; mx_state_r <= MX_BETA; end
+                MX_IDLE: if (mx_go) begin
+                    mx_x_r <= n_porta_data; mx_d_r <= n_portb_data; mx_state_r <= MX_SUB;
+                end
+                MX_SUB:  begin mx_d_r <= q_addsub_result; mx_t_r <= n_porta_data; mx_state_r <= MX_BETA; end
                 MX_BETA: begin mx_x_r <= q_mul_result; mx_state_r <= MX_Y; end
                 MX_Y: if (mx_x_le0) begin
                     mx_w_r <= MX_ONE; mx_state_r <= mx_done_w;  // dS <= 0: always accept
@@ -1753,7 +1789,7 @@ module cpu_core #(
     // cleared). Deferring by exactly one cycle (irq_pending stays
     // latched) is safe and needs no special-casing for whether this
     // particular LOAD/STORE actually stalled at all.
-    // QHAD/QCNOT's terminal cycle (q_state_r==Q_S4, where q_stall
+    // QHAD/QCNOT's terminal cycle (q_state_r==Q_S6 / Q_S4, where q_stall
     // drops to 0 and the sequencer's own last write commits) has the
     // exact same same-cycle-completion race as a LOAD/STORE's own
     // mem_stall-clearing cycle (see the comment above irq_taken):
