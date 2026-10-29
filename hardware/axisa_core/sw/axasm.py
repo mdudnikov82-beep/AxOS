@@ -23,7 +23,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq, metro,
+    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq, metro, linkmul,
     GLUON_FUNCT, GLUON_COLORS,
     write_hex,
 )
@@ -303,6 +303,25 @@ def encode_one(mnemonic, ops, iaddr, labels):
         if not (0 <= dst <= 6 and 0 <= src <= 6):
             raise AsmError("SU3MUL: dst/src must be 0..6 (each names the pair idx, idx+1)")
         return su3mul(ns, dst, src)
+
+    # v2.3 step 1: LINKMUL nc, na, nb - C = A * B, 3x3 complex matrices in
+    # memory at the N registers' addresses; a trailing ^ means the
+    # Hermitian conjugate (dagger): LINKMUL N3, N1^, N2 is C = A^dag * B
+    if m == 'LINKMUL':
+        if len(ops) != 3:
+            raise AsmError("LINKMUL: expected 3 operands (nc, na[^], nb[^])")
+        dag = []
+        regs = []
+        for name, tok in zip(("nc", "na", "nb"), ops):
+            tok = tok.strip()
+            d = tok.endswith('^')
+            if d and name == "nc":
+                raise AsmError("LINKMUL: the destination cannot carry ^")
+            bank, r = parse_reg(tok[:-1] if d else tok)
+            require_bank(bank, r, N, m, name)
+            regs.append(r)
+            dag.append(1 if d else 0)
+        return linkmul(dag[1], dag[2], *regs)
 
     # v2.2 step 2: METRO ACCEPT|WEIGHT, nd, na, nb, nbeta - dS = beta*(na - nb)
     # (P_old, P_new); ACCEPT: nd = 1 with probability min(1, exp(-dS))

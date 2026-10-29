@@ -24,6 +24,10 @@ module regbank #(
     input  wire [2:0]  rs2_addr,
     output wire [31:0] rs1_data,
     output wire [31:0] rs2_data,
+    // v2.3: a third read port, used only by the N bank (LINKMUL reads
+    // three matrix addresses on its decode cycle); left open elsewhere
+    input  wire [2:0]  rs3_addr,
+    output wire [31:0] rs3_data,
     input  wire [2:0]  rd_addr,
     input  wire [31:0] rd_data,
     input  wire        reg_write
@@ -39,9 +43,11 @@ module regbank #(
         if (HARDWIRE_REG0) begin: hardwired
             assign rs1_data = (rs1_addr == 3'd0) ? 32'b0 : regs[rs1_addr];
             assign rs2_data = (rs2_addr == 3'd0) ? 32'b0 : regs[rs2_addr];
+            assign rs3_data = (rs3_addr == 3'd0) ? 32'b0 : regs[rs3_addr];
         end else begin: plain
             assign rs1_data = regs[rs1_addr];
             assign rs2_data = regs[rs2_addr];
+            assign rs3_data = regs[rs3_addr];
         end
     endgenerate
 

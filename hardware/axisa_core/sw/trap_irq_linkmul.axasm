@@ -1,0 +1,29 @@
+# AxISA v2.3 step 1: an external IRQ arriving while LINKMUL runs (see
+# tb/tb_trap_irq_linkmul.v's +IRQ_PHASE: its first cycle, mid-sequence,
+# or its last result-write cycle). The testbench preloads A = 1 at 0x0 and
+# B = diag(1.5, 1, 1) at 0x80, so C at 0x100 must come out = B. In every
+# phase the trap must wait until LINKMUL has written all of C: EPC = 0x28.
+    ADDI N1, N0, 1
+    MTSIE N1
+    ADDI N1, N0, 1
+    MTSMODE N1
+    ADDI N1, N0, 0x1C       # continue's address (word index 7)
+    MTEPC N1
+    RFT
+
+continue:
+    ADDI N2, N0, 0x80        # word index 7, addr 0x1C - B
+    ADDI N3, N0, 0x100       # word index 8, addr 0x20 - C
+    LINKMUL N3, N0, N2       # word index 9, addr 0x24 - C = A B, A at N0 = address 0; irq_in pulses inside
+    ADDI N6, N0, 1           # word index 10, addr 0x28 - must NOT commit before the deferred IRQ fires
+finish:
+    ADDI N7, N0, 77          # word index 11, addr 0x2C
+    HALT N7
+
+.org 0x200
+handler:
+    MFCAUSE N3               # n3 = cause (expect 2 = external IRQ)
+    MFEPC N4                 # n4 = epc (expect 0x28 - proves LINKMUL completed first)
+    ADDI N5, N0, 0x2C        # n5 = finish's address (word index 11)
+    MTEPC N5
+    RFT

@@ -212,6 +212,15 @@ def metro(weight, nd, na, nb, nbeta):
     return (OP_METRO << 27) | (weight << 26) | (nd << 23) | (na << 20) | (nb << 17) | (nbeta << 14)
 
 
+
+# v2.3 step 1: LINKMUL nc, na[^], nb[^] - C = A' * B' (3x3 complex, in memory)
+OP_LINKMUL = 0b11000
+
+
+def linkmul(daga, dagb, nc, na, nb):
+    return (OP_LINKMUL << 27) | (daga << 26) | (dagb << 25) | (nc << 22) | (na << 19) | (nb << 16)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

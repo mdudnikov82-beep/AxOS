@@ -160,6 +160,11 @@ module control_unit (
     // of 4 link matrices at N[su3_ns]. Runs on the su-sequencer; the
     // N[nd] write goes through the normal path on its terminal cycle.
     output reg          is_plaq,
+    // LINKMUL (v2.3 step 1): C = A' * B', 3x3 complex matrices in memory at
+    // N[nc], N[na], N[nb]; A' = A or A^dag, B' = B or B^dag.
+    output reg          is_linkmul,
+    output reg          lm_daga, lm_dagb,
+    output reg  [2:0]  lm_na, lm_nb, lm_nc,
     // METRO (v2.2 step 2): the Metropolis step. dS = beta*(P_old - P_new);
     // funct 0 ACCEPT: nd = (r < exp(-dS)), 1 WEIGHT: nd = min(1, exp(-dS)).
     output reg          is_metro,
@@ -209,6 +214,7 @@ module control_unit (
     localparam OP_REGGE    = 5'b10101;
     localparam OP_PLAQ     = 5'b10110;
     localparam OP_METRO    = 5'b10111;
+    localparam OP_LINKMUL  = 5'b11000;
 
     localparam BANK_R = 2'b00;
     localparam BANK_G = 2'b01;
@@ -302,6 +308,12 @@ module control_unit (
         mtag_funct     = 2'b0;
         mtag_ns        = 3'b0;
         is_plaq        = 1'b0;
+        is_linkmul     = 1'b0;
+        lm_daga        = 1'b0;
+        lm_dagb        = 1'b0;
+        lm_na          = 3'b0;
+        lm_nb          = 3'b0;
+        lm_nc          = 3'b0;
         is_metro       = 1'b0;
         metro_weight   = 1'b0;
         metro_na       = 3'b0;
@@ -598,6 +610,17 @@ module control_unit (
                 su3_src   = instr[20:18];
                 if (instr[23:21] == 3'd7 || instr[20:18] == 3'd7)
                     illegal = 1'b1;
+            end
+
+            OP_LINKMUL: begin
+                // opcode[31:27] dagA[26] dagB[25] nc[24:22] na[21:19] nb[18:16].
+                // The su-sequencer owns every read and write; reg_write stays 0.
+                is_linkmul = 1'b1;
+                lm_daga    = instr[26];
+                lm_dagb    = instr[25];
+                lm_nc      = instr[24:22];
+                lm_na      = instr[21:19];
+                lm_nb      = instr[18:16];
             end
 
             OP_METRO: begin
