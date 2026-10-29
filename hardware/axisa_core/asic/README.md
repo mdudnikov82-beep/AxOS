@@ -78,6 +78,20 @@ register-file and memory muxes.
   11k flip-flops, not a typical operating power. Note the tb clock is
   10ns while the SDC says 100ns (OpenSTA warns `STA-1452`).
 
+## 2026-10-29 (later): two-stage fp_addsub - no gain (18.2 MHz)
+
+Commit `8700dc0` split fp_addsub into two pipeline stages because a
+generic-gate depth count (Yosys `ltp -noabc`) put it on the longest path
+(124 -> 94 levels). Run 40906385702, same config: ss worst setup slack
+45.03 ns -> 54.97 ns, **18.2 MHz - unchanged** (tt 61.59 ns slack, ff
+68.01 ns). 93,483 instances, 11,752 flip-flops, 813,493 µm², DRC/LVS 0,
+0 violations, antenna 274 nets / 386 pins, 61.1 mW vectorless, 10.5 mW
+gate-level VCD (`tohost=200`).
+
+Lesson: `ltp -noabc` maps adders as ripple chains and badly overstates
+an adder-heavy unit; real sky130 cells (after ABC) do not. The next
+change has to be aimed with the real STA report, not the depth count.
+
 ## 2026-10-29: the FPU only sees flip-flops - 12.0 -> 18.2 MHz
 
 Commit `5add797` (see docs/ISA.md "Timing: the FPU only sees

@@ -240,6 +240,16 @@ def sweep(nd, ns, l):
     return (OP_SWEEP << 27) | (nd << 24) | (ns << 21) | ((l - 1) << 19)
 
 
+
+# v2.3 step 4: HOP - nearest-neighbour links (SEND 0, RECV 1, SENDL 2, RECVL 3;
+# dir 0 +x, 1 -x, 2 +y, 3 -y)
+OP_HOP = 0b11011
+
+
+def hop(funct, d, reg):
+    return (OP_HOP << 27) | (funct << 25) | (d << 23) | (reg << 20)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

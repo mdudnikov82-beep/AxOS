@@ -169,6 +169,13 @@ module control_unit (
     // SWEEP (v2.3 step 3): the average plaquette of a whole periodic L x L
     // lattice at N[su3_ns] into N[nd]; sw_l1 = L - 1
     output reg          is_sweep,
+    // HOP (v2.3 step 4): nearest-neighbour links. funct 00 SEND (N[reg]
+    // -> neighbour), 01 RECV (neighbour -> N[reg]), 10 SENDL / 11 RECVL (an
+    // 18-word link from / to memory at N[reg]); dir 0 +x, 1 -x, 2 +y, 3 -y
+    output reg          is_hop,
+    output reg  [1:0]  hop_funct,
+    output reg  [1:0]  hop_dir,
+    output reg  [2:0]  hop_reg,
     output reg  [1:0]  sw_l1,
     output reg  [2:0]  ru_ns,
     output reg          lm_daga, lm_dagb,
@@ -225,6 +232,7 @@ module control_unit (
     localparam OP_LINKMUL  = 5'b11000;
     localparam OP_REUNIT   = 5'b11001;
     localparam OP_SWEEP    = 5'b11010;
+    localparam OP_HOP      = 5'b11011;
 
     localparam BANK_R = 2'b00;
     localparam BANK_G = 2'b01;
@@ -321,6 +329,10 @@ module control_unit (
         is_linkmul     = 1'b0;
         is_reunit      = 1'b0;
         is_sweep       = 1'b0;
+        is_hop         = 1'b0;
+        hop_funct      = 2'b0;
+        hop_dir        = 2'b0;
+        hop_reg        = 3'b0;
         sw_l1          = 2'b0;
         ru_ns          = 3'b0;
         lm_daga        = 1'b0;
@@ -624,6 +636,17 @@ module control_unit (
                 su3_src   = instr[20:18];
                 if (instr[23:21] == 3'd7 || instr[20:18] == 3'd7)
                     illegal = 1'b1;
+            end
+
+            OP_HOP: begin
+                // opcode[31:27] funct[26:25] dir[24:23] reg[22:20]
+                is_hop     = 1'b1;
+                hop_funct  = instr[26:25];
+                hop_dir    = instr[24:23];
+                hop_reg    = instr[22:20];
+                write_bank = BANK_N;
+                write_addr = instr[22:20];
+                reg_write  = (instr[26:25] == 2'b01); // only RECV writes a register
             end
 
             OP_SWEEP: begin

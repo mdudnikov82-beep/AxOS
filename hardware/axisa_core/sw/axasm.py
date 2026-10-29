@@ -23,7 +23,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq, metro, linkmul, reunit, sweep,
+    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq, metro, linkmul, reunit, sweep, hop,
     GLUON_FUNCT, GLUON_COLORS,
     write_hex,
 )
@@ -303,6 +303,25 @@ def encode_one(mnemonic, ops, iaddr, labels):
         if not (0 <= dst <= 6 and 0 <= src <= 6):
             raise AsmError("SU3MUL: dst/src must be 0..6 (each names the pair idx, idx+1)")
         return su3mul(ns, dst, src)
+
+    # v2.3 step 4: HOP - nearest-neighbour links. HOP SEND +X, N1 / HOP RECV N2, -X
+    # (one word, register <-> link); HOP SENDL +Y, N1 / HOP RECVL -Y, N3 (an
+    # 18-word link, memory at N[reg] <-> link)
+    if m == 'HOP':
+        kinds = {'SEND': 0, 'RECV': 1, 'SENDL': 2, 'RECVL': 3}
+        dirs = {'+X': 0, '-X': 1, '+Y': 2, '-Y': 3}
+        if ops and len(ops[0].split()) == 2:      # "SEND +X, N1": kind and first operand share a field
+            ops = ops[0].split() + list(ops[1:])
+        if len(ops) != 3 or ops[0].upper() not in kinds:
+            raise AsmError("HOP: expected SEND|RECV|SENDL|RECVL and 2 operands")
+        kind = ops[0].upper()
+        a, b = ops[1].strip().upper(), ops[2].strip().upper()
+        d_tok, r_tok = (b, a) if kind == 'RECV' else (a, b)
+        if d_tok not in dirs:
+            raise AsmError(f"HOP: bad direction '{d_tok}' (+X, -X, +Y or -Y)")
+        bank, r = parse_reg(r_tok)
+        require_bank(bank, r, N, m, "reg")
+        return hop(kinds[kind], dirs[d_tok], r)
 
     # v2.3 step 3: SWEEP nd, ns, L - average plaquette of the periodic L x L
     # lattice at N[ns] (L = 1..4) into N[nd]

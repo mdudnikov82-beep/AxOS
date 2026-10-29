@@ -124,7 +124,19 @@ module cpu_core #(
     // "software just consumed this, you may advance."
     input  wire [7:0]  uart_rx_data_in,
     input  wire        uart_rx_ready_in,
-    output wire        uart_rx_ack
+    output wire        uart_rx_ack,
+    // v2.3 HOP: links to the 4 nearest neighbours (0 +x, 1 -x, 2 +y, 3 -y),
+    // QCDOC-style - separate from memory and from the NoC. A neighbour in
+    // direction d connects its link d^1 to ours: our hop_out_valid[d] /
+    // hop_out_data / hop_out_ready[d] to its hop_in_valid[d^1] /
+    // hop_in_data[32(d^1) +: 32] / hop_in_ready[d^1]. Unconnected links
+    // (all 0) simply never deliver anything.
+    output wire [3:0]   hop_out_valid,
+    output wire [31:0]  hop_out_data,
+    input  wire [3:0]   hop_out_ready,
+    input  wire [3:0]   hop_in_valid,
+    input  wire [127:0] hop_in_data,
+    output wire [3:0]   hop_in_ready
 );
     localparam BANK_R = 2'b00;
     localparam BANK_G = 2'b01;
@@ -232,6 +244,10 @@ module cpu_core #(
     wire        is_linkmul, lm_daga, lm_dagb;
     wire        is_reunit;
     wire        is_sweep;
+    wire        is_hop;
+    wire [1:0]  hop_funct, hop_dir;
+    wire [2:0]  hop_reg;
+    wire        hop_stall; // v2.3 step 4 (see the HOP section)
     wire [1:0]  sw_l1;
     wire [2:0]  ru_ns;
     wire        rx_active, rx_stall; // v2.3 step 2 rx-sequencer (see the REUNIT section)
@@ -277,7 +293,8 @@ module cpu_core #(
         .is_regge(is_regge), .regge_funct(regge_funct), .regge_ns(regge_ns),
         .is_jalr(is_jalr), .jalr_ns(jalr_ns),
         .is_mtag(is_mtag), .mtag_funct(mtag_funct), .mtag_ns(mtag_ns),
-        .is_plaq(is_plaq), .is_reunit(is_reunit), .ru_ns(ru_ns), .is_sweep(is_sweep), .sw_l1(sw_l1), .is_linkmul(is_linkmul), .lm_daga(lm_daga), .lm_dagb(lm_dagb),
+        .is_plaq(is_plaq), .is_reunit(is_reunit), .ru_ns(ru_ns), .is_sweep(is_sweep), .sw_l1(sw_l1),
+        .is_hop(is_hop), .hop_funct(hop_funct), .hop_dir(hop_dir), .hop_reg(hop_reg), .is_linkmul(is_linkmul), .lm_daga(lm_daga), .lm_dagb(lm_dagb),
         .lm_na(lm_na), .lm_nb(lm_nb), .lm_nc(lm_nc), .is_metro(is_metro), .metro_weight(metro_weight),
         .metro_na(metro_na), .metro_nb(metro_nb), .metro_nbeta(metro_nbeta),
         .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src),
@@ -462,6 +479,8 @@ module cpu_core #(
         if (is_linkmul) begin n_addr_a = lm_na; n_addr_b = lm_nb; end
         // REUNIT: the matrix base
         if (is_reunit) begin n_addr_a = ru_ns; n_addr_b = ru_ns; end
+        // HOP: the word to send, or the link's memory base
+        if (is_hop) begin n_addr_a = hop_reg; n_addr_b = hop_reg; end
     end
 
     // ==================== Register banks ====================
@@ -488,7 +507,7 @@ module cpu_core #(
     // 533 intermediate writes nobody can observe (the core is stalled and
     // the last one is right) - a mutation test confirmed that, so this
     // gate saves register-file switching rather than fixing a result.
-    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !data_illegal && !str_stall && !rg_stall && !su3_stall && !mx_stall && !any_trap;
+    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !data_illegal && !str_stall && !rg_stall && !su3_stall && !mx_stall && !hop_stall && !any_trap;
     wire r_write_en = gated_reg_write && (write_bank == BANK_R);
     wire g_write_en = gated_reg_write && (write_bank == BANK_G);
     wire b_write_en = gated_reg_write && (write_bank == BANK_B);
@@ -707,7 +726,7 @@ module cpu_core #(
 
     assign data_illegal = (is_baryon && baryon_funct == 3'b011 && !baryon_qn_ok) ||
                           (is_meson  && meson_funct  == 2'b10  && !meson_qn_ok) ||
-                          su3_bad || mtag_bad || rx_bad;
+                          su3_bad || mtag_bad || rx_bad || hl_bad;
 
     // ==================== STRING (v2.0 step 4: asymptotic freedom) ====================
     // d = |qa - qb|, the two quarks' positions as signed integers (33-bit
@@ -1537,7 +1556,7 @@ module cpu_core #(
     // never touch memory, so mem_stall's own components are provably
     // always 0 whenever q_stall/qm_stall is 1) - see the "QHAD / QCNOT"
     // and "QMEASURE" sections above for q_stall/qm_stall's definitions.
-    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall || su3_stall || rg_stall || mx_stall || rx_stall || fa_wait;
+    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall || su3_stall || rg_stall || mx_stall || rx_stall || hop_stall || fa_wait;
 
     // Walker's own PTE fetch takes priority (its read must land on
     // data_mem's shared port); otherwise a translated user-mode access
@@ -1546,7 +1565,8 @@ module cpu_core #(
     // elsewhere and whose private-array read here is simply discarded
     // below) passes the raw address through unchanged - identical to
     // rv32i_core/rtl/cpu_core.v's own dmem_addr muxing.
-    wire [31:0] dmem_addr_final = rx_mem         ? rx_addr :       // REUNIT load / store (kernel-only, physical)
+    wire [31:0] dmem_addr_final = hl_mem         ? hl_addr :       // HOP SENDL read / RECVL write (kernel-only, physical)
+                                   rx_mem         ? rx_addr :       // REUNIT load / store (kernel-only, physical)
                                    su3_mem_rd      ? su3_addr :      // SU3MUL matrix fetch (kernel-only, physical)
                                    su_mw           ? su_mw_addr :    // LINKMUL result write (kernel-only, physical)
                                    mmu_walk_active ? mmu_walk_addr :
@@ -1824,6 +1844,93 @@ module cpu_core #(
         end
     end
 
+    // ==================== HOP (v2.3 step 4: nearest-neighbour links) ====================
+    // QCDOC, the lattice-QCD machine of 2004, gave every node dedicated
+    // links to its lattice neighbours instead of one shared memory; a
+    // lattice computation mostly exchanges the edges of its patch with the
+    // next node. HOP is that: four links, each with a one-word mailbox on
+    // the receiving side. hop_in_ready = "mailbox empty" and the mailbox
+    // fills from a flip-flop handshake, so no combinational path crosses
+    // from one core into another.
+    //   SEND d, ns  : N[ns] into neighbour d's mailbox; waits only while it is full
+    //   RECV nd, d  : waits for our mailbox d, takes the word into N[nd]
+    //   SENDL d, ns : the 18-word link at N[ns], word by word (kernel-only)
+    //   RECVL d, ns : 18 words from mailbox d into memory at N[ns] (kernel-only)
+    // IRQs are deferred like every multi-cycle instruction, so a RECV
+    // whose neighbour never sends waits forever - as on a transputer link,
+    // ordering sends and receives is the program's job.
+    reg [3:0]  hop_mb_full;
+    reg [31:0] hop_mb_data [0:3];
+    integer    hop_i;
+    assign hop_in_ready = ~hop_mb_full;
+
+    localparam HL_IDLE = 3'd0, HL_RD = 3'd1, HL_LT = 3'd2, HL_TX = 3'd3, HL_RX = 3'd4;
+    reg [2:0]  hl_state_r;
+    reg [4:0]  hl_k;
+    reg [31:0] hl_base, hl_data;
+
+    wire hop_word = is_hop && !hop_funct[1] && !sync_trap;
+    wire hop_send = hop_word && (hop_funct[0] == 1'b0);
+    wire hop_recv = hop_word && (hop_funct[0] == 1'b1);
+    wire hl_go    = is_hop && hop_funct[1] && (hl_state_r == HL_IDLE) && !sync_trap;
+    wire hl_bad   = is_hop && hop_funct[1] && (hl_state_r == HL_IDLE) &&
+                    ((n_porta_data[1:0] != 2'b00) || (n_porta_data > UART_TX_ADDR - 32'd72));
+    wire hl_tx    = (hl_state_r == HL_TX);
+    wire hl_wr    = (hl_state_r == HL_RX) && hop_mb_full[hop_dir];
+    wire hl_mem   = (hl_state_r == HL_RD) || hl_wr;
+    wire [31:0] hl_addr = hl_base + {25'd0, hl_k, 2'b00};
+    wire hl_last  = (hl_k == 5'd17);
+    wire hl_done  = (hl_tx && hop_out_ready[hop_dir] && hl_last) || (hl_wr && hl_last);
+    wire hl_stall = (hl_state_r == HL_IDLE) ? hl_go : !hl_done;
+
+    assign hop_stall = (hop_send && !hop_out_ready[hop_dir]) || (hop_recv && !hop_mb_full[hop_dir]) || hl_stall;
+    wire [3:0] hop_dir_1h = 4'b0001 << hop_dir;
+    assign hop_out_valid = ((hop_send && !halted_r) || hl_tx) ? hop_dir_1h : 4'b0000;
+    assign hop_out_data  = hl_tx ? hl_data : n_porta_data;
+
+    // our mailbox d is emptied by a RECV that commits, or by RECVL storing it
+    wire [3:0] hop_take = (((hop_recv && !halted_r) || hl_wr) && hop_mb_full[hop_dir]) ? hop_dir_1h : 4'b0000;
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            hop_mb_full <= 4'b0;
+            for (hop_i = 0; hop_i < 4; hop_i = hop_i + 1) hop_mb_data[hop_i] <= 32'b0;
+        end else begin
+            for (hop_i = 0; hop_i < 4; hop_i = hop_i + 1) begin
+                if (hop_in_valid[hop_i] && !hop_mb_full[hop_i]) begin
+                    hop_mb_full[hop_i] <= 1'b1;
+                    hop_mb_data[hop_i] <= hop_in_data[32 * hop_i +: 32];
+                end else if (hop_take[hop_i]) begin
+                    hop_mb_full[hop_i] <= 1'b0;
+                end
+            end
+        end
+    end
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            hl_state_r <= HL_IDLE; hl_k <= 5'd0; hl_base <= 32'b0; hl_data <= 32'b0;
+        end else if (!halted_r) begin
+            case (hl_state_r)
+                HL_IDLE: if (hl_go) begin
+                    hl_base <= n_porta_data; hl_k <= 5'd0;
+                    hl_state_r <= hop_funct[0] ? HL_RX : HL_RD;
+                end
+                HL_RD: hl_state_r <= HL_LT;                       // word k's address is on data_mem
+                HL_LT: begin hl_data <= dmem_rdata; hl_state_r <= HL_TX; end
+                HL_TX: if (hop_out_ready[hop_dir]) begin           // the neighbour's mailbox took it
+                    hl_k <= hl_k + 5'd1;
+                    hl_state_r <= hl_last ? HL_IDLE : HL_RD;
+                end
+                HL_RX: if (hop_mb_full[hop_dir]) begin             // stored this cycle (hl_wr)
+                    hl_k <= hl_k + 5'd1;
+                    if (hl_last) hl_state_r <= HL_IDLE;
+                end
+                default: hl_state_r <= HL_IDLE;
+            endcase
+        end
+    end
+
     // ==================== Memory tagging (v2.1 step 1, MTE-style) ====================
     // One 4-bit allocation tag per 16-byte granule of the private data
     // memory. A LOAD/STORE to private memory must carry the same tag in
@@ -1888,7 +1995,7 @@ module cpu_core #(
     // is set.
     data_mem #(.MEM_WORDS(DATA_MEM_WORDS), .SYNC_READ(1)) dmem (
         .clk(clk), .addr(dmem_addr_final),
-        .wdata(rx_st ? rx_s[rx_k] : su_mw ? su_mw_data : store_value),
+        .wdata(hl_wr ? hop_mb_data[hop_dir] : rx_st ? rx_s[rx_k] : su_mw ? su_mw_data : store_value),
         // !mmu_walk_active blocks a STORE's write from landing during
         // the walker's own PTE-fetch cycle; !mmu_stall additionally
         // blocks it during S_FILL (mmu.v's walk_active has already
@@ -1896,7 +2003,7 @@ module cpu_core #(
         // pending STORE's we must not fire against that stale address,
         // exactly the subtlety rv32i_core/rtl/mmu.v's own module header
         // documents as a real historical bug there).
-        .we((is_store && !is_shared_access && !is_uart_addr && !mmu_walk_active && !mmu_stall && !tag_fault) || su_mw || rx_st),
+        .we((is_store && !is_shared_access && !is_uart_addr && !mmu_walk_active && !mmu_stall && !tag_fault) || su_mw || rx_st || hl_wr),
         .rdata(dmem_rdata)
     );
 
@@ -1935,7 +2042,7 @@ module cpu_core #(
     // lives HERE, not in control_unit.v - keeps that module a pure
     // function of `instr` alone (confirmed by design review: no other
     // module needs to know the CPU's runtime state just to decode).
-    wire priv_violation = (is_rft || is_mvsr || is_ptb || is_su3mul || is_plaq || is_linkmul || is_reunit || is_sweep || (is_mtag && mtag_funct != 2'b00)) &&
+    wire priv_violation = (is_rft || is_mvsr || is_ptb || is_su3mul || is_plaq || is_linkmul || is_reunit || is_sweep || (is_hop && hop_funct[1]) || (is_mtag && mtag_funct != 2'b00)) &&
                           (mode_r == MODE_USER); // SU3MUL/STG/LDG address physical memory directly
     // Exceptions are never maskable by ie_r (a real bug in kernel code
     // shouldn't be silently swallowed) - only the external-IRQ cause
@@ -1993,7 +2100,7 @@ module cpu_core #(
     // reproducibility.
     // STRING (v2.0) gets the same deferral: its write commits on the
     // terminal cycle, so an IRQ there would make RFT redo it.
-    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul && !is_plaq && !is_linkmul && !is_reunit && !is_sweep && !is_regge && !is_metro);
+    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul && !is_plaq && !is_linkmul && !is_reunit && !is_sweep && !is_hop && !is_regge && !is_metro);
 
     wire [2:0] next_cause = (illegal || data_illegal) ? CAUSE_ILLEGAL :
                              is_syscall     ? CAUSE_SYSCALL :
@@ -2023,6 +2130,7 @@ module cpu_core #(
                          is_mtag   ? mtag_result :
                          is_regge  ? rg_p_r :
                          (is_plaq || is_sweep) ? su_tr_r :
+                         is_hop    ? hop_mb_data[hop_dir] : // RECV
                          is_metro  ? mx_result :
                          is_load   ? effective_dmem_rdata :
                          (is_jal || is_jalr) ? (pc_r + 32'd4) :

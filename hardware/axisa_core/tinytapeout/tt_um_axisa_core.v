@@ -84,7 +84,10 @@ module tt_um_axisa_core (
         .bus_grant(1'b0), .bus_read_data(32'b0),
         .uart_tx_valid(uart_tx_valid), .uart_tx_data(uart_tx_data),
         .uart_rx_data_in(ui_in), .uart_rx_ready_in(uio_in[1]),
-        .uart_rx_ack(uart_rx_ack)
+        .uart_rx_ack(uart_rx_ack),
+        // no neighbours on a single chip: HOP links tied off
+        .hop_out_valid(), .hop_out_data(), .hop_out_ready(4'b0),
+        .hop_in_valid(4'b0), .hop_in_data(128'b0), .hop_in_ready()
     );
 
     assign uo_out    = uart_tx_data;

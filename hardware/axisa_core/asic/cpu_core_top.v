@@ -38,7 +38,15 @@ module cpu_core_top (
     output wire [7:0]  uart_tx_data,
     input  wire [7:0]  uart_rx_data_in,
     input  wire        uart_rx_ready_in,
-    output wire        uart_rx_ack
+    output wire        uart_rx_ack,
+    // v2.3 HOP links - pins, so synthesis keeps the link logic (tied-off
+    // inputs would let Yosys prune it, the September lesson)
+    output wire [3:0]   hop_out_valid,
+    output wire [31:0]  hop_out_data,
+    input  wire [3:0]   hop_out_ready,
+    input  wire [3:0]   hop_in_valid,
+    input  wire [127:0] hop_in_data,
+    output wire [3:0]   hop_in_ready
 );
     cpu_core #(
         .INSTR_MEM_WORDS(128),
@@ -53,6 +61,8 @@ module cpu_core_top (
         .bus_mem_write(bus_mem_write), .bus_mem_size(bus_mem_size), .bus_mem_unsigned(bus_mem_unsigned),
         .bus_grant(bus_grant), .bus_read_data(bus_read_data),
         .uart_tx_valid(uart_tx_valid), .uart_tx_data(uart_tx_data),
-        .uart_rx_data_in(uart_rx_data_in), .uart_rx_ready_in(uart_rx_ready_in), .uart_rx_ack(uart_rx_ack)
+        .uart_rx_data_in(uart_rx_data_in), .uart_rx_ready_in(uart_rx_ready_in), .uart_rx_ack(uart_rx_ack),
+        .hop_out_valid(hop_out_valid), .hop_out_data(hop_out_data), .hop_out_ready(hop_out_ready),
+        .hop_in_valid(hop_in_valid), .hop_in_data(hop_in_data), .hop_in_ready(hop_in_ready)
     );
 endmodule

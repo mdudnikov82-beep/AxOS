@@ -39,6 +39,9 @@ module cpu_core_fpga_top (
         .bus_mem_write(bus_mem_write), .bus_mem_size(bus_mem_size), .bus_mem_unsigned(bus_mem_unsigned),
         .bus_grant(bus_grant), .bus_read_data(bus_read_data),
         .uart_tx_valid(uart_tx_valid), .uart_tx_data(uart_tx_data),
-        .uart_rx_data_in(uart_rx_data_in), .uart_rx_ready_in(uart_rx_ready_in), .uart_rx_ack(uart_rx_ack)
+        .uart_rx_data_in(uart_rx_data_in), .uart_rx_ready_in(uart_rx_ready_in), .uart_rx_ack(uart_rx_ack),
+        // no neighbours on a single chip: HOP links tied off
+        .hop_out_valid(), .hop_out_data(), .hop_out_ready(4'b0),
+        .hop_in_valid(4'b0), .hop_in_data(128'b0), .hop_in_ready()
     );
 endmodule
