@@ -203,6 +203,15 @@ def plaq(nd, ns):
     return (OP_PLAQ << 27) | (nd << 24) | (ns << 21)
 
 
+
+# v2.2 step 2: METRO ACCEPT|WEIGHT, nd, na, nb, nbeta - the Metropolis step
+OP_METRO = 0b10111
+
+
+def metro(weight, nd, na, nb, nbeta):
+    return (OP_METRO << 27) | (weight << 26) | (nd << 23) | (na << 20) | (nb << 17) | (nbeta << 14)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

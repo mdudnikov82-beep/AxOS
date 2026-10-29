@@ -227,6 +227,9 @@ module cpu_core #(
     wire [2:0]  mtag_ns;
     wire        is_su3mul;
     wire        is_plaq;      // v2.2: lattice plaquette, on the su-sequencer
+    wire        is_metro, metro_weight;
+    wire [2:0]  metro_na, metro_nb, metro_nbeta;
+    wire        mx_active, mx_stall; // v2.2 step 2 mx-sequencer (see the METRO section)
     wire [2:0]  su3_ns, su3_dst, su3_src;
     wire        su3_active, su3_stall, su3_bad; // v2.0 step 5 su-sequencer (see the SU3MUL section)
     wire        is_qmeasure, qmeasure_qubit;
@@ -266,7 +269,9 @@ module cpu_core #(
         .is_regge(is_regge), .regge_funct(regge_funct), .regge_ns(regge_ns),
         .is_jalr(is_jalr), .jalr_ns(jalr_ns),
         .is_mtag(is_mtag), .mtag_funct(mtag_funct), .mtag_ns(mtag_ns),
-        .is_plaq(is_plaq), .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src),
+        .is_plaq(is_plaq), .is_metro(is_metro), .metro_weight(metro_weight),
+        .metro_na(metro_na), .metro_nb(metro_nb), .metro_nbeta(metro_nbeta),
+        .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src),
         .is_qmeasure(is_qmeasure), .qmeasure_qubit(qmeasure_qubit), .qmeasure_nd(qmeasure_nd),
         .qm_reg_a0(qm_reg_a0), .qm_reg_a1(qm_reg_a1), .qm_reg_b0(qm_reg_b0), .qm_reg_b1(qm_reg_b1),
         .write_bank(write_bank), .write_addr(write_addr),
@@ -440,6 +445,8 @@ module cpu_core #(
         if (is_jalr) begin n_addr_a = jalr_ns; n_addr_b = jalr_ns; end
         // REGGE: the mass / spin operand
         if (is_regge) begin n_addr_a = regge_ns; n_addr_b = regge_ns; end
+        // METRO: P_old / P_new on the decode cycle, then beta
+        if (is_metro) begin n_addr_a = (mx_state_r == MX_BETA) ? metro_nbeta : metro_na; n_addr_b = metro_nb; end
     end
 
     // ==================== Register banks ====================
@@ -466,7 +473,7 @@ module cpu_core #(
     // 533 intermediate writes nobody can observe (the core is stalled and
     // the last one is right) - a mutation test confirmed that, so this
     // gate saves register-file switching rather than fixing a result.
-    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !data_illegal && !str_stall && !rg_stall && !su3_stall && !any_trap;
+    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !data_illegal && !str_stall && !rg_stall && !su3_stall && !mx_stall && !any_trap;
     wire r_write_en = gated_reg_write && (write_bank == BANK_R);
     wire g_write_en = gated_reg_write && (write_bank == BANK_G);
     wire b_write_en = gated_reg_write && (write_bank == BANK_B);
@@ -824,9 +831,9 @@ module cpu_core #(
     // add/mul pair, isolated from ALUR/etc." true across the whole
     // family instead of instantiating a second, redundant pair.
     // SU3MUL's su-sequencer shares the same pair (mutually exclusive too).
-    wire [31:0] fpaddsub_in_a = rg_active ? rg_add_a : su3_active ? su_add_a : qm_active ? qm_add_a : q_add_a;
-    wire [31:0] fpaddsub_in_b = rg_active ? rg_add_b : su3_active ? su_add_b : qm_active ? qm_add_b : q_add_b;
-    wire        fpaddsub_in_sub = rg_active ? rg_add_sub : su3_active ? su_add_sub : qm_active ? qm_add_sub : q_add_sub;
+    wire [31:0] fpaddsub_in_a = mx_active ? mx_add_a : rg_active ? rg_add_a : su3_active ? su_add_a : qm_active ? qm_add_a : q_add_a;
+    wire [31:0] fpaddsub_in_b = mx_active ? mx_add_b : rg_active ? rg_add_b : su3_active ? su_add_b : qm_active ? qm_add_b : q_add_b;
+    wire        fpaddsub_in_sub = mx_active ? mx_add_sub : rg_active ? rg_add_sub : su3_active ? su_add_sub : qm_active ? qm_add_sub : q_add_sub;
 
     wire [31:0] q_addsub_result;
     fp_addsub q_fpaddsub (.a(fpaddsub_in_a), .b(fpaddsub_in_b), .op_sub(fpaddsub_in_sub), .result(q_addsub_result));
@@ -836,8 +843,8 @@ module cpu_core #(
     // used INDEPENDENTLY (squaring components, then later scaling a
     // survivor component by qm_scale) - see the qm_mul_a/qm_mul_b mux
     // in the QMEASURE section below.
-    wire [31:0] fpmul_in_a = rg_active ? rg_mul_a : su3_active ? su_mul_a : qm_active ? qm_mul_a : q_addsub_result;
-    wire [31:0] fpmul_in_b = rg_active ? rg_mul_b : su3_active ? su_mul_b : qm_active ? qm_mul_b : Q_INV_SQRT2;
+    wire [31:0] fpmul_in_a = mx_active ? mx_mul_a : rg_active ? rg_mul_a : su3_active ? su_mul_a : qm_active ? qm_mul_a : q_addsub_result;
+    wire [31:0] fpmul_in_b = mx_active ? mx_mul_b : rg_active ? rg_mul_b : su3_active ? su_mul_b : qm_active ? qm_mul_b : Q_INV_SQRT2;
 
     wire [31:0] q_mul_result;
     fp_mul q_fpmul (.a(fpmul_in_a), .b(fpmul_in_b), .result(q_mul_result));
@@ -1405,7 +1412,7 @@ module cpu_core #(
     // never touch memory, so mem_stall's own components are provably
     // always 0 whenever q_stall/qm_stall is 1) - see the "QHAD / QCNOT"
     // and "QMEASURE" sections above for q_stall/qm_stall's definitions.
-    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall || su3_stall || rg_stall;
+    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall || su3_stall || rg_stall || mx_stall;
 
     // Walker's own PTE fetch takes priority (its read must land on
     // data_mem's shared port); otherwise a translated user-mode access
@@ -1487,6 +1494,113 @@ module cpu_core #(
                 RG_Z: begin rg_p_r <= q_addsub_result; rg_state_r <= RG_W; end
                 RG_SQ: if (fp_sqrt_done) begin rg_p_r <= fp_sqrt_result; rg_state_r <= RG_W; end
                 default: rg_state_r <= RG_IDLE; // RG_W: the write commits, pc moves on
+            endcase
+        end
+    end
+
+    // ==================== METRO (v2.2 step 2: the Metropolis step) ====================
+    // dS = fl(beta * fl(P_old - P_new)) - the change of Wilson's action
+    // S = beta * sum(1 - P) when one plaquette goes from P_old to P_new.
+    // w = min(1, exp(-dS)) is the Boltzmann weight; ACCEPT draws r in
+    // [0, 1) and answers r < w (1 = take the new link), WEIGHT returns w.
+    //
+    // exp(-x) for x > 0 as 2^-y, y = fl(x * log2 e): split y = n + t
+    // (n integer, 0 <= t < 1, both exact - just bit slicing), 2^-t by a
+    // degree-6 Horner polynomial on the shared fp_mul/fp_addsub, then
+    // 2^-n by subtracting n from the exponent field. y >= 128 (w below
+    // binary32's normal range) gives w = 0; the result never goes
+    // subnormal (flushed, like the rest of the FPU).
+    //
+    // IDLE: d = Pold - Pnew   BETA: x = beta*d   Y: x <= 0 -> w = 1, else
+    // y = x*log2e   SPLIT: n, t (or w = 0)   HM/HA x6: q = q*t + c_k
+    // SC: w = q * 2^-n   R: r = fl(1.rand23 - 1) (ACCEPT only)   W: write.
+    localparam MX_IDLE = 4'd0, MX_BETA = 4'd1, MX_Y = 4'd2, MX_SPLIT = 4'd3, MX_HM = 4'd4,
+               MX_HA = 4'd5, MX_SC = 4'd6, MX_R = 4'd7, MX_W = 4'd8;
+    localparam [31:0] MX_ONE   = 32'h3F800000;
+    localparam [31:0] MX_LOG2E = 32'h3FB8AA3B;   // fl(log2 e)
+    reg [3:0]  mx_state_r;
+    reg [2:0]  mx_k_r;
+    reg [6:0]  mx_n_r;
+    reg [31:0] mx_d_r, mx_x_r, mx_t_r, mx_q_r, mx_p_r, mx_w_r, mx_r_r;
+
+    // 2^-t ~ c0 + c1 t + ... + c6 t^6 on [0, 1): relative error <= 1.8e-7
+    // (fitted by tools/gen_metro_test.py, which also checks it)
+    reg [31:0] mx_coef;
+    always @(*) begin
+        case (mx_k_r)
+            3'd0:    mx_coef = 32'h3F800000;
+            3'd1:    mx_coef = 32'hBF317216;
+            3'd2:    mx_coef = 32'h3E75FD5C;
+            3'd3:    mx_coef = 32'hBD634A03;
+            3'd4:    mx_coef = 32'h3C1CF011;
+            default: mx_coef = 32'hBAA70867; // c5 (c6 = 0x38E4607B seeds q)
+        endcase
+    end
+
+    // y = n + t. For 1 <= y < 128 (biased exponent 127..133, s = e - 127):
+    // n = the top s+1 bits of 1.m, and 1 + t = 1.(m << s) exactly.
+    wire [7:0]  mx_ye  = mx_x_r[30:23];          // MX_SPLIT: mx_x_r holds y
+    wire [2:0]  mx_s   = mx_ye[2:0] - 3'd7;      // e - 127 (= e + 1 mod 8)
+    wire [23:0] mx_ym  = {1'b1, mx_x_r[22:0]};
+    wire [6:0]  mx_n   = mx_ym >> (5'd23 - {2'b00, mx_s});
+    wire [31:0] mx_z   = {1'b0, 8'd127, mx_x_r[22:0] << mx_s};
+    wire        mx_big = (mx_ye >= 8'd134);      // y >= 128
+    wire        mx_y_lt1 = (mx_ye < 8'd127);
+
+    wire        mx_x_le0 = mx_x_r[31] || (mx_x_r[30:0] == 31'b0);
+    wire [7:0]  mx_qe    = mx_q_r[30:23];
+    wire [31:0] mx_scaled = (mx_qe > {1'b0, mx_n_r}) ? {1'b0, mx_qe - {1'b0, mx_n_r}, mx_q_r[22:0]} : 32'b0;
+
+    wire [31:0] mx_add_a = (mx_state_r == MX_IDLE) ? n_porta_data :
+                           (mx_state_r == MX_SPLIT) ? mx_z :
+                           (mx_state_r == MX_R) ? {1'b0, 8'd127, lfsr_q[31:9]} : mx_p_r;
+    wire [31:0] mx_add_b = (mx_state_r == MX_IDLE) ? n_portb_data :
+                           (mx_state_r == MX_HA) ? mx_coef : MX_ONE;
+    wire        mx_add_sub = (mx_state_r != MX_HA);
+    wire [31:0] mx_mul_a = (mx_state_r == MX_BETA) ? n_porta_data :
+                           (mx_state_r == MX_Y) ? mx_x_r : mx_q_r;
+    wire [31:0] mx_mul_b = (mx_state_r == MX_BETA) ? mx_d_r :
+                           (mx_state_r == MX_Y) ? MX_LOG2E : mx_t_r;
+
+    assign mx_active = (mx_state_r != MX_IDLE) || is_metro;
+    wire   mx_go     = is_metro && (mx_state_r == MX_IDLE) && !sync_trap;
+    assign mx_stall  = (mx_state_r == MX_IDLE) ? mx_go : (mx_state_r != MX_W);
+    wire [3:0] mx_done_w = metro_weight ? MX_W : MX_R; // where a finished w goes
+    wire [31:0] mx_result = metro_weight ? mx_w_r : {31'b0, (mx_r_r < mx_w_r)};
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            mx_state_r <= MX_IDLE;
+            mx_k_r <= 3'd0; mx_n_r <= 7'd0;
+            mx_d_r <= 32'b0; mx_x_r <= 32'b0; mx_t_r <= 32'b0; mx_q_r <= 32'b0;
+            mx_p_r <= 32'b0; mx_w_r <= 32'b0; mx_r_r <= 32'b0;
+        end else if (!halted_r) begin
+            case (mx_state_r)
+                MX_IDLE: if (mx_go) begin mx_d_r <= q_addsub_result; mx_state_r <= MX_BETA; end
+                MX_BETA: begin mx_x_r <= q_mul_result; mx_state_r <= MX_Y; end
+                MX_Y: if (mx_x_le0) begin
+                    mx_w_r <= MX_ONE; mx_state_r <= mx_done_w;  // dS <= 0: always accept
+                end else begin
+                    mx_x_r <= q_mul_result; mx_state_r <= MX_SPLIT; // now y
+                end
+                MX_SPLIT: if (mx_big) begin
+                    mx_w_r <= 32'b0; mx_state_r <= mx_done_w;
+                end else begin
+                    mx_n_r <= mx_y_lt1 ? 7'd0 : mx_n;
+                    mx_t_r <= mx_y_lt1 ? mx_x_r : q_addsub_result;
+                    mx_q_r <= 32'h38E4607B; // c6
+                    mx_k_r <= 3'd5;
+                    mx_state_r <= MX_HM;
+                end
+                MX_HM: begin mx_p_r <= q_mul_result; mx_state_r <= MX_HA; end
+                MX_HA: begin
+                    mx_q_r <= q_addsub_result;
+                    mx_k_r <= mx_k_r - 3'd1;
+                    mx_state_r <= (mx_k_r == 3'd0) ? MX_SC : MX_HM;
+                end
+                MX_SC: begin mx_w_r <= mx_scaled; mx_state_r <= mx_done_w; end
+                MX_R:  begin mx_r_r <= q_addsub_result; mx_state_r <= MX_W; end
+                default: mx_state_r <= MX_IDLE; // MX_W: the write commits, pc moves on
             endcase
         end
     end
@@ -1660,7 +1774,7 @@ module cpu_core #(
     // reproducibility.
     // STRING (v2.0) gets the same deferral: its write commits on the
     // terminal cycle, so an IRQ there would make RFT redo it.
-    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul && !is_plaq && !is_regge);
+    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul && !is_plaq && !is_regge && !is_metro);
 
     wire [2:0] next_cause = (illegal || data_illegal) ? CAUSE_ILLEGAL :
                              is_syscall     ? CAUSE_SYSCALL :
@@ -1690,6 +1804,7 @@ module cpu_core #(
                          is_mtag   ? mtag_result :
                          is_regge  ? rg_p_r :
                          is_plaq   ? su_tr_r :
+                         is_metro  ? mx_result :
                          is_load   ? effective_dmem_rdata :
                          (is_jal || is_jalr) ? (pc_r + 32'd4) :
                          (is_mvsr && !mvsr_dir) ? mvsr_read_data :

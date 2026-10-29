@@ -23,7 +23,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq,
+    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq, metro,
     GLUON_FUNCT, GLUON_COLORS,
     write_hex,
 )
@@ -303,6 +303,22 @@ def encode_one(mnemonic, ops, iaddr, labels):
         if not (0 <= dst <= 6 and 0 <= src <= 6):
             raise AsmError("SU3MUL: dst/src must be 0..6 (each names the pair idx, idx+1)")
         return su3mul(ns, dst, src)
+
+    # v2.2 step 2: METRO ACCEPT|WEIGHT, nd, na, nb, nbeta - dS = beta*(na - nb)
+    # (P_old, P_new); ACCEPT: nd = 1 with probability min(1, exp(-dS))
+    if m == 'METRO':
+        if len(ops) != 5:
+            raise AsmError("METRO: expected 5 operands (ACCEPT|WEIGHT, nd, p_old, p_new, beta)")
+        kinds = {'ACCEPT': 0, 'WEIGHT': 1}
+        kind = ops[0].upper()
+        if kind not in kinds:
+            raise AsmError(f"METRO: unknown kind '{ops[0]}' (ACCEPT or WEIGHT)")
+        regs = []
+        for name, tok in zip(("nd", "p_old", "p_new", "beta"), ops[1:]):
+            bank, r = parse_reg(tok)
+            require_bank(bank, r, N, m, name)
+            regs.append(r)
+        return metro(kinds[kind], *regs)
 
     # v2.2: PLAQ nd, ns - (1/3) Re Tr(U1 U2 U3^dag U4^dag) of the 4 link
     # matrices at N[ns]; the result is colorless (N-bank binary32)

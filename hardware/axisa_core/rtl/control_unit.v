@@ -160,6 +160,11 @@ module control_unit (
     // of 4 link matrices at N[su3_ns]. Runs on the su-sequencer; the
     // N[nd] write goes through the normal path on its terminal cycle.
     output reg          is_plaq,
+    // METRO (v2.2 step 2): the Metropolis step. dS = beta*(P_old - P_new);
+    // funct 0 ACCEPT: nd = (r < exp(-dS)), 1 WEIGHT: nd = min(1, exp(-dS)).
+    output reg          is_metro,
+    output reg          metro_weight,
+    output reg  [2:0]  metro_na, metro_nb, metro_nbeta,
     output reg          is_su3mul,
     output reg  [2:0]  su3_ns,
     output reg  [2:0]  su3_dst,
@@ -203,6 +208,7 @@ module control_unit (
     localparam OP_JALR     = 5'b10100;
     localparam OP_REGGE    = 5'b10101;
     localparam OP_PLAQ     = 5'b10110;
+    localparam OP_METRO    = 5'b10111;
 
     localparam BANK_R = 2'b00;
     localparam BANK_G = 2'b01;
@@ -296,6 +302,11 @@ module control_unit (
         mtag_funct     = 2'b0;
         mtag_ns        = 3'b0;
         is_plaq        = 1'b0;
+        is_metro       = 1'b0;
+        metro_weight   = 1'b0;
+        metro_na       = 3'b0;
+        metro_nb       = 3'b0;
+        metro_nbeta    = 3'b0;
         is_su3mul      = 1'b0;
         su3_ns         = 3'b0;
         su3_dst        = 3'b0;
@@ -587,6 +598,20 @@ module control_unit (
                 su3_src   = instr[20:18];
                 if (instr[23:21] == 3'd7 || instr[20:18] == 3'd7)
                     illegal = 1'b1;
+            end
+
+            OP_METRO: begin
+                // opcode[31:27] funct[26] nd[25:23] na[22:20] nb[19:17]
+                // nbeta[16:14]; all N-bank binary32. cpu_core.v's
+                // mx-sequencer stalls; nd is written on its terminal cycle.
+                is_metro     = 1'b1;
+                metro_weight = instr[26];
+                metro_na     = instr[22:20];
+                metro_nb     = instr[19:17];
+                metro_nbeta  = instr[16:14];
+                write_bank   = BANK_N;
+                write_addr   = instr[25:23];
+                reg_write    = 1'b1;
             end
 
             OP_PLAQ: begin

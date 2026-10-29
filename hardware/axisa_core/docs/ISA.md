@@ -56,6 +56,7 @@ at a time — each step lands with its own tests before the next starts:
 | Step | Feature | Status |
 |------|---------|--------|
 | 1 | **`PLAQ`**: the plaquette of one lattice square, `(1/3) Re Tr(U1 U2 U3† U4†)` — what lattice QCD's action is made of | **done** |
+| 2 | **`METRO`**: the Metropolis step — Boltzmann weight `exp(−ΔS)` and the accept/reject draw; a real Markov chain runs on the core | **done** |
 
 Building `PLAQ`'s bit-exact test also found a real rounding bug in the
 shared FPU's subtraction (see `PLAQ` below); it is fixed.
@@ -128,6 +129,7 @@ bit range across classes, to keep decode simple).
 | `10100`          | JALR     | indirect jump and link — function return / call through a pointer (v2.1) |
 | `10101`          | REGGE    | string theory: Regge trajectories, spin ↔ mass of hadrons (v2.1) |
 | `10110`          | PLAQ     | lattice QCD: plaquette of one lattice square (v2.2) |
+| `10111`          | METRO    | lattice QCD: Metropolis accept/reject, Boltzmann weight (v2.2) |
 | others           | —        | reserved for v0.2+                        |
 
 ### ALUR — `opcode[31:27] bank[26:25] funct[24:21] rd[20:18] rs1[17:15] rs2[14:12] (unused[11:0])`
@@ -590,6 +592,79 @@ never hit it.
 
 Assembler: `PLAQ N2, N1` (nd, ns).
 
+### METRO — `opcode[31:27] funct[26] nd[25:23] na[22:20] nb[19:17] nbeta[16:14] (unused[13:0])` (v2.2 step 2)
+
+How a lattice-QCD simulation actually moves. It proposes changing one
+link, works out how much the action `S = β · Σ (1 − P)` would change,
+and takes the change with the probability Metropolis, Rosenbluth and
+Teller wrote down in 1953: always if `S` goes down, with probability
+`exp(−ΔS)` if it goes up. Repeat, and the lattice ends up visiting each
+configuration as often as Boltzmann's `exp(−S)` says — that is how
+lattice QCD averages over the gluon field.
+
+With `na` = `P_old`, `nb` = `P_new` (from `PLAQ`) and `nbeta` = `β`, all
+binary32 in the `N` bank:
+
+```
+dS = fl(β · fl(P_old − P_new))          # S_new − S_old for one plaquette
+w  = min(1, exp(−dS))                   # the Boltzmann weight
+```
+
+| `funct` | Assembler | `nd` gets |
+|---------|-----------|-----------|
+| `0` | `METRO ACCEPT, nd, na, nb, nbeta` | `1` with probability `w` (take the new link), else `0` |
+| `1` | `METRO WEIGHT, nd, na, nb, nbeta` | `w` itself |
+
+`ACCEPT` draws `r = fl(1.b − 1)`, `b` = 23 bits of the free-running LFSR
+(the one `QMEASURE` and `IRG` use — fine for a simulation, not for
+cryptography), so `r` is uniform on `{0, 2⁻²³, …, 1 − 2⁻²³}`, and answers
+`r < w` (strictly: `w = 0` never accepts, `w = 1` always does). `nd` may
+be any of the operands: it is written only on the last cycle.
+
+**`exp` in hardware, exact order.** For `x = dS > 0`, `exp(−x) = 2^(−y)`
+with `y = fl(x · fl(log₂ e))`. If `y ≥ 128`, `w = 0`. Otherwise
+`y = n + t` (`n` integer, `0 ≤ t < 1`) — both exact, just bit slicing:
+for `y ≥ 1`, `1 + t` is `y`'s mantissa shifted left past its integer
+bits, and `t = fl((1 + t) − 1)` is exact. Then a degree-6 polynomial on
+the shared FPU, Horner from `c₆`:
+
+```
+q = c6;  for k = 5 .. 0:  q = fl(fl(q · t) + c_k)       # q ≈ 2^(−t)
+w = q · 2^(−n)                                         # exponent field − n; 0 if it would leave the normal range
+```
+
+`c₀ … c₆` = `0x3F800000 0xBF317216 0x3E75FD5C 0xBD634A03 0x3C1CF011
+0xBAA70867 0x38E4607B` (fitted by `tools/gen_metro_test.py`): `2^(−t)` to
+1.8·10⁻⁷. Rounding `y` costs another `≈ 6·10⁻⁸ · y` of relative error
+(`5·10⁻⁶` at `dS = 87`) — far below anything a Markov chain notices. If
+`dS ≤ 0`, `w = 1` with no arithmetic.
+
+**Timing:** `WEIGHT` 18 cycles (4 if `dS ≤ 0`, 5 if `w = 0`); `ACCEPT`
+one more for the draw (19 / 5 / 6). Not privileged — it touches no
+memory. External IRQs are deferred until it writes.
+
+**Tested two ways.** `sw/metro_test.axasm` checks 36 weights bit for bit
+against a binary32 model (`dS < 0`, `= 0`, `β = 0`, `y < 1`, `ln 2 → ½`,
+`1 → 1/e`, the edge of the normal range, `w = 0`, random cases, and
+`nd = nbeta`), the accept rate over 2000 draws each for `w = 1, 0, ¼, ¾`
+(`w = 0` with the LFSR forced to 0, so `r = 0` must still be rejected),
+and every cycle count. And `sw/metro_chain.axasm` is a **real Markov
+chain on the core**: one link of a square can be any of 8 SU(3)
+matrices; the program measures all 8 plaquettes with `PLAQ`, then runs
+3000 Metropolis steps at **β = 6.0** (a value real lattice studies use)
+— propose `m ± 1` with a `METRO` coin flip (`dS = ln 2`), accept with
+`METRO`, histogram where the chain is:
+
+| candidate | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|---|
+| `P` | 1.000 | 0.977 | 0.910 | 0.807 | 0.679 | 0.538 | 0.400 | 0.277 |
+| Boltzmann `3000·exp(−S)/Z` | 994 | 866 | 580 | 313 | 145 | 62 | 27 | 13 |
+| **the core's chain** | **992** | **897** | **588** | **301** | **143** | **54** | **16** | **9** |
+
+The allowed band per candidate is 1.5× the worst deviation of 400
+chains simulated in Python with a perfect random source — measured, not
+guessed. Mutation testing: 10 of 10 mutants killed.
+
 ### REGGE — `opcode[31:27] funct[26:25] nd[24:22] ns[21:19] (unused[18:0])` (v2.1 step 3)
 
 Where string theory came from. In the 1960s physicists noticed that
@@ -837,7 +912,7 @@ waiting for `bus_grant` (see `SHARED_MEM_BASE`) is held pending and
 only actually redirects `pc` once the stall clears - the stalled
 access is never aborted mid-flight, so interrupt latency is bounded by
 stall duration rather than needing a new "abort a grant" concept. The
-same deferral applies to an in-flight `QHAD`/`QCNOT`/`QMEASURE`/`STRING`/`SU3MUL`/`PLAQ`/`REGGE` (see
+same deferral applies to an in-flight `QHAD`/`QCNOT`/`QMEASURE`/`STRING`/`SU3MUL`/`PLAQ`/`METRO`/`REGGE` (see
 above) - an IRQ arriving anywhere during the sequence (5 cycles for
 `QHAD`/`QCNOT`, ~96 for `QMEASURE`), including exactly on its terminal
 write cycle, is held pending until the whole sequence completes, not
