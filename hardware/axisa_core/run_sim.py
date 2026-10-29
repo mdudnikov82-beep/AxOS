@@ -25,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 CORE = [
     "rtl/alu.v", "rtl/regbank.v", "rtl/instr_mem.v", "rtl/data_mem.v",
-    "rtl/control_unit.v", "rtl/fp_addsub.v", "rtl/fp_mul.v", "rtl/fp_sqrt.v",
+    "rtl/control_unit.v", "rtl/fp_addsub.v", "rtl/fp_addsub2.v", "rtl/fp_mul.v", "rtl/fp_sqrt.v",
     "rtl/fp_div.v", "rtl/lfsr.v", "rtl/cpu_core.v", "rtl/mmu.v",
 ]
 NOC = ["rtl/shared_mem_backing.v", "rtl/router.v",

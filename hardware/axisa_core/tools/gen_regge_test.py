@@ -133,7 +133,7 @@ for addr, w, note in checks:
     lines.append(f"            check(dut.dmem.mem[11'h{addr >> 2:03X}], 32'h{w:08X}, \"{note}\");")
 lines += [f"            check(n_spin, {n_spin}, \"SPIN instructions timed\");",
           f"            check(n_mass, {n_mass}, \"MASS instructions timed\");",
-          "            check(spin_cyc, 5, \"SPIN takes 5 cycles\");",
+          "            check(spin_cyc, 6, \"SPIN takes 6 cycles\");",
           "            check(spin_bad + mass_bad, 0, \"every SPIN / every MASS takes the same time\");",
           "            check(mass_cyc > spin_cyc, 1, \"MASS (with the sqrt) is slower than SPIN\");"]
 tb = tb[:a] + "\n".join(lines) + "\n" + tb[b:]

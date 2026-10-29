@@ -497,8 +497,9 @@ tIm = fl(fl(a·d) + fl(b·c))      accIm = fl(accIm + tIm)
 `fp_addsub` (the same units as `QHAD`/`QMEASURE`). Like them, it flushes
 subnormal results to zero and does not handle NaN/∞.
 
-**Timing:** 79 cycles (8 per matrix element, plus decode and 6
-write-back cycles — one register per cycle through the single write
+**Timing:** 115 cycles (12 per matrix element — 8 states, 4 of which
+wait one extra cycle for the two-stage adder, see "Timing" below — plus
+decode and 6 write-back cycles — one register per cycle through the single write
 port). External IRQs are deferred until it finishes, like
 `QHAD`/`QMEASURE`/`STRING`.
 
@@ -567,7 +568,7 @@ for k = 0, 1, 2:
 P = fl(tr · fl(1/3))                       # fl(1/3) = 0x3EAAAAAB
 ```
 
-**Timing:** 534 cycles: decode, then per `k` 9 (loads) + 72 + 72 + 24,
+**Timing:** 786 cycles: decode, then per `k` 9 (loads) + 108 + 108 + 36,
 then the `1/3` scaling and the write. External IRQs are deferred until
 it writes, like `SU3MUL`.
 
@@ -639,8 +640,9 @@ w = q · 2^(−n)                                         # exponent field − n
 (`5·10⁻⁶` at `dS = 87`) — far below anything a Markov chain notices. If
 `dS ≤ 0`, `w = 1` with no arithmetic.
 
-**Timing:** `WEIGHT` 19 cycles (5 if `dS ≤ 0`, 6 if `w = 0`); `ACCEPT`
-one more for the draw (20 / 6 / 7). The first cycle only latches
+**Timing:** `WEIGHT` 27 cycles (6 if `dS ≤ 0`, 8 if `w = 0`); `ACCEPT`
+also draws `r` on the adder (29 / 8 / 10). Every adder step takes 2
+cycles (see "Timing" below). The first cycle only latches
 `P_old`/`P_new` and the second latches `β`: the FPU never takes an
 operand straight off the register file (see "Timing" below). Not privileged — it touches no
 memory. External IRQs are deferred until it writes.
@@ -679,16 +681,27 @@ On top of that, `QHAD` and `METRO` fed register-file reads straight into
 
 - `QHAD` latches α (decode cycle) and β (S1), adds/subtracts in S2–S5
   into a register, and multiplies by `1/√2` and writes in S3–S6:
-  **7 cycles** (was 5). `QCNOT` has no arithmetic and keeps 5.
+  **7 cycles** (was 5; 11 once the adder got two stages, below). `QCNOT` has no arithmetic and keeps 5.
 - `METRO` latches `P_old`/`P_new`, then `β`, before using them: +1 cycle.
 - `METRO`'s two small shifts are written as `case` muxes: as `<<`/`>>`
   Yosys merged them into the ALU's barrel shifter (they never run
   together) and dragged the ALU's operand path into METRO's.
 
 Longest register-to-register path (Yosys `ltp`, generic gates):
-**215 → 124** levels. What is left is `fp_addsub` itself (~106 levels);
-the next longest, with the FPU taken out, is the integer path decode →
-register file → address → trap check → write enable (93).
+**215 → 124** levels. What was left was `fp_addsub` itself (~106 levels).
+
+**Two-stage adder.** `fp_addsub2.v` is the same arithmetic, bit for bit,
+with a register after the subtraction (stage 1: exponent compare,
+alignment, add/subtract; stage 2: leading-zero count, normalize, round).
+Every sequencer state that uses the adder's result now takes two
+cycles: a shared `fa_wait` freezes all sequencers for the first one
+while the operands — all flip-flops — hold still. Results are
+unchanged; cycle counts grow (`QHAD` 7 → 11, `SU3MUL` 79 → 115, `PLAQ`
+534 → 786, `REGGE` `SPIN` 5 → 6, `METRO` +8/+9, `QMEASURE` +6).
+`SU3MUL`/`PLAQ` also latch `ψ_j` in their LIM state instead of
+multiplying straight off a register bank. Longest path: **124 → 94**,
+now `fp_mul` alone — level with the integer path decode → register
+file → address → trap check → write enable (93).
 
 ### REGGE — `opcode[31:27] funct[26:25] nd[24:22] ns[21:19] (unused[18:0])` (v2.1 step 3)
 
@@ -715,7 +728,7 @@ the colorless `N` bank, as binary32:
 
 `α′ = 0.9` (`0x3F666666`), `1/α′` rounded once (`0x3F8E38E4`),
 `α₀ = 0.5` / `0.15`. A spin below the intercept has no real mass: the
-shared `fp_sqrt` returns its canonical NaN `0x7FC00000`. `SPIN` takes 5
+shared `fp_sqrt` returns its canonical NaN `0x7FC00000`. `SPIN` takes 6
 cycles; `MASS` goes through the multi-cycle `fp_sqrt` (shared with
 `QMEASURE`). `nd = ns` works: `nd` is only written on the terminal
 cycle, after the result is computed. (The operand is also latched on
@@ -765,11 +778,11 @@ NaN/infinity/subnormal are out of scope). There is no dedicated `LOAD`
 constant via `ADDI`+`SLLI` (see `sw/qhad_test.axasm`).
 
 **`QHAD`/`QCNOT` were the first genuinely multi-cycle instructions in
-this ISA** (5 cycles each; `QHAD` is 7 since v2.2 - see "Timing" below) - AxISA's register banks have exactly 2
+this ISA** (5 cycles each; `QHAD` is 11 since v2.2 - see "Timing" below) - AxISA's register banks have exactly 2
 read + 1 write port per bank, and only one write port total
 system-wide, so neither instruction (each touches 4 `R`-bank
 registers) can complete in one cycle. `QMEASURE` (below) is the third
-member of this family and by far the longest at 96 cycles, since it
+member of this family and by far the longest at ~102 cycles (96 before v2.2's two-stage adder), since it
 also needs real division and square-root hardware, neither of which
 existed anywhere in AxISA before it. See the "Implementation notes"
 section's port-count footnote below.
@@ -860,13 +873,13 @@ whole extension already carries - but must never be described as
 cryptographically rigorous, and software should not rely on it for
 anything security-sensitive.
 
-**Real cost: 96 cycles** (register reads + probability computation +
+**Real cost: 96 cycles** (~102 since v2.2's two-stage adder) (register reads + probability computation +
 RNG draw/compare ≈10, `fp_sqrt` ≈27, `fp_div` ≈51, 8 register writes),
 dominated (~81%) by the sqrt/div hardware - a real, bounded,
 deterministic cost, the same category as RV32I's own FDIV.S.
 
 **IRQ-deferral note, with an extra wrinkle beyond `QHAD`/`QCNOT`**: an
-IRQ arriving anywhere during `QMEASURE`'s ~96-cycle sequence is held
+IRQ arriving anywhere during `QMEASURE`'s ~102-cycle sequence is held
 pending until the sequence completes, exactly like `QHAD`/`QCNOT`
 (see "Traps" below) - this alone prevents `RFT` from re-executing the
 instruction against its own already-mutated registers. But `QMEASURE`
@@ -938,8 +951,8 @@ only actually redirects `pc` once the stall clears - the stalled
 access is never aborted mid-flight, so interrupt latency is bounded by
 stall duration rather than needing a new "abort a grant" concept. The
 same deferral applies to an in-flight `QHAD`/`QCNOT`/`QMEASURE`/`STRING`/`SU3MUL`/`PLAQ`/`METRO`/`REGGE` (see
-above) - an IRQ arriving anywhere during the sequence (7 cycles for
-`QHAD`, 5 for `QCNOT`, ~96 for `QMEASURE`), including exactly on its terminal
+above) - an IRQ arriving anywhere during the sequence (11 cycles for
+`QHAD`, 5 for `QCNOT`, ~102 for `QMEASURE`), including exactly on its terminal
 write cycle, is held pending until the whole sequence completes, not
 taken against the instruction's own address (which would make `RFT`
 re-execute the entire sequence from scratch, reading its own

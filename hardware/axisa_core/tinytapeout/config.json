@@ -7,6 +7,7 @@
         "dir::../rtl/data_mem.v",
         "dir::../rtl/control_unit.v",
         "dir::../rtl/fp_addsub.v",
+        "dir::../rtl/fp_addsub2.v",
         "dir::../rtl/fp_mul.v",
         "dir::../rtl/fp_sqrt.v",
         "dir::../rtl/fp_div.v",

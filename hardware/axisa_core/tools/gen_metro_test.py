@@ -194,11 +194,11 @@ FORCE = f"""
 """
 for i, (a, b, be, note) in enumerate(W_CASES):
     x = f32(be * f32(a - b))
-    cyc = 5 if x <= 0 else 6 if f32(x * LOG2E) >= 128 else 19
+    cyc = 6 if x <= 0 else 8 if f32(x * LOG2E) >= 128 else 27
     lines.append(f"            check(lat[{i}], {cyc}, \"cycles of WEIGHT #{i}\");")
-lines.append(f"            check(lat[{len(W_CASES)}], 6, \"cycles of ACCEPT, dS <= 0\");")
-lines.append(f"            check(lat[{len(W_CASES) + DRAWS}], 7, \"cycles of ACCEPT, w = 0\");")
-lines.append(f"            check(lat[{len(W_CASES) + 2 * DRAWS}], 20, \"cycles of ACCEPT, full path\");")
+lines.append(f"            check(lat[{len(W_CASES)}], 8, \"cycles of ACCEPT, dS <= 0\");")
+lines.append(f"            check(lat[{len(W_CASES) + DRAWS}], 10, \"cycles of ACCEPT, w = 0\");")
+lines.append(f"            check(lat[{len(W_CASES) + 2 * DRAWS}], 29, \"cycles of ACCEPT, full path\");")
 tb = set_checks(tb, lines, 'METRO')
 tb = tb.replace("    task check(", FORCE + "\n    task check(", 1)
 tb = tb.replace("    initial begin\n        errors = 0;", """    task in_range(input [31:0] got, input [31:0] lo, input [31:0] hi, input [48*8-1:0] name);

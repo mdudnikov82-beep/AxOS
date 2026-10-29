@@ -227,6 +227,7 @@ module cpu_core #(
     wire [2:0]  mtag_ns;
     wire        is_su3mul;
     wire        is_plaq;      // v2.2: lattice plaquette, on the su-sequencer
+    wire        fa_wait;      // v2.2: a sequencer waits for the two-stage adder
     wire        is_metro, metro_weight;
     wire [2:0]  metro_na, metro_nb, metro_nbeta;
     wire        mx_active, mx_stall; // v2.2 step 2 mx-sequencer (see the METRO section)
@@ -755,7 +756,8 @@ module cpu_core #(
     // clobbered before it's read).
     //
     //
-    // v2.2: QHAD now takes 7 cycles, so the FPU only ever sees flip-flops.
+    // v2.2: QHAD now takes 7 cycles, so the FPU only ever sees flip-flops
+    // (11 with the two-stage adder: S2..S5 each wait a cycle, see fa_wait).
     // Its sum used to feed fp_mul in the same cycle (addsub -> mul ->
     // write); that mux path existed for EVERY fp_mul user, so static
     // timing charged SU3MUL/QMEASURE/REGGE/METRO's products with a full
@@ -775,7 +777,7 @@ module cpu_core #(
     always @(posedge clk or posedge reset) begin
         if (reset) begin
             q_state_r <= Q_IDLE;
-        end else if (!halted_r) begin
+        end else if (!halted_r && !fa_wait) begin
             case (q_state_r)
                 Q_IDLE:  q_state_r <= (is_qhad || is_qcnot) ? Q_S1 : Q_IDLE;
                 Q_S1:    q_state_r <= Q_S2;
@@ -810,8 +812,8 @@ module cpu_core #(
     always @(posedge clk or posedge reset) begin
         if (reset) begin
             q_t0 <= 32'b0; q_t1 <= 32'b0; q_t2 <= 32'b0; q_t3 <= 32'b0; q_s_r <= 32'b0;
-        end else if (!halted_r) begin
-            if (q_state_r != Q_IDLE) q_s_r <= q_addsub_result;
+        end else if (!halted_r && !fa_wait) begin
+            if (q_state_r >= Q_S2 && q_state_r <= Q_S5) q_s_r <= q_addsub_result;
             if (q_state_r == Q_IDLE && (is_qhad || is_qcnot)) begin
                 q_t0 <= r_porta_data; // alpha Re
                 q_t1 <= r_portb_data; // alpha Im
@@ -847,8 +849,11 @@ module cpu_core #(
     wire [31:0] fpaddsub_in_b = mx_active ? mx_add_b : rg_active ? rg_add_b : su3_active ? su_add_b : qm_active ? qm_add_b : q_add_b;
     wire        fpaddsub_in_sub = mx_active ? mx_add_sub : rg_active ? rg_add_sub : su3_active ? su_add_sub : qm_active ? qm_add_sub : q_add_sub;
 
+    // v2.2: two pipeline stages (fp_addsub2.v) - the result for this
+    // cycle's inputs appears next cycle; see fa_wait at the end of the file.
     wire [31:0] q_addsub_result;
-    fp_addsub q_fpaddsub (.a(fpaddsub_in_a), .b(fpaddsub_in_b), .op_sub(fpaddsub_in_sub), .result(q_addsub_result));
+    fp_addsub2 q_fpaddsub (.clk(clk), .reset(reset), .a(fpaddsub_in_a), .b(fpaddsub_in_b),
+                           .op_sub(fpaddsub_in_sub), .result(q_addsub_result));
 
     // QHAD always chains fp_mul's input from fp_addsub's own result
     // (scaling the sum/difference by 1/sqrt(2)); QMEASURE needs fp_mul
@@ -880,7 +885,10 @@ module cpu_core #(
     // Per term: LRE (fetch Re) LIM (fetch Im, latch a) A (latch b,
     // p1=a*c) B (p2=b*d) C (tRe=p1-p2, p1=a*d) D (p2=b*c, accRe+=tRe)
     // E (tIm=p1+p2) F (accIm+=tIm; row done after j=2). 9 terms x 8 +
-    // decode + 6 write-back cycles W0..W5 = 79 cycles. W5 is the
+    // decode + 6 write-back cycles W0..W5 = 79 cycles - 115 since v2.2:
+    // C, D, E and F each wait a cycle for the two-stage adder (fa_wait).
+    // LIM also latches psi_j (su_cr/su_dr) so the multiplier never reads
+    // a register bank directly. W5 is the
     // terminal cycle (stall drops, pc moves on).
     //
     // PLAQ (v2.2) runs on the same sequencer and the same per-term states.
@@ -896,8 +904,8 @@ module cpu_core #(
     //   ph 3: tr += Re (U1 v)_k   (row k only; accRe starts at tr)
     // conj(a+bi) = a-bi is a sign flip of the loaded Im word, so the term
     // rounding is exactly SU3MUL's. Then PM: tr = fl(tr * fl(1/3)), and PW
-    // writes N[nd] through the normal path. 1 + 3*(9 + 72 + 72 + 24) + 2
-    // = 534 cycles.
+    // writes N[nd] through the normal path. 1 + 3*(9 + 108 + 108 + 36) + 2
+    // = 786 cycles (12 per term with the two-stage adder).
     localparam SU_IDLE = 5'd0, SU_LRE = 5'd1, SU_LIM = 5'd2, SU_A = 5'd3, SU_B = 5'd4,
                SU_C = 5'd5, SU_D = 5'd6, SU_E = 5'd7, SU_F = 5'd8,
                SU_W0 = 5'd9, SU_W1 = 5'd10, SU_W2 = 5'd11, SU_W3 = 5'd12, SU_W4 = 5'd13, SU_W5 = 5'd14,
@@ -911,6 +919,7 @@ module cpu_core #(
     reg [1:0]  su_ph_r, su_kk_r;   // PLAQ phase and trace index k
     reg [31:0] su_vre0_r, su_vim0_r, su_vre1_r, su_vim1_r, su_vre2_r, su_vim2_r; // PLAQ's vector v
     reg [31:0] su_tr_r;            // PLAQ's running trace, then the result
+    reg [31:0] su_cr, su_dr;       // psi_j latched in LIM: the FPU never reads a register bank directly
 
     // Matrices must be word-aligned and lie entirely below the UART/MMIO
     // window - SU3MUL/PLAQ read physical memory directly (kernel-only).
@@ -944,7 +953,7 @@ module cpu_core #(
     wire [31:0] su_mul_a = (su_state_r == SU_PM) ? su_tr_r :
                            (su_state_r == SU_A || su_state_r == SU_C) ? su_a_r : su_b_r;
     wire [31:0] su_mul_b = (su_state_r == SU_PM) ? PL_THIRD :
-                           (su_state_r == SU_A || su_state_r == SU_D) ? su_c   : su_d;
+                           (su_state_r == SU_A || su_state_r == SU_D) ? su_cr  : su_dr;
     wire [31:0] su_add_a = (su_state_r == SU_D) ? su_accre_r : (su_state_r == SU_F) ? su_accim_r : su_p1_r;
     wire [31:0] su_add_b = (su_state_r == SU_D) ? su_tre_r   : (su_state_r == SU_F) ? su_tim_r   : su_p2_r;
     wire        su_add_sub = (su_state_r == SU_C);
@@ -961,8 +970,8 @@ module cpu_core #(
             su_pl_r <= 1'b0; su_ph_r <= 2'd0; su_kk_r <= 2'd0;
             su_vre0_r <= 32'b0; su_vim0_r <= 32'b0; su_vre1_r <= 32'b0;
             su_vim1_r <= 32'b0; su_vre2_r <= 32'b0; su_vim2_r <= 32'b0;
-            su_tr_r <= 32'b0;
-        end else if (!halted_r) begin
+            su_tr_r <= 32'b0; su_cr <= 32'b0; su_dr <= 32'b0;
+        end else if (!halted_r && !fa_wait) begin
             case (su_state_r)
                 SU_IDLE: if (su3_go) begin
                     su_base_r  <= n_porta_data;
@@ -974,7 +983,7 @@ module cpu_core #(
                     su_state_r <= SU_LRE;
                 end
                 SU_LRE: su_state_r <= SU_LIM;
-                SU_LIM: begin su_a_r <= dmem_rdata; su_state_r <= SU_A; end
+                SU_LIM: begin su_a_r <= dmem_rdata; su_cr <= su_c; su_dr <= su_d; su_state_r <= SU_A; end
                 SU_A: if (su_pl_r && su_ph_r == 2'd0) begin
                     // PLAQ ph 0: v_j = conj(U4[k][j]), no arithmetic
                     case (su_j_r)
@@ -1106,7 +1115,7 @@ module cpu_core #(
     always @(posedge clk or posedge reset) begin
         if (reset) begin
             qm_state_r <= QM_IDLE;
-        end else if (!halted_r) begin
+        end else if (!halted_r && !fa_wait) begin
             case (qm_state_r)
                 QM_IDLE: qm_state_r <= is_qmeasure ? QM_S1 : QM_IDLE;
                 QM_S1:   qm_state_r <= QM_S2;
@@ -1175,7 +1184,7 @@ module cpu_core #(
             qm_p0 <= 32'b0; qm_p1 <= 32'b0; qm_r <= 32'b0;
             qm_p_survived <= 32'b0; qm_outcome_r <= 1'b0;
             qm_sqrtval <= 32'b0; qm_scale <= 32'b0;
-        end else if (!halted_r) begin
+        end else if (!halted_r && !fa_wait) begin
             case (qm_state_r)
                 QM_IDLE: if (is_qmeasure) begin
                     qm_t0 <= r_porta_data; qm_t1 <= r_portb_data; // A0
@@ -1494,7 +1503,7 @@ module cpu_core #(
         if (reset) begin
             rg_state_r <= RG_IDLE;
             rg_x_r <= 32'b0; rg_p_r <= 32'b0;
-        end else if (!halted_r) begin
+        end else if (!halted_r && !fa_wait) begin
             case (rg_state_r)
                 RG_IDLE: if (rg_go) begin rg_x_r <= n_porta_data; rg_state_r <= RG_X; end
                 RG_X: begin
@@ -1607,7 +1616,7 @@ module cpu_core #(
             mx_k_r <= 3'd0; mx_n_r <= 7'd0;
             mx_d_r <= 32'b0; mx_x_r <= 32'b0; mx_t_r <= 32'b0; mx_q_r <= 32'b0;
             mx_p_r <= 32'b0; mx_w_r <= 32'b0; mx_r_r <= 32'b0;
-        end else if (!halted_r) begin
+        end else if (!halted_r && !fa_wait) begin
             case (mx_state_r)
                 MX_IDLE: if (mx_go) begin
                     mx_x_r <= n_porta_data; mx_d_r <= n_portb_data; mx_state_r <= MX_SUB;
@@ -1979,4 +1988,26 @@ module cpu_core #(
             end
         end
     end
+    // ==================== fa_wait: the two-stage adder (v2.2) ====================
+    // fp_addsub2's result for the inputs a sequencer presents in cycle N
+    // appears in cycle N+1. Every sequencer state that CONSUMES the adder's
+    // result therefore runs twice: the first cycle (fa_ready_r = 0) only
+    // fills the stage register while fa_wait freezes all sequencers, the
+    // second takes the result and moves on. The adder's inputs come only
+    // from sequencer flip-flops (and QMEASURE/METRO's free-running LFSR,
+    // sampled in the first cycle - still a fair draw), so they hold still
+    // across both cycles. Terminal cycles never use the adder, so stall
+    // release and IRQ deferral are unchanged.
+    wire fa_use = (is_qhad && q_state_r >= Q_S2 && q_state_r <= Q_S5) ||
+                  (qm_state_r >= QM_S4 && qm_state_r <= QM_S9) ||
+                  (su_state_r == SU_C || su_state_r == SU_D || su_state_r == SU_E || su_state_r == SU_F) ||
+                  (rg_state_r == RG_X && rg_mass) || (rg_state_r == RG_Z) ||
+                  (mx_state_r == MX_SUB || mx_state_r == MX_SPLIT || mx_state_r == MX_HA || mx_state_r == MX_R);
+    reg  fa_ready_r;
+    always @(posedge clk or posedge reset) begin
+        if (reset)          fa_ready_r <= 1'b0;
+        else if (!halted_r) fa_ready_r <= fa_use && !fa_ready_r;
+    end
+    assign fa_wait = fa_use && !fa_ready_r;
+
 endmodule

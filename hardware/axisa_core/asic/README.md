@@ -78,6 +78,26 @@ register-file and memory muxes.
   11k flip-flops, not a typical operating power. Note the tb clock is
   10ns while the SDC says 100ns (OpenSTA warns `STA-1452`).
 
+## 2026-10-29: the FPU only sees flip-flops - 12.0 -> 18.2 MHz
+
+Commit `5add797` (see docs/ISA.md "Timing: the FPU only sees
+flip-flops"): QHAD no longer chains fp_addsub into fp_mul in one cycle,
+and QHAD/METRO latch register-file operands before the FPU. Run
+40832898974, same config (100 ns):
+
+| | 2026-10-28 | **2026-10-29** |
+|---|---|---|
+| ss 100°C 1.60V worst setup slack | 16.89 ns -> 83.1 ns, ≈12.0 MHz | **45.20 ns -> 54.8 ns, ≈18.2 MHz** |
+| tt 25°C 1.80V | 57.05 ns -> ≈23.3 MHz | 61.56 ns -> ≈26.0 MHz |
+| ff -40°C 1.95V | 65.29 ns -> ≈28.8 MHz | 67.95 ns -> ≈31.2 MHz |
+| instances / flip-flops | 87,089 / 11,094 | 92,984 / 11,590 |
+| cell area | 763,372 µm² | 807,625 µm² |
+| DRC / LVS / setup+hold violations | 0 / 0 / 0 | 0 / 0 / 0 |
+| antenna (nets / pins) | 207 / 272 | 263 / 368 |
+| power vectorless / gate-level VCD | 94.2 / 9.83 mW | 71.4 / 10.3 mW |
+
+Gate-level netlist still halts with `tohost=200` like RTL.
+
 ## RESOLVED (2026-08-21): first successful AxISA ASIC synthesis - real numbers
 
 Took 5 real dispatches of `.github/workflows/openlane-axisa-synth.yml`

@@ -96,7 +96,7 @@ module tb_regge;
             check(dut.dmem.mem[11'h10A], 32'h7FC00000, "J = 0 is below the intercept: no real mass (NaN)");
             check(n_spin, 8, "SPIN instructions timed");
             check(n_mass, 4, "MASS instructions timed");
-            check(spin_cyc, 5, "SPIN takes 5 cycles");
+            check(spin_cyc, 6, "SPIN takes 6 cycles");
             check(spin_bad + mass_bad, 0, "every SPIN / every MASS takes the same time");
             check(mass_cyc > spin_cyc, 1, "MASS (with the sqrt) is slower than SPIN");
         end
