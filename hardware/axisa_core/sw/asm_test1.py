@@ -194,6 +194,15 @@ def regge(funct, nd, ns):
     return (OP_REGGE << 27) | (funct << 25) | (nd << 22) | (ns << 19)
 
 
+
+# v2.2: PLAQ nd, ns - lattice plaquette of the 4 links at N[ns]
+OP_PLAQ = 0b10110
+
+
+def plaq(nd, ns):
+    return (OP_PLAQ << 27) | (nd << 24) | (ns << 21)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

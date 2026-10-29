@@ -23,7 +23,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge,
+    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq,
     GLUON_FUNCT, GLUON_COLORS,
     write_hex,
 )
@@ -303,6 +303,17 @@ def encode_one(mnemonic, ops, iaddr, labels):
         if not (0 <= dst <= 6 and 0 <= src <= 6):
             raise AsmError("SU3MUL: dst/src must be 0..6 (each names the pair idx, idx+1)")
         return su3mul(ns, dst, src)
+
+    # v2.2: PLAQ nd, ns - (1/3) Re Tr(U1 U2 U3^dag U4^dag) of the 4 link
+    # matrices at N[ns]; the result is colorless (N-bank binary32)
+    if m == 'PLAQ':
+        if len(ops) != 2:
+            raise AsmError("PLAQ: expected 2 operands (nd, ns)")
+        nd_bank, nd = parse_reg(ops[0])
+        ns_bank, ns = parse_reg(ops[1])
+        require_bank(nd_bank, nd, N, m, "nd")
+        require_bank(ns_bank, ns, N, m, "ns")
+        return plaq(nd, ns)
 
     # v2.1 step 1: memory tagging. IRG nd, ns / STG ns / LDG nd, ns -
     # pointers are N registers (only N touches memory)

@@ -1,0 +1,29 @@
+# AxISA v2.2: an external IRQ arriving while PLAQ is running (see
+# tb/tb_trap_irq_plaq.v's +IRQ_PHASE: its first cycle, mid-sequence, or
+# its terminal write cycle PW). The testbench preloads a cold square (4
+# identity links) at address 0, so PLAQ writes n2 = 1.0f. In every phase
+# the trap must wait until PLAQ has written: EPC = 0x28.
+    ADDI N1, N0, 1
+    MTSIE N1
+    ADDI N1, N0, 1
+    MTSMODE N1
+    ADDI N1, N0, 0x1C       # continue's address (word index 7)
+    MTEPC N1
+    RFT
+
+continue:
+    ADDI N2, N0, 5           # word index 7, addr 0x1C - n2 = 5 until PLAQ overwrites it
+    ADDI N1, N0, 0           # word index 8, addr 0x20 - (padding: keeps every address of the SU3MUL version)
+    PLAQ N2, N0              # word index 9, addr 0x24 - links at N0 = address 0; 534 cycles, irq_in pulses inside
+    ADDI N6, N0, 1           # word index 10, addr 0x28 - must NOT commit before the deferred IRQ fires
+finish:
+    ADDI N7, N0, 77          # word index 11, addr 0x2C
+    HALT N7
+
+.org 0x200
+handler:
+    MFCAUSE N3               # n3 = cause (expect 2 = external IRQ)
+    MFEPC N4                 # n4 = epc (expect 0x28 - proves PLAQ completed first)
+    ADDI N5, N0, 0x2C        # n5 = finish's address (word index 11)
+    MTEPC N5
+    RFT

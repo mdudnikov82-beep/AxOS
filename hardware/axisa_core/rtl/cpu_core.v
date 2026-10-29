@@ -226,6 +226,7 @@ module cpu_core #(
     wire [1:0]  mtag_funct;
     wire [2:0]  mtag_ns;
     wire        is_su3mul;
+    wire        is_plaq;      // v2.2: lattice plaquette, on the su-sequencer
     wire [2:0]  su3_ns, su3_dst, su3_src;
     wire        su3_active, su3_stall, su3_bad; // v2.0 step 5 su-sequencer (see the SU3MUL section)
     wire        is_qmeasure, qmeasure_qubit;
@@ -265,7 +266,7 @@ module cpu_core #(
         .is_regge(is_regge), .regge_funct(regge_funct), .regge_ns(regge_ns),
         .is_jalr(is_jalr), .jalr_ns(jalr_ns),
         .is_mtag(is_mtag), .mtag_funct(mtag_funct), .mtag_ns(mtag_ns),
-        .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src),
+        .is_plaq(is_plaq), .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src),
         .is_qmeasure(is_qmeasure), .qmeasure_qubit(qmeasure_qubit), .qmeasure_nd(qmeasure_nd),
         .qm_reg_a0(qm_reg_a0), .qm_reg_a1(qm_reg_a1), .qm_reg_b0(qm_reg_b0), .qm_reg_b1(qm_reg_b1),
         .write_bank(write_bank), .write_addr(write_addr),
@@ -460,7 +461,12 @@ module cpu_core #(
     // reg_write=0, but an external IRQ landing on an ordinary
     // instruction used to let its write through as well, so after RFT
     // it ran twice (found by tb_trap_irq_string.v's n6 check, v2.0).
-    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !data_illegal && !str_stall && !rg_stall && !any_trap;
+    // !su3_stall: PLAQ writes N[nd] only on its terminal cycle (SU3MUL
+    // has reg_write = 0 and its own write path). Without it nd would get
+    // 533 intermediate writes nobody can observe (the core is stalled and
+    // the last one is right) - a mutation test confirmed that, so this
+    // gate saves register-file switching rather than fixing a result.
+    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !data_illegal && !str_stall && !rg_stall && !su3_stall && !any_trap;
     wire r_write_en = gated_reg_write && (write_bank == BANK_R);
     wire g_write_en = gated_reg_write && (write_bank == BANK_G);
     wire b_write_en = gated_reg_write && (write_bank == BANK_B);
@@ -857,32 +863,69 @@ module cpu_core #(
     // E (tIm=p1+p2) F (accIm+=tIm; row done after j=2). 9 terms x 8 +
     // decode + 6 write-back cycles W0..W5 = 79 cycles. W5 is the
     // terminal cycle (stall drops, pc moves on).
-    localparam SU_IDLE = 4'd0, SU_LRE = 4'd1, SU_LIM = 4'd2, SU_A = 4'd3, SU_B = 4'd4,
-               SU_C = 4'd5, SU_D = 4'd6, SU_E = 4'd7, SU_F = 4'd8,
-               SU_W0 = 4'd9, SU_W1 = 4'd10, SU_W2 = 4'd11, SU_W3 = 4'd12, SU_W4 = 4'd13, SU_W5 = 4'd14;
-    reg [3:0]  su_state_r;
+    //
+    // PLAQ (v2.2) runs on the same sequencer and the same per-term states.
+    // The plaquette of one lattice square is P = (1/3) Re Tr(U1 U2 U3^dag U4^dag)
+    // with U1 = U_mu(x), U2 = U_nu(x+mu), U3 = U_mu(x+nu), U4 = U_nu(x): 4
+    // matrices back to back at N[ns] (U_m at base + 72*(m-1)). No 3x3
+    // product is ever stored: Tr M = sum_k (M e_k)_k, and M e_k is three
+    // matrix*vector products, so the only extra state is one color vector.
+    // For k = 0, 1, 2:
+    //   ph 0: v = U4^dag e_k = conj(row k of U4)  (LRE LIM A per element)
+    //   ph 1: v = U3^dag v   (element (i,j) = conj(U3[j][i]))
+    //   ph 2: v = U2 v
+    //   ph 3: tr += Re (U1 v)_k   (row k only; accRe starts at tr)
+    // conj(a+bi) = a-bi is a sign flip of the loaded Im word, so the term
+    // rounding is exactly SU3MUL's. Then PM: tr = fl(tr * fl(1/3)), and PW
+    // writes N[nd] through the normal path. 1 + 3*(9 + 72 + 72 + 24) + 2
+    // = 534 cycles.
+    localparam SU_IDLE = 5'd0, SU_LRE = 5'd1, SU_LIM = 5'd2, SU_A = 5'd3, SU_B = 5'd4,
+               SU_C = 5'd5, SU_D = 5'd6, SU_E = 5'd7, SU_F = 5'd8,
+               SU_W0 = 5'd9, SU_W1 = 5'd10, SU_W2 = 5'd11, SU_W3 = 5'd12, SU_W4 = 5'd13, SU_W5 = 5'd14,
+               SU_PM = 5'd15, SU_PW = 5'd16;
+    localparam [31:0] PL_THIRD = 32'h3EAAAAAB; // fl(1/3)
+    reg [4:0]  su_state_r;
     reg [1:0]  su_i_r, su_j_r;
     reg [31:0] su_base_r, su_a_r, su_b_r, su_p1_r, su_p2_r, su_tre_r, su_tim_r, su_accre_r, su_accim_r;
     reg [31:0] su_ore0_r, su_oim0_r, su_ore1_r, su_oim1_r, su_ore2_r, su_oim2_r;
+    reg        su_pl_r;            // running a PLAQ, not an SU3MUL
+    reg [1:0]  su_ph_r, su_kk_r;   // PLAQ phase and trace index k
+    reg [31:0] su_vre0_r, su_vim0_r, su_vre1_r, su_vim1_r, su_vre2_r, su_vim2_r; // PLAQ's vector v
+    reg [31:0] su_tr_r;            // PLAQ's running trace, then the result
 
-    // Matrix must be word-aligned and lie entirely below the UART/MMIO
-    // window - SU3MUL reads physical memory directly (kernel-only).
-    assign su3_bad = is_su3mul && (su_state_r == SU_IDLE) &&
-                     ((n_porta_data[1:0] != 2'b00) || (n_porta_data > UART_TX_ADDR - 32'd72));
-    wire su3_go = is_su3mul && (su_state_r == SU_IDLE) && !sync_trap;
+    // Matrices must be word-aligned and lie entirely below the UART/MMIO
+    // window - SU3MUL/PLAQ read physical memory directly (kernel-only).
+    assign su3_bad = (is_su3mul || is_plaq) && (su_state_r == SU_IDLE) &&
+                     ((n_porta_data[1:0] != 2'b00) ||
+                      (n_porta_data > UART_TX_ADDR - (is_plaq ? 32'd288 : 32'd72)));
+    wire su3_go = (is_su3mul || is_plaq) && (su_state_r == SU_IDLE) && !sync_trap;
 
-    assign su3_active = (su_state_r != SU_IDLE) || is_su3mul;
-    assign su3_stall  = (su_state_r == SU_IDLE) ? su3_go : (su_state_r != SU_W5);
+    assign su3_active = (su_state_r != SU_IDLE) || is_su3mul || is_plaq;
+    assign su3_stall  = (su_state_r == SU_IDLE) ? su3_go : (su_state_r != SU_W5 && su_state_r != SU_PW);
 
-    wire [3:0]  su_k       = {2'b00, su_i_r} * 4'd3 + {2'b00, su_j_r};   // 3i + j, 0..8
+    // which matrix element this term uses: SU3MUL U[i][j]; PLAQ per phase
+    wire [1:0]  su_row = !su_pl_r ? su_i_r : (su_ph_r == 2'd1) ? su_j_r : (su_ph_r == 2'd2) ? su_i_r : su_kk_r;
+    wire [1:0]  su_col = (su_pl_r && su_ph_r == 2'd1) ? su_i_r : su_j_r;
+    wire [1:0]  su_mat = su_pl_r ? 2'd3 - su_ph_r : 2'd0;  // ph 0..3 -> U4, U3, U2, U1
+    wire        su_conj = su_pl_r && !su_ph_r[1];           // ph 0, 1: daggered links
+    wire [3:0]  su_k       = {2'b00, su_row} * 4'd3 + {2'b00, su_col};   // 3*row + col, 0..8
     wire        su3_mem_rd = (su_state_r == SU_LRE) || (su_state_r == SU_LIM);
-    wire [31:0] su3_addr   = su_base_r + {25'd0, su_k, 3'b000} + ((su_state_r == SU_LIM) ? 32'd4 : 32'd0);
+    wire [31:0] su3_addr   = su_base_r + {27'd0, su_mat, 3'b000} * 32'd9 + {25'd0, su_k, 3'b000} +
+                             ((su_state_r == SU_LIM) ? 32'd4 : 32'd0);
+    wire [31:0] su_im_in   = {dmem_rdata[31] ^ su_conj, dmem_rdata[30:0]};
 
-    wire [31:0] su_c = (su_j_r == 2'd0) ? r_porta_data : (su_j_r == 2'd1) ? g_porta_data : b_porta_data; // psi_j Re
-    wire [31:0] su_d = (su_j_r == 2'd0) ? r_portb_data : (su_j_r == 2'd1) ? g_portb_data : b_portb_data; // psi_j Im
+    // psi_j: SU3MUL reads it from the color banks, PLAQ from v
+    wire [31:0] su_vre = (su_j_r == 2'd0) ? su_vre0_r : (su_j_r == 2'd1) ? su_vre1_r : su_vre2_r;
+    wire [31:0] su_vim = (su_j_r == 2'd0) ? su_vim0_r : (su_j_r == 2'd1) ? su_vim1_r : su_vim2_r;
+    wire [31:0] su_c = su_pl_r ? su_vre :
+                       (su_j_r == 2'd0) ? r_porta_data : (su_j_r == 2'd1) ? g_porta_data : b_porta_data; // psi_j Re
+    wire [31:0] su_d = su_pl_r ? su_vim :
+                       (su_j_r == 2'd0) ? r_portb_data : (su_j_r == 2'd1) ? g_portb_data : b_portb_data; // psi_j Im
 
-    wire [31:0] su_mul_a = (su_state_r == SU_A || su_state_r == SU_C) ? su_a_r : su_b_r;
-    wire [31:0] su_mul_b = (su_state_r == SU_A || su_state_r == SU_D) ? su_c   : su_d;
+    wire [31:0] su_mul_a = (su_state_r == SU_PM) ? su_tr_r :
+                           (su_state_r == SU_A || su_state_r == SU_C) ? su_a_r : su_b_r;
+    wire [31:0] su_mul_b = (su_state_r == SU_PM) ? PL_THIRD :
+                           (su_state_r == SU_A || su_state_r == SU_D) ? su_c   : su_d;
     wire [31:0] su_add_a = (su_state_r == SU_D) ? su_accre_r : (su_state_r == SU_F) ? su_accim_r : su_p1_r;
     wire [31:0] su_add_b = (su_state_r == SU_D) ? su_tre_r   : (su_state_r == SU_F) ? su_tim_r   : su_p2_r;
     wire        su_add_sub = (su_state_r == SU_C);
@@ -896,23 +939,58 @@ module cpu_core #(
             su_accre_r <= 32'b0; su_accim_r <= 32'b0;
             su_ore0_r <= 32'b0; su_oim0_r <= 32'b0; su_ore1_r <= 32'b0;
             su_oim1_r <= 32'b0; su_ore2_r <= 32'b0; su_oim2_r <= 32'b0;
+            su_pl_r <= 1'b0; su_ph_r <= 2'd0; su_kk_r <= 2'd0;
+            su_vre0_r <= 32'b0; su_vim0_r <= 32'b0; su_vre1_r <= 32'b0;
+            su_vim1_r <= 32'b0; su_vre2_r <= 32'b0; su_vim2_r <= 32'b0;
+            su_tr_r <= 32'b0;
         end else if (!halted_r) begin
             case (su_state_r)
                 SU_IDLE: if (su3_go) begin
                     su_base_r  <= n_porta_data;
                     su_i_r     <= 2'd0; su_j_r <= 2'd0;
                     su_accre_r <= 32'b0; su_accim_r <= 32'b0; // +0.0
+                    su_pl_r    <= is_plaq;
+                    su_ph_r    <= 2'd0; su_kk_r <= 2'd0;
+                    su_tr_r    <= 32'b0;
                     su_state_r <= SU_LRE;
                 end
                 SU_LRE: su_state_r <= SU_LIM;
                 SU_LIM: begin su_a_r <= dmem_rdata; su_state_r <= SU_A; end
-                SU_A:   begin su_b_r <= dmem_rdata; su_p1_r <= q_mul_result; su_state_r <= SU_B; end
+                SU_A: if (su_pl_r && su_ph_r == 2'd0) begin
+                    // PLAQ ph 0: v_j = conj(U4[k][j]), no arithmetic
+                    case (su_j_r)
+                        2'd0:    begin su_vre0_r <= su_a_r; su_vim0_r <= su_im_in; end
+                        2'd1:    begin su_vre1_r <= su_a_r; su_vim1_r <= su_im_in; end
+                        default: begin su_vre2_r <= su_a_r; su_vim2_r <= su_im_in; end
+                    endcase
+                    if (su_j_r == 2'd2) begin
+                        su_j_r  <= 2'd0;
+                        su_ph_r <= 2'd1; su_i_r <= 2'd0;
+                        su_accre_r <= 32'b0; su_accim_r <= 32'b0;
+                    end else
+                        su_j_r  <= su_j_r + 2'd1;
+                    su_state_r <= SU_LRE;
+                end else begin
+                    su_b_r <= su_im_in; su_p1_r <= q_mul_result; su_state_r <= SU_B;
+                end
                 SU_B:   begin su_p2_r <= q_mul_result; su_state_r <= SU_C; end
                 SU_C:   begin su_tre_r <= q_addsub_result; su_p1_r <= q_mul_result; su_state_r <= SU_D; end
                 SU_D:   begin su_p2_r <= q_mul_result; su_accre_r <= q_addsub_result; su_state_r <= SU_E; end
                 SU_E:   begin su_tim_r <= q_addsub_result; su_state_r <= SU_F; end
                 SU_F: begin
-                    if (su_j_r == 2'd2) begin // row i finished
+                    if (su_j_r != 2'd2) begin
+                        su_accim_r <= q_addsub_result;
+                        su_j_r     <= su_j_r + 2'd1;
+                        su_state_r <= SU_LRE;
+                    end else if (su_pl_r && su_ph_r == 2'd3) begin
+                        // PLAQ: (U1 v)_k done - the trace absorbs it
+                        su_tr_r    <= su_accre_r;
+                        su_accre_r <= 32'b0; su_accim_r <= 32'b0;
+                        su_j_r     <= 2'd0;
+                        su_ph_r    <= 2'd0;
+                        su_kk_r    <= su_kk_r + 2'd1;
+                        su_state_r <= (su_kk_r == 2'd2) ? SU_PM : SU_LRE;
+                    end else begin // row i finished
                         case (su_i_r)
                             2'd0:    begin su_ore0_r <= su_accre_r; su_oim0_r <= q_addsub_result; end
                             2'd1:    begin su_ore1_r <= su_accre_r; su_oim1_r <= q_addsub_result; end
@@ -921,15 +999,25 @@ module cpu_core #(
                         su_accre_r <= 32'b0; su_accim_r <= 32'b0;
                         su_j_r     <= 2'd0;
                         su_i_r     <= su_i_r + 2'd1;
-                        su_state_r <= (su_i_r == 2'd2) ? SU_W0 : SU_LRE;
-                    end else begin
-                        su_accim_r <= q_addsub_result;
-                        su_j_r     <= su_j_r + 2'd1;
-                        su_state_r <= SU_LRE;
+                        if (!su_pl_r)
+                            su_state_r <= (su_i_r == 2'd2) ? SU_W0 : SU_LRE;
+                        else begin
+                            su_state_r <= SU_LRE;
+                            if (su_i_r == 2'd2) begin // PLAQ ph 1/2: the new vector replaces v
+                                su_vre0_r <= su_ore0_r; su_vim0_r <= su_oim0_r;
+                                su_vre1_r <= su_ore1_r; su_vim1_r <= su_oim1_r;
+                                su_vre2_r <= su_accre_r; su_vim2_r <= q_addsub_result;
+                                su_i_r    <= 2'd0;
+                                su_ph_r   <= su_ph_r + 2'd1;
+                                if (su_ph_r == 2'd2) su_accre_r <= su_tr_r; // ph 3 accumulates onto tr
+                            end
+                        end
                     end
                 end
+                SU_PM:   begin su_tr_r <= q_mul_result; su_state_r <= SU_PW; end
+                SU_PW:   su_state_r <= SU_IDLE; // N[nd] = su_tr_r commits, pc moves on
                 SU_W5:   su_state_r <= SU_IDLE;
-                default: su_state_r <= su_state_r + 4'd1; // W0..W4
+                default: su_state_r <= su_state_r + 5'd1; // W0..W4
             endcase
         end
     end
@@ -1514,7 +1602,7 @@ module cpu_core #(
     // lives HERE, not in control_unit.v - keeps that module a pure
     // function of `instr` alone (confirmed by design review: no other
     // module needs to know the CPU's runtime state just to decode).
-    wire priv_violation = (is_rft || is_mvsr || is_ptb || is_su3mul || (is_mtag && mtag_funct != 2'b00)) &&
+    wire priv_violation = (is_rft || is_mvsr || is_ptb || is_su3mul || is_plaq || (is_mtag && mtag_funct != 2'b00)) &&
                           (mode_r == MODE_USER); // SU3MUL/STG/LDG address physical memory directly
     // Exceptions are never maskable by ie_r (a real bug in kernel code
     // shouldn't be silently swallowed) - only the external-IRQ cause
@@ -1572,7 +1660,7 @@ module cpu_core #(
     // reproducibility.
     // STRING (v2.0) gets the same deferral: its write commits on the
     // terminal cycle, so an IRQ there would make RFT redo it.
-    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul && !is_regge);
+    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul && !is_plaq && !is_regge);
 
     wire [2:0] next_cause = (illegal || data_illegal) ? CAUSE_ILLEGAL :
                              is_syscall     ? CAUSE_SYSCALL :
@@ -1601,6 +1689,7 @@ module cpu_core #(
                          is_string ? str_d :
                          is_mtag   ? mtag_result :
                          is_regge  ? rg_p_r :
+                         is_plaq   ? su_tr_r :
                          is_load   ? effective_dmem_rdata :
                          (is_jal || is_jalr) ? (pc_r + 32'd4) :
                          (is_mvsr && !mvsr_dir) ? mvsr_read_data :

@@ -76,13 +76,26 @@ module fp_addsub (
     wire        presub_sign = swap_for_equal_exp ? sign_small0       : sign_large0;
 
     wire [26:0] add_raw = {1'b0, sig_large} + {1'b0, sig_small_aligned}; // same-sign path
-    wire [25:0] sub_raw = minuend - subtrahend;                          // diff-sign path
+
+    // Diff-sign path, with the sticky bit as a 27th, lowest bit IN the
+    // subtraction. The bits shifted out of the subtrahend are a tail t
+    // with 0 < t < 2 units; subtracting exactly 1 unit makes the borrow
+    // right, so bits [26:1] are floor(true difference) and bit 0 is its
+    // sticky. Dropping the tail (the original port) made the difference
+    // too BIG and could round the wrong way: 0x3F7DF37E + 0xB966594C gave
+    // 0x3F7DE519 (0.58 ulp off) instead of 0x3F7DE518 - found by PLAQ's
+    // bit-exact test (v2.2). Only the subtrahend can have a tail: the
+    // equal-exponent swap case has exp_diff = 0, so align_sticky = 0.
+    // A tail implies exp_diff >= 3, so cancellation is at most 1 bit and
+    // the shift below never moves bit 0 above the round bit.
+    wire [26:0] sub_raw27 = {minuend, 1'b0} - {subtrahend, align_sticky};
+    wire [25:0] sub_raw   = sub_raw27[26:1];
 
     // The exact-cancellation case (e.g. a-a): the raw difference is
     // all-zero, so there is no leading 1 for a leading-zero-counter to
     // find - must short-circuit to a clean +0 BEFORE ever attempting
     // to normalize, or the LZC's shift amount is undefined.
-    wire sub_is_zero = !same_sign && (sub_raw == 26'b0);
+    wire sub_is_zero = !same_sign && (sub_raw27 == 27'b0);
 
     // Leading-zero count of the 26-bit subtraction result (used only
     // on the differing-sign path, and only when sub_is_zero is false).
@@ -162,8 +175,7 @@ module fp_addsub (
                 norm_exp    = 9'b0;
                 norm_sign   = 1'b0;
             end else begin
-                norm_sig    = sub_raw << lzc;
-                norm_sticky = align_sticky; // left-shift never loses low bits
+                {norm_sig, norm_sticky} = sub_raw27 << lzc; // left-shift never loses low bits
                 norm_exp    = {1'b0, exp_large} - {4'b0, lzc};
             end
             norm_sign = presub_sign;

@@ -156,6 +156,10 @@ module control_unit (
     output reg  [1:0]  mtag_funct,
     output reg  [2:0]  mtag_ns,
 
+    // PLAQ (v2.2): lattice-QCD plaquette, (1/3) Re Tr(U1 U2 U3^dag U4^dag)
+    // of 4 link matrices at N[su3_ns]. Runs on the su-sequencer; the
+    // N[nd] write goes through the normal path on its terminal cycle.
+    output reg          is_plaq,
     output reg          is_su3mul,
     output reg  [2:0]  su3_ns,
     output reg  [2:0]  su3_dst,
@@ -198,6 +202,7 @@ module control_unit (
     localparam OP_MTAG     = 5'b10011;
     localparam OP_JALR     = 5'b10100;
     localparam OP_REGGE    = 5'b10101;
+    localparam OP_PLAQ     = 5'b10110;
 
     localparam BANK_R = 2'b00;
     localparam BANK_G = 2'b01;
@@ -290,6 +295,7 @@ module control_unit (
         is_mtag        = 1'b0;
         mtag_funct     = 2'b0;
         mtag_ns        = 3'b0;
+        is_plaq        = 1'b0;
         is_su3mul      = 1'b0;
         su3_ns         = 3'b0;
         su3_dst        = 3'b0;
@@ -581,6 +587,16 @@ module control_unit (
                 su3_src   = instr[20:18];
                 if (instr[23:21] == 3'd7 || instr[20:18] == 3'd7)
                     illegal = 1'b1;
+            end
+
+            OP_PLAQ: begin
+                // opcode[31:27] nd[26:24] ns[23:21]. Gauge-invariant, so the
+                // result is colorless: binary32 in N[nd].
+                is_plaq    = 1'b1;
+                su3_ns     = instr[23:21];
+                write_bank = BANK_N;
+                write_addr = instr[26:24];
+                reg_write  = 1'b1;
             end
 
             OP_QMEASURE: begin
