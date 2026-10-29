@@ -757,7 +757,7 @@ module cpu_core #(
     //
     //
     // v2.2: QHAD now takes 7 cycles, so the FPU only ever sees flip-flops
-    // (11 with the two-stage adder: S2..S5 each wait a cycle, see fa_wait).
+    // (12 with the two-stage FPU: S2..S6 each wait a cycle, see fa_wait).
     // Its sum used to feed fp_mul in the same cycle (addsub -> mul ->
     // write); that mux path existed for EVERY fp_mul user, so static
     // timing charged SU3MUL/QMEASURE/REGGE/METRO's products with a full
@@ -863,8 +863,9 @@ module cpu_core #(
     wire [31:0] fpmul_in_a = mx_active ? mx_mul_a : rg_active ? rg_mul_a : su3_active ? su_mul_a : qm_active ? qm_mul_a : q_s_r;
     wire [31:0] fpmul_in_b = mx_active ? mx_mul_b : rg_active ? rg_mul_b : su3_active ? su_mul_b : qm_active ? qm_mul_b : Q_INV_SQRT2;
 
+    // v2.2: two pipeline stages (fp_mul2.v), like the adder - see fa_wait.
     wire [31:0] q_mul_result;
-    fp_mul q_fpmul (.a(fpmul_in_a), .b(fpmul_in_b), .result(q_mul_result));
+    fp_mul2 q_fpmul (.clk(clk), .reset(reset), .a(fpmul_in_a), .b(fpmul_in_b), .result(q_mul_result));
 
     // ==================== SU3MUL (v2.0 step 5: lattice QCD) ====================
     // psi' = U * psi. U: 3x3 complex matrix, 18 binary32 words row-major
@@ -885,8 +886,8 @@ module cpu_core #(
     // Per term: LRE (fetch Re) LIM (fetch Im, latch a) A (latch b,
     // p1=a*c) B (p2=b*d) C (tRe=p1-p2, p1=a*d) D (p2=b*c, accRe+=tRe)
     // E (tIm=p1+p2) F (accIm+=tIm; row done after j=2). 9 terms x 8 +
-    // decode + 6 write-back cycles W0..W5 = 79 cycles - 115 since v2.2:
-    // C, D, E and F each wait a cycle for the two-stage adder (fa_wait).
+    // decode + 6 write-back cycles W0..W5 = 79 cycles - 133 since v2.2:
+    // A, B, C, D, E and F each wait a cycle for the two-stage FPU (fa_wait).
     // LIM also latches psi_j (su_cr/su_dr) so the multiplier never reads
     // a register bank directly. W5 is the
     // terminal cycle (stall drops, pc moves on).
@@ -904,8 +905,8 @@ module cpu_core #(
     //   ph 3: tr += Re (U1 v)_k   (row k only; accRe starts at tr)
     // conj(a+bi) = a-bi is a sign flip of the loaded Im word, so the term
     // rounding is exactly SU3MUL's. Then PM: tr = fl(tr * fl(1/3)), and PW
-    // writes N[nd] through the normal path. 1 + 3*(9 + 108 + 108 + 36) + 2
-    // = 786 cycles (12 per term with the two-stage adder).
+    // writes N[nd] through the normal path. 1 + 3*(9 + 126 + 126 + 42) + 3
+    // = 913 cycles (14 per term with the two-stage FPU; PM waits too).
     localparam SU_IDLE = 5'd0, SU_LRE = 5'd1, SU_LIM = 5'd2, SU_A = 5'd3, SU_B = 5'd4,
                SU_C = 5'd5, SU_D = 5'd6, SU_E = 5'd7, SU_F = 5'd8,
                SU_W0 = 5'd9, SU_W1 = 5'd10, SU_W2 = 5'd11, SU_W3 = 5'd12, SU_W4 = 5'd13, SU_W5 = 5'd14,
@@ -937,9 +938,12 @@ module cpu_core #(
     wire [1:0]  su_mat = su_pl_r ? 2'd3 - su_ph_r : 2'd0;  // ph 0..3 -> U4, U3, U2, U1
     wire        su_conj = su_pl_r && !su_ph_r[1];           // ph 0, 1: daggered links
     wire [3:0]  su_k       = {2'b00, su_row} * 4'd3 + {2'b00, su_col};   // 3*row + col, 0..8
-    wire        su3_mem_rd = (su_state_r == SU_LRE) || (su_state_r == SU_LIM);
+    // SU_A keeps the Im address up: with the two-stage FPU it can last two
+    // cycles (fa_wait), and data_mem's synchronous read must still hold Im
+    // in the second one, when su_b_r takes it.
+    wire        su3_mem_rd = (su_state_r == SU_LRE) || (su_state_r == SU_LIM) || (su_state_r == SU_A);
     wire [31:0] su3_addr   = su_base_r + {27'd0, su_mat, 3'b000} * 32'd9 + {25'd0, su_k, 3'b000} +
-                             ((su_state_r == SU_LIM) ? 32'd4 : 32'd0);
+                             ((su_state_r == SU_LIM || su_state_r == SU_A) ? 32'd4 : 32'd0);
     wire [31:0] su_im_in   = {dmem_rdata[31] ^ su_conj, dmem_rdata[30:0]};
 
     // psi_j: SU3MUL reads it from the color banks, PLAQ from v
@@ -1070,8 +1074,9 @@ module cpu_core #(
 
     // QCNOT writes in S1..S4; QHAD two states later, S3..S6.
     wire [2:0]  q_wstep      = is_qhad ? q_state_r - 3'd2 : q_state_r; // 1..4 = i, i+1, j, j+1
-    wire        q_write_en   = (q_wstep == 3'd1) || (q_wstep == 3'd2) ||
-                                (q_wstep == 3'd3) || (q_wstep == 3'd4);
+    wire        q_write_en   = ((q_wstep == 3'd1) || (q_wstep == 3'd2) ||
+                                 (q_wstep == 3'd3) || (q_wstep == 3'd4)) &&
+                                !(is_qhad && fa_wait); // QHAD writes a product: only once it is out
     wire [2:0]  q_write_addr = (q_wstep == 3'd1) ? q_reg_i :
                                 (q_wstep == 3'd2) ? (q_reg_i + 3'd1) :
                                 (q_wstep == 3'd3) ? q_reg_j :
@@ -1297,10 +1302,10 @@ module cpu_core #(
     // each scaled by qm_scale (computed combinationally the same cycle
     // via the shared fp_mul, mirroring QHAD's own "compute->write same
     // cycle" style); W4-W7 zero the 2 losing amplitudes' Re/Im.
-    wire qm_write_en = (qm_state_r == QM_W0) || (qm_state_r == QM_W1) ||
+    wire qm_write_en = ((qm_state_r == QM_W0) || (qm_state_r == QM_W1) ||
                         (qm_state_r == QM_W2) || (qm_state_r == QM_W3) ||
                         (qm_state_r == QM_W4) || (qm_state_r == QM_W5) ||
-                        (qm_state_r == QM_W6) || (qm_state_r == QM_W7);
+                        (qm_state_r == QM_W6) || (qm_state_r == QM_W7)) && !fa_wait;
     wire [2:0] qm_write_addr = (qm_state_r == QM_W0) ? qm_surv_reg0 :
                                 (qm_state_r == QM_W1) ? (qm_surv_reg0 + 3'd1) :
                                 (qm_state_r == QM_W2) ? qm_surv_reg1 :
@@ -1435,7 +1440,7 @@ module cpu_core #(
     // never touch memory, so mem_stall's own components are provably
     // always 0 whenever q_stall/qm_stall is 1) - see the "QHAD / QCNOT"
     // and "QMEASURE" sections above for q_stall/qm_stall's definitions.
-    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall || su3_stall || rg_stall || mx_stall;
+    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall || su3_stall || rg_stall || mx_stall || fa_wait;
 
     // Walker's own PTE fetch takes priority (its read must land on
     // data_mem's shared port); otherwise a translated user-mode access
@@ -1988,21 +1993,29 @@ module cpu_core #(
             end
         end
     end
-    // ==================== fa_wait: the two-stage adder (v2.2) ====================
-    // fp_addsub2's result for the inputs a sequencer presents in cycle N
-    // appears in cycle N+1. Every sequencer state that CONSUMES the adder's
-    // result therefore runs twice: the first cycle (fa_ready_r = 0) only
+    // ==================== fa_wait: the two-stage FPU (v2.2) ====================
+    // fp_addsub2's and fp_mul2's result for the inputs a sequencer presents
+    // in cycle N appears in cycle N+1. Every sequencer state that CONSUMES
+    // either result therefore runs twice: the first cycle (fa_ready_r = 0) only
     // fills the stage register while fa_wait freezes all sequencers, the
     // second takes the result and moves on. The adder's inputs come only
     // from sequencer flip-flops (and QMEASURE/METRO's free-running LFSR,
     // sampled in the first cycle - still a fair draw), so they hold still
-    // across both cycles. Terminal cycles never use the adder, so stall
-    // release and IRQ deferral are unchanged.
+    // across both cycles. fa_wait is part of cpu_stall: QHAD's terminal
+    // cycle writes a product, so it must not let the CPU move on until the
+    // product is out; the sequencers' own register writes are gated too.
     wire fa_use = (is_qhad && q_state_r >= Q_S2 && q_state_r <= Q_S5) ||
                   (qm_state_r >= QM_S4 && qm_state_r <= QM_S9) ||
                   (su_state_r == SU_C || su_state_r == SU_D || su_state_r == SU_E || su_state_r == SU_F) ||
                   (rg_state_r == RG_X && rg_mass) || (rg_state_r == RG_Z) ||
-                  (mx_state_r == MX_SUB || mx_state_r == MX_SPLIT || mx_state_r == MX_HA || mx_state_r == MX_R);
+                  (mx_state_r == MX_SUB || mx_state_r == MX_SPLIT || mx_state_r == MX_HA || mx_state_r == MX_R) ||
+                  // ... and the multiplier's
+                  (is_qhad && q_state_r >= Q_S3) ||
+                  (qm_state_r >= QM_S2 && qm_state_r <= QM_S5) ||
+                  (qm_state_r >= QM_W0 && qm_state_r <= QM_W3) ||
+                  ((su_state_r == SU_A && !(su_pl_r && su_ph_r == 2'd0)) || su_state_r == SU_B || su_state_r == SU_PM) ||
+                  (rg_state_r == RG_X && !rg_mass) || (rg_state_r == RG_Y) ||
+                  (mx_state_r == MX_BETA || mx_state_r == MX_Y || mx_state_r == MX_HM);
     reg  fa_ready_r;
     always @(posedge clk or posedge reset) begin
         if (reset)          fa_ready_r <= 1'b0;

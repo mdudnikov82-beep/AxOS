@@ -10,7 +10,7 @@
 // terminal write cycle since v2.2 registered its operands - Q_S4 for QCNOT) - a whitebox peek, matching this project's own
 // established style (tb_trap_irq_squash.v peeks dut.squash_r the same
 // way). If cpu_core.v's fix is correct: (1) QHAD's own results (r0/r2)
-// are the correct, uncorrupted amplitudes - proving the whole 11-cycle
+// are the correct, uncorrupted amplitudes - proving the whole 12-cycle
 // sequence completed for real before the trap was allowed to land: not
 // just "didn't hang", but produced the right numbers; (2) EPC captures
 // word index 10's address (0x28, the plain ADDI right after QHAD), NOT

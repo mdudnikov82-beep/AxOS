@@ -25,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 CORE = [
     "rtl/alu.v", "rtl/regbank.v", "rtl/instr_mem.v", "rtl/data_mem.v",
-    "rtl/control_unit.v", "rtl/fp_addsub.v", "rtl/fp_addsub2.v", "rtl/fp_mul.v", "rtl/fp_sqrt.v",
+    "rtl/control_unit.v", "rtl/fp_addsub.v", "rtl/fp_addsub2.v", "rtl/fp_mul.v", "rtl/fp_mul2.v", "rtl/fp_sqrt.v",
     "rtl/fp_div.v", "rtl/lfsr.v", "rtl/cpu_core.v", "rtl/mmu.v",
 ]
 NOC = ["rtl/shared_mem_backing.v", "rtl/router.v",
@@ -171,6 +171,9 @@ FAST_TESTS = [
       "IRQ mid-mem_stall deferred until the STORE completed", asm=[axasm("trap_irq_stall")]),
     T("qcnot", "tb/tb_qcnot.v", "ALL AXISA QCNOT TESTS PASSED",
       "amp1<->amp3 swap byte-exact", asm=[axasm("qcnot_test")]),
+    T("qhad_cplx", "tb/tb_qhad_cplx.v", "ALL AXISA QHAD-CPLX TESTS PASSED",
+      "v2.2: QHAD on complex amplitudes bit-exact; the next instruction sees all 4 writes",
+      asm=[axasm("qhad_cplx_test")]),
     T("qhad", "tb/tb_qhad.v", "ALL AXISA QHAD TESTS PASSED",
       "Hadamard on |00>: both amplitudes = 1/sqrt(2)", asm=[axasm("qhad_test")]),
     T("trap_irq_qhad", "tb/tb_trap_irq_qhad.v", "ALL AXISA TRAP-IRQ-QHAD TESTS PASSED",
