@@ -46,9 +46,18 @@ module instr_mem #(
     input  wire        clk,
     input  wire [31:0] addr,   // byte address (word-aligned - addr[1:0] ignored)
     input  wire        stall,  // SYNC_READ=1 only - hold instr steady (see header comment)
-    output wire [31:0] instr
+    output wire [31:0] instr,
+    // Program load port (2026-10-30): writes one word while the core is
+    // held in reset. Only the ASIC wrapper (asic/cpu_core_top.v) drives it;
+    // elsewhere it is left open. A program baked in as a ROM would let
+    // synthesis prove most of the core unreachable and delete it - that
+    // happened to AxISA's first ASIC numbers.
+    input  wire        load_we,
+    input  wire [31:0] load_addr,
+    input  wire [31:0] load_data
 );
     reg [31:0] mem [0:MEM_WORDS-1];
+    always @(posedge clk) if (load_we) mem[load_addr[31:2]] <= load_data;
 
     initial begin
         if (INIT_FILE != "") $readmemh(INIT_FILE, mem);

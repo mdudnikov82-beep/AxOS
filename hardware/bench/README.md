@@ -15,7 +15,7 @@ row fewer than `SU3MUL` does — every advantage goes to RV32I.
 | core | instructions | cycles |
 |---|---|---|
 | RV32I single-cycle (`cpu_core.v`) | 96 + LW + ECALL | 125 |
-| RV32I 5-stage pipeline (`cpu_core_pipelined.v`) | 96 + LW + ECALL | 106 |
+| RV32I 5-stage pipeline (`cpu_core_pipelined.v`) | 96 + LW + ECALL | 107 |
 | AxISA `SU3MUL`, v2.0 (one-cycle FPU) | **1** | 79 |
 | AxISA `SU3MUL`, two-stage FPU, waiting after every step | **1** | 133 |
 | AxISA `SU3MUL`, v2.3 pipelined terms | **1** | **52** |
@@ -24,13 +24,16 @@ What the fight showed: the one-instruction advantage was real (1 vs 96
 instructions, 4 bytes vs 384 of code), but after the FPU was split into
 two stages the sequencer was waiting after every multiply and add, and
 lost on cycles. Pipelining the terms (a new one every 4 cycles, see
-`docs/ISA.md` "Pipelined terms") put it ahead: 52 vs 106.
+`docs/ISA.md` "Pipelined terms") put it ahead: 52 vs 107.
 
 Caveats, honestly:
 - Cycles are not time. The RV32I cores do a whole multiply or add in one
-  cycle, so their clock is probably slower than AxISA's; neither RV32I
-  core has been through the sky130 flow, so a time comparison is still
-  open.
+  cycle, so their clock is probably slower than AxISA's. The pipelined
+  core now has its own sky130 flow (`hardware/rv32i_core/asic`,
+  `.github/workflows/openlane-rv32i-synth.yml`, same config and memory
+  sizes as AxISA's, program loaded through a port) to turn cycles into
+  nanoseconds. (The data moved to low addresses to fit its 512-byte
+  memory; that cost the 5-stage core one cycle, 106 -> 107.)
 - AxISA's count excludes building `ψ` in registers (immediates — the
   confinement rule keeps memory data out of R/G/B); RV32I's includes its
   6 `FLW`s of `ψ`.

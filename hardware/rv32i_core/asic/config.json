@@ -1,0 +1,26 @@
+{
+    "DESIGN_NAME": "cpu_core_top",
+    "VERILOG_FILES": [
+        "dir::../rtl/alu.v",
+        "dir::../rtl/regfile.v",
+        "dir::../rtl/fp_regfile.v",
+        "dir::../rtl/imm_gen.v",
+        "dir::../rtl/control_unit.v",
+        "dir::../rtl/instr_mem.v",
+        "dir::../rtl/data_mem.v",
+        "dir::../rtl/fp_addsub.v",
+        "dir::../rtl/fp_mul.v",
+        "dir::../rtl/fp_div.v",
+        "dir::../rtl/fp_sqrt.v",
+        "dir::../rtl/forward_unit.v",
+        "dir::../rtl/fp_forward_unit.v",
+        "dir::../rtl/hazard_unit.v",
+        "dir::../rtl/mmu.v",
+        "dir::../rtl/cpu_core_pipelined.v",
+        "dir::cpu_core_top.v"
+    ],
+    "CLOCK_PORT": "clk",
+    "CLOCK_PERIOD": 100,
+    "FP_SIZING": "relative",
+    "FP_CORE_UTIL": 40
+}

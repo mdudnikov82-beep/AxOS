@@ -40,7 +40,11 @@ module cpu_core_pipelined #(
     output wire [1:0]  bus_mem_size,
     output wire        bus_mem_unsigned,
     input  wire        bus_grant,
-    input  wire [31:0] bus_read_data
+    input  wire [31:0] bus_read_data,
+    // program load port into instr_mem (ASIC wrapper only; open elsewhere)
+    input  wire        imem_load_we,
+    input  wire [31:0] imem_load_addr,
+    input  wire [31:0] imem_load_data
 );
     localparam OP_SYSTEM = 7'b1110011;
     localparam WB_ALU  = 2'b00;
@@ -56,7 +60,8 @@ module cpu_core_pipelined #(
     wire [31:0] pc_plus4_if = pc + 32'd4;
 
     instr_mem #(.MEM_WORDS(INSTR_MEM_WORDS), .INIT_FILE(INSTR_INIT_FILE)) imem (
-        .addr(pc), .instr(if_instr)
+        .clk(clk), .addr(pc), .stall(1'b0), .instr(if_instr),
+        .load_we(imem_load_we), .load_addr(imem_load_addr), .load_data(imem_load_data)
     );
 
     // ==================== IF/ID register ====================

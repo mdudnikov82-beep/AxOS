@@ -1,0 +1,100 @@
+name: RV32I pipelined core ASIC Synthesis (OpenLane2 / sky130)
+
+# The opponent in hardware/bench's fair fight against AxISA: the project's
+# own 5-stage RV32I(F) core through the SAME flow and config as
+# openlane-axisa-synth.yml (100 ns, relative sizing, 40% utilization,
+# 128-word instruction memory loaded through a port, 512-byte data
+# memory), so the two clock rates can be compared and cycles turned into
+# nanoseconds. See hardware/rv32i_core/asic/cpu_core_top.v.
+on:
+  workflow_dispatch:
+
+jobs:
+  synth:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Nix build cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Cache the sky130 PDK (volare)
+        uses: actions/cache@v4
+        with:
+          path: ~/.volare
+          key: volare-pdk-sky130-v1
+
+      - name: OpenLane2 flow - RV32I cpu_core_pipelined.v under sky130
+        working-directory: hardware/rv32i_core/asic
+        run: |
+          nix run --accept-flake-config \
+            github:efabless/openlane2#openlane -- \
+            --pdk-root "$HOME/.volare" \
+            config.json
+
+      - name: Key metrics (always - even if the flow failed or was cut short)
+        if: always()
+        working-directory: hardware/rv32i_core/asic
+        run: |
+          RUN_DIR=$(ls -td runs/RUN_* 2>/dev/null | head -1)
+          [ -z "$RUN_DIR" ] && { echo "no run directory"; exit 0; }
+          M="$RUN_DIR/final/metrics.json"
+          [ -f "$M" ] || M=$(ls -t "$RUN_DIR"/*/state_out.json 2>/dev/null | head -1)
+          echo "metrics from: $M"
+          python3 - "$M" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          m = d.get("metrics", d)
+          keys = [k for k in m if any(t in k for t in (
+              "timing__setup__ws", "timing__setup__wns", "timing__hold__ws", "timing__setup_vio__count",
+              "timing__hold_vio__count", "design__die__area", "design__core__area", "design__instance__count",
+              "design__instance__area", "design__instance__utilization", "route__drc_errors",
+              "antenna__violating", "magic__drc_error", "design__lvs_error"))]
+          for k in sorted(keys):
+              print(f"{k:70s} {m[k]}")
+          PY
+
+      - name: Worst paths by register (slow corner, post-route)
+        # Groups OpenSTA's 1000 worst setup paths by start/end REGISTER name,
+        # using the final netlist to name the anonymous flip-flops - so the
+        # critical path can be read here instead of downloading the run.
+        if: always()
+        working-directory: hardware/rv32i_core/asic
+        run: |
+          RUN_DIR=$(ls -td runs/RUN_* 2>/dev/null | head -1)
+          NL=$(ls "$RUN_DIR"/final/nl/*.nl.v 2>/dev/null | head -1)
+          RPT=$(ls "$RUN_DIR"/*-openroad-stapostpnr/max_ss_100C_1v60/max.rpt 2>/dev/null | head -1)
+          [ -z "$NL" ] || [ -z "$RPT" ] && { echo "no post-route report"; exit 0; }
+          python3 - "$NL" "$RPT" <<'PY'
+          import collections, re, sys
+          nl = open(sys.argv[1]).read()
+          q = {}
+          for m in re.finditer(r'sky130_fd_sc_hd__\w+\s+(_\d+_)\s*\((.*?)\);', nl, re.S):
+              mm = re.search(r'\.Q\(([^)]*)\)', m.group(2))
+              if mm:
+                  q[m.group(1)] = mm.group(1).strip()
+          txt = open(sys.argv[2]).read()
+          paths = re.findall(r'^Startpoint: (\S+).*?^Endpoint: (\S+).*?([-\d.]+)\s+slack', txt, re.M | re.S)
+          g = lambda c: re.sub(r'\[\d+\]', '[]', q.get(c, c)).lstrip(chr(92))
+          if paths:
+              print("worst slack", paths[0][2], g(paths[0][0]), "->", g(paths[0][1]))
+          for (a, b), n in collections.Counter((g(a), g(b)) for a, b, _ in paths).most_common(15):
+              print(f"{n:5d}  {a:35s} -> {b}")
+          PY
+
+      - name: Upload the small reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rv32i-openlane-reports
+          path: |
+            hardware/rv32i_core/asic/runs/*/final/metrics.json
+            hardware/rv32i_core/asic/runs/*/*-openroad-stapostpnr/max_ss_100C_1v60/max.rpt
+            hardware/rv32i_core/asic/runs/*/*-openroad-stapostpnr/summary.rpt
+          if-no-files-found: warn

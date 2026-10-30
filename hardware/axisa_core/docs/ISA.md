@@ -872,7 +872,7 @@ guessed. Mutation testing: 10 of 10 mutants killed.
 two-stage FPU it used to wait after every multiply and add: 14 cycles per
 matrix element. A fair fight showed what that cost (`hardware/bench/`):
 the project's own RV32I cores computed the same `U·ψ` — same rounding
-order, bit-identical result — in 106 cycles (pipelined RV32I, 96
+order, bit-identical result — in 107 cycles (pipelined RV32I, 96
 instructions) and 125 (single-cycle), while `SU3MUL`, one instruction,
 took 133.
 
@@ -898,7 +898,7 @@ Multiplier slots r2–r5 and adder slots r5, r7, r8, r10 are all different
 mod 4, and terms only start on a 4-cycle boundary, so they never collide
 in the FPU; every register is read before the next term overwrites it.
 The operations and their order are unchanged, so every result stays
-bit-identical. `SU3MUL` 133 → **52** cycles (now ahead of RV32I's 106),
+bit-identical. `SU3MUL` 133 → **52** cycles (now ahead of RV32I's 107),
 `PLAQ` 913 → 349, `LINKMUL` 424 → 172, `SWEEP` 4×4 14,548 → 5,389.
 Mutation testing: 8 of 8 killed (issuing every 2 cycles, no drain
 between `PLAQ` phases, finishing before the pipeline is empty, …).
