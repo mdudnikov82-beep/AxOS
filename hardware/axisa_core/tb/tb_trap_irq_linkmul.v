@@ -1,6 +1,6 @@
 // AxISA v2.3 step 1 (see sw/trap_irq_linkmul.axasm): IRQ pulsed inside
 // LINKMUL. +IRQ_PHASE=0 pulses on its first (decode) cycle, 1 mid-sequence
-// (column 1, state D), 2 on its last result write (MW, word 17). Every
+// (a column-1 term at pipeline stage 8), 2 on its last result write (MW, word 17). Every
 // phase must defer the trap until all of C is written: EPC=0x28.
 `timescale 1ns/1ps
 `ifndef INSTR_HEX
@@ -74,7 +74,7 @@ module tb_trap_irq_linkmul;
         if (irq_phase == 0)
             wait (dut.is_linkmul === 1'b1 && dut.su_state_r === 5'd0);
         else if (irq_phase == 1)
-            wait (dut.su_state_r === 5'd6 && dut.su_kk_r === 2'd1);
+            wait (dut.tk_v[8] === 1'b1 && dut.tk_kk[8] === 2'd1); // a column-1 term at pipeline stage 8
         else
             wait (dut.su_state_r === 5'd17 && dut.su_w_r === 5'd17);
         #1; // just after the edge, inside the chosen cycle

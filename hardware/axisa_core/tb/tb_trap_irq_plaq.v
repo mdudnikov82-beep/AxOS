@@ -1,6 +1,6 @@
 // AxISA v2.2 (see sw/trap_irq_plaq.axasm): IRQ pulsed inside PLAQ's
 // 534-cycle sequence. +IRQ_PHASE=0 pulses on its first (decode) cycle,
-// 1 mid-sequence (k = 1, phase 2, state D), 2 on its terminal write cycle
+// 1 mid-sequence (a k = 1 term at pipeline stage 8), 2 on its terminal write cycle
 // PW. Every phase must defer the trap until PLAQ has written:
 // EPC=0x28, n2 = P of a cold square = 1.0f.
 `timescale 1ns/1ps
@@ -75,7 +75,7 @@ module tb_trap_irq_plaq;
         if (irq_phase == 0)
             wait (dut.is_plaq === 1'b1 && dut.su_state_r === 5'd0);
         else if (irq_phase == 1)
-            wait (dut.su_state_r === 5'd6 && dut.su_ph_r === 2'd2 && dut.su_kk_r === 2'd1);
+            wait (dut.tk_v[8] === 1'b1 && dut.tk_kk[8] === 2'd1); // a k = 1 term at pipeline stage 8
         else
             wait (dut.su_state_r === 5'd16);
         #1; // just after the edge, inside the chosen cycle

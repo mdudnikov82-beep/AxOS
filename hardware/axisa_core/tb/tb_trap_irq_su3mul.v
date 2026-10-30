@@ -1,6 +1,6 @@
 // AxISA v2.0 step 5 (see sw/trap_irq_su3mul.axasm): IRQ pulsed inside
 // SU3MUL's 79-cycle sequence. +IRQ_PHASE=0 pulses on its first (decode)
-// cycle, 1 mid-sequence (row 1, state D), 2 on its terminal write-back
+// cycle, 1 mid-sequence (a row-1 term at pipeline stage 8), 2 on its terminal write-back
 // cycle W5. Every phase must defer the trap until SU3MUL has finished:
 // EPC=0x28, r2 = r0 = 1.5f.
 `timescale 1ns/1ps
@@ -72,7 +72,7 @@ module tb_trap_irq_su3mul;
         if (irq_phase == 0)
             wait (dut.is_su3mul === 1'b1 && dut.su_state_r === 4'd0);
         else if (irq_phase == 1)
-            wait (dut.su_state_r === 4'd6 && dut.su_i_r === 2'd1);
+            wait (dut.tk_v[8] === 1'b1 && dut.tk_i[8] === 2'd1); // row 1's accRe add, mid-pipeline
         else
             wait (dut.su_state_r === 4'd14);
         #1; // just after the edge, inside the chosen cycle

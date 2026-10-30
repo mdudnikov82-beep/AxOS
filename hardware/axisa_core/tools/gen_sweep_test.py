@@ -179,9 +179,9 @@ lines = ["            check(tohost_value, 32'd3, \"tohost (n7 = traps taken)\");
 for i, ((base, L, _, note), p) in enumerate(zip(LATS, results)):
     lines.append(f"            check(dut.dmem.mem[{(OUT + 4 * i) // 4}], 32'h{bits(p):08X}, \"<P> of the {L}x{L} lattice ({p:+.6f})\");")
 lines.append(f"            check(n_lat, {len(LATS) + 3}, \"SWEEP instructions seen\");")
-PER_SITE = 3 * (9 + 9 * 14 + 9 * 14 + 3 * 14)   # PLAQ's per-site work, as in its 913 = 1 + 909 + 3
+PER_SITE = 336   # pipelined PLAQ per site; a single site (= PLAQ) is 13 + 336 = 349
 for k, (_, L, _, _) in enumerate(LATS):
-    lines.append(f"            check(lat[{k}], {1 + PER_SITE * L * L + 3}, \"cycles of SWEEP L={L}\");")
+    lines.append(f"            check(lat[{k}], {13 + PER_SITE * L * L}, \"cycles of SWEEP L={L}\");")
 for k in range(3):
     lines.append(f"            check(lat[{len(LATS) + k}], 1, \"cycles of trapping SWEEP #{k}\");")
 tb = tb[:a] + "\n".join(lines) + "\n" + tb[b:]

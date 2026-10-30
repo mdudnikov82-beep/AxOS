@@ -161,7 +161,7 @@ for dst, m in sorted(final.items()):
             w = dst // 4 + 2 * (3 * i + j)
             lines.append(f"            check(dut.dmem.mem[{w}], 32'h{bits(m[i][j].real):08X}, \"C@{dst:03X}[{i}][{j}] Re\");")
             lines.append(f"            check(dut.dmem.mem[{w + 1}], 32'h{bits(m[i][j].imag):08X}, \"C@{dst:03X}[{i}][{j}] Im\");")
-CYC = 1 + 3 * (9 + 9 * 14) + 18
+CYC = 172   # pipelined terms: 1 issue per 4 cycles, then 18 writes
 lines.append(f"            check(n_lat, {len(cases) + 4}, \"LINKMUL instructions seen\");")
 for k in range(len(cases)):
     lines.append(f"            check(lat[{k}], {CYC}, \"cycles of legal LINKMUL #{k}\");")

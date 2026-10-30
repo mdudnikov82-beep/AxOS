@@ -917,44 +917,36 @@ module cpu_core #(
     // them the OTHER way (addsub -> mul), and a mux-selected path in
     // both directions would be a structural combinational loop.
     //
-    // Per term: LRE (fetch Re) LIM (fetch Im, latch a) A (latch b,
-    // p1=a*c) B (p2=b*d) C (tRe=p1-p2, p1=a*d) D (p2=b*c, accRe+=tRe)
-    // E (tIm=p1+p2) F (accIm+=tIm; row done after j=2). 9 terms x 8 +
-    // decode + 6 write-back cycles W0..W5 = 79 cycles - 133 since v2.2:
-    // A, B, C, D, E and F each wait a cycle for the two-stage FPU (fa_wait).
-    // LIM also latches psi_j (su_cr/su_dr) so the multiplier never reads
-    // a register bank directly. W5 is the
-    // terminal cycle (stall drops, pc moves on).
-    //
-    // PLAQ (v2.2) runs on the same sequencer and the same per-term states.
-    // The plaquette of one lattice square is P = (1/3) Re Tr(U1 U2 U3^dag U4^dag)
-    // with U1 = U_mu(x), U2 = U_nu(x+mu), U3 = U_mu(x+nu), U4 = U_nu(x): 4
-    // matrices back to back at N[ns] (U_m at base + 72*(m-1)). No 3x3
-    // product is ever stored: Tr M = sum_k (M e_k)_k, and M e_k is three
-    // matrix*vector products, so the only extra state is one color vector.
-    // For k = 0, 1, 2:
-    //   ph 0: v = U4^dag e_k = conj(row k of U4)  (LRE LIM A per element)
-    //   ph 1: v = U3^dag v   (element (i,j) = conj(U3[j][i]))
-    //   ph 2: v = U2 v
-    //   ph 3: tr += Re (U1 v)_k   (row k only; accRe starts at tr)
-    // conj(a+bi) = a-bi is a sign flip of the loaded Im word, so the term
-    // rounding is exactly SU3MUL's. Then PM: tr = fl(tr * fl(1/3)), and PW
-    // writes N[nd] through the normal path. 1 + 3*(9 + 126 + 126 + 42) + 3
-    // = 913 cycles (14 per term with the two-stage FPU; PM waits too).
-    localparam SU_IDLE = 5'd0, SU_LRE = 5'd1, SU_LIM = 5'd2, SU_A = 5'd3, SU_B = 5'd4,
-               SU_C = 5'd5, SU_D = 5'd6, SU_E = 5'd7, SU_F = 5'd8,
+    // v2.3: the terms are PIPELINED. A new term (one matrix element, or one
+    // PLAQ/LINKMUL vector load) is issued every 4 cycles and walks an
+    // 11-stage token pipeline while the next ones start. Relative to its
+    // issue cycle r0, a MAC term does:
+    //   r0 address Re      r1 address Im, a = Re, latch psi_j (c, d)
+    //   r2 b = Im (conj)   mul a*c      r3 mul b*d   r4 mul a*d   r5 mul b*c
+    //   r5 add tRe = p1 - p2    r7 add tIm = p3 + p4
+    //   r8 add accRe += tRe (first term of a row: init + tRe)
+    //   r10 add accIm += tIm    r11 the row's result is written (last term)
+    // Multiplier slots r2..r5 and adder slots r5, r7, r8, r10 are distinct
+    // mod 4 and issues only happen when su_cnt == 0, so terms never fight
+    // over the FPU; every register is read before the next term rewrites
+    // it. Results are bit for bit the same as the old one-term-at-a-time
+    // sequencer: same operations, same order. The pipeline drains only
+    // where a phase needs the previous phase's vector (PLAQ ph 1 -> 2 -> 3)
+    // and at the end. SU3MUL: 79 cycles (133 with the waiting two-stage
+    // FPU) -> 52; PLAQ 913 -> 349, LINKMUL 424 -> 172, SWEEP 13 + 336 L^2.
+    localparam SU_IDLE = 5'd0, SU_RUN = 5'd1,
                SU_W0 = 5'd9, SU_W1 = 5'd10, SU_W2 = 5'd11, SU_W3 = 5'd12, SU_W4 = 5'd13, SU_W5 = 5'd14,
                SU_PM = 5'd15, SU_PW = 5'd16, SU_MW = 5'd17;
     localparam [31:0] PL_THIRD = 32'h3EAAAAAB; // fl(1/3)
     reg [4:0]  su_state_r;
-    reg [1:0]  su_i_r, su_j_r;
-    reg [31:0] su_base_r, su_a_r, su_b_r, su_p1_r, su_p2_r, su_tre_r, su_tim_r, su_accre_r, su_accim_r;
+    reg [1:0]  su_i_r, su_j_r;     // the NEXT term to issue
+    reg [31:0] su_base_r, su_a_r, su_b_r, su_p1_r, su_p2_r, su_p3_r, su_p4_r, su_tre_r, su_tim_r, su_accre_r, su_accim_r;
     reg [31:0] su_ore0_r, su_oim0_r, su_ore1_r, su_oim1_r, su_ore2_r, su_oim2_r;
-    reg        su_pl_r;            // running a PLAQ, not an SU3MUL
-    reg [1:0]  su_ph_r, su_kk_r;   // PLAQ phase and trace index k
+    reg        su_pl_r;            // running a PLAQ (or SWEEP), not an SU3MUL
+    reg [1:0]  su_ph_r, su_kk_r;   // PLAQ phase and trace index k (next term)
     reg [31:0] su_vre0_r, su_vim0_r, su_vre1_r, su_vim1_r, su_vre2_r, su_vim2_r; // PLAQ's vector v
     reg [31:0] su_tr_r;            // PLAQ's running trace, then the result
-    reg [31:0] su_cr, su_dr;       // psi_j latched in LIM: the FPU never reads a register bank directly
+    reg [31:0] su_cr, su_dr;       // psi_j latched at r1: the FPU never reads a register bank directly
     // LINKMUL (v2.3): C = A' B' column by column - v = column j of B'
     // (PLAQ's "ph 0" loads), then A' v (a "ph 1" mat-vec). All 9 results go
     // to su_res first and are written to C at the end (MW, one word per
@@ -970,6 +962,19 @@ module cpu_core #(
     reg [31:0] su_res [0:17];      // C row-major: word 2(3i+j) = Re, +1 = Im
     reg [4:0]  su_w_r;
     integer    su_ri;
+    reg [1:0]  su_cnt;             // issue slot: a term may start only when 0
+    reg        su_done_r;          // every term has been issued
+
+    // the token pipeline: stage s holds the term issued s cycles ago
+    reg [11:1] tk_v;               // a term is in this stage
+    reg [11:1] tk_mac;             // multiply-accumulate (else a PLAQ/LINKMUL vector load)
+    reg [11:1] tk_conj, tk_first, tk_last, tk_vcopy, tk_acctr;
+    reg [1:0]  tk_j [1:11];
+    reg [1:0]  tk_i [1:11];
+    reg [1:0]  tk_kk [1:11];
+    reg [1:0]  tk_dest [1:11];     // row result: 0 = o_i, 1 = tr (PLAQ ph 3), 2 = su_res (LINKMUL)
+    reg [31:0] tk_addr1;           // element address of the term in stage 1
+    integer    tk_s;
 
     // Matrices must be word-aligned and lie entirely below the UART/MMIO
     // window - SU3MUL/PLAQ read physical memory directly (kernel-only).
@@ -992,9 +997,10 @@ module cpu_core #(
     assign su3_stall  = (su_state_r == SU_IDLE) ? su3_go :
                         (su_state_r != SU_W5 && su_state_r != SU_PW && !su_last_mw);
 
-    // which matrix element this term uses: SU3MUL U[i][j]; PLAQ per phase
-    // LINKMUL: ph 0 loads B'[k][j] (k = su_j_r, column j = su_kk_r), ph 1
-    // multiplies by A'[i][k] (i = su_i_r); a dagger swaps row/col + conj.
+    // ---- the next term to issue: which matrix element ----
+    // SU3MUL U[i][j]; PLAQ per phase; LINKMUL: ph 0 loads B'[k][j]
+    // (k = su_j_r, column j = su_kk_r), ph 1 multiplies by A'[i][k]
+    // (i = su_i_r); a dagger swaps row/col + conj.
     wire [1:0]  lm_row = (su_ph_r == 2'd0) ? (lm_dagb ? su_kk_r : su_j_r) : (lm_daga ? su_j_r : su_i_r);
     wire [1:0]  lm_col = (su_ph_r == 2'd0) ? (lm_dagb ? su_j_r : su_kk_r) : (lm_daga ? su_i_r : su_j_r);
     wire [1:0]  su_row = su_lm_r ? lm_row :
@@ -1005,10 +1011,6 @@ module cpu_core #(
                           su_pl_r && !su_ph_r[1];           // PLAQ ph 0, 1: daggered links
     wire [31:0] su_mbase = (su_lm_r && su_ph_r == 2'd0) ? su_bb_r : su_base_r;
     wire [3:0]  su_k       = {2'b00, su_row} * 4'd3 + {2'b00, su_col};   // 3*row + col, 0..8
-    // SU_A keeps the Im address up: with the two-stage FPU it can last two
-    // cycles (fa_wait), and data_mem's synchronous read must still hold Im
-    // in the second one, when su_b_r takes it.
-    wire        su3_mem_rd = (su_state_r == SU_LRE) || (su_state_r == SU_LIM) || (su_state_r == SU_A);
     // SWEEP: the link this phase needs, with periodic wrap-around
     wire [1:0]  sw_x1   = (su_sx == su_l1) ? 2'd0 : su_sx + 2'd1;
     wire [1:0]  sw_y1   = (su_sy == su_l1) ? 2'd0 : su_sy + 2'd1;
@@ -1018,36 +1020,60 @@ module cpu_core #(
     wire [4:0]  sw_li   = {sw_site, su_mat[0]};                   // mu = 1 for U2, U4
     wire [31:0] sw_off  = {21'd0, sw_li, 6'b0} + {24'd0, sw_li, 3'b0}; // 72 * link index
     wire [31:0] su_moff = su_sw_r ? sw_off : {27'd0, su_mat, 3'b000} * 32'd9;
-    wire [31:0] su3_addr   = su_mbase + su_moff + {25'd0, su_k, 3'b000} +
-                             ((su_state_r == SU_LIM || su_state_r == SU_A) ? 32'd4 : 32'd0);
-    wire [31:0] su_im_in   = {dmem_rdata[31] ^ su_conj, dmem_rdata[30:0]};
+    wire [31:0] su_issue_addr = su_mbase + su_moff + {25'd0, su_k, 3'b000};
 
-    // psi_j: SU3MUL reads it from the color banks, PLAQ from v
-    wire [31:0] su_vre = (su_j_r == 2'd0) ? su_vre0_r : (su_j_r == 2'd1) ? su_vre1_r : su_vre2_r;
-    wire [31:0] su_vim = (su_j_r == 2'd0) ? su_vim0_r : (su_j_r == 2'd1) ? su_vim1_r : su_vim2_r;
+    // what kind of term it is, where its row result goes
+    wire su_is_load  = (su_pl_r || su_lm_r) && (su_ph_r == 2'd0);
+    wire su_row_len3 = !(su_pl_r && su_ph_r == 2'd3);               // PLAQ ph 3: one row (k) only
+    wire su_t_last   = (su_j_r == 2'd2);
+    wire su_t_vcopy  = su_pl_r && (su_ph_r == 2'd1 || su_ph_r == 2'd2) && (su_i_r == 2'd2) && su_t_last;
+    wire [1:0] su_t_dest = su_lm_r ? 2'd2 : (su_pl_r && su_ph_r == 2'd3) ? 2'd1 : 2'd0;
+    // PLAQ ph 2 / ph 3 need the vector the previous phase is still finishing
+    wire su_need_drain = su_pl_r && (su_ph_r == 2'd2 || su_ph_r == 2'd3) && (su_i_r == 2'd0) && (su_j_r == 2'd0);
+    wire su_pipe_busy  = |tk_v;
+    wire su_issue = (su_state_r == SU_RUN) && !su_done_r && (su_cnt == 2'd0) && !(su_need_drain && su_pipe_busy);
+
+    // ---- stage actions ----
+    wire su_mem_r0 = su_issue;
+    wire su_mem_r1 = tk_v[1];
+    wire        su3_mem_rd = su_mem_r0 || su_mem_r1;
+    wire [31:0] su3_addr   = su_mem_r1 ? tk_addr1 + 32'd4 : su_issue_addr;
+    wire [31:0] su_im_in   = {dmem_rdata[31] ^ tk_conj[2], dmem_rdata[30:0]};
+
+    // psi_j at r1: SU3MUL reads it from the color banks, PLAQ / LINKMUL from v
+    wire [1:0]  su_jop = tk_j[1];
+    wire [31:0] su_vre = (su_jop == 2'd0) ? su_vre0_r : (su_jop == 2'd1) ? su_vre1_r : su_vre2_r;
+    wire [31:0] su_vim = (su_jop == 2'd0) ? su_vim0_r : (su_jop == 2'd1) ? su_vim1_r : su_vim2_r;
     wire [31:0] su_c = (su_pl_r || su_lm_r) ? su_vre :
-                       (su_j_r == 2'd0) ? r_porta_data : (su_j_r == 2'd1) ? g_porta_data : b_porta_data; // psi_j Re
+                       (su_jop == 2'd0) ? r_porta_data : (su_jop == 2'd1) ? g_porta_data : b_porta_data; // psi_j Re
     wire [31:0] su_d = (su_pl_r || su_lm_r) ? su_vim :
-                       (su_j_r == 2'd0) ? r_portb_data : (su_j_r == 2'd1) ? g_portb_data : b_portb_data; // psi_j Im
+                       (su_jop == 2'd0) ? r_portb_data : (su_jop == 2'd1) ? g_portb_data : b_portb_data; // psi_j Im
 
-    wire [31:0] su_mul_a = (su_state_r == SU_PM) ? su_tr_r :
-                           (su_state_r == SU_A || su_state_r == SU_C) ? su_a_r : su_b_r;
+    wire m2 = tk_v[2] && tk_mac[2], m3 = tk_v[3] && tk_mac[3], m4 = tk_v[4] && tk_mac[4], m5 = tk_v[5] && tk_mac[5];
+    wire a7 = tk_v[7] && tk_mac[7], a8 = tk_v[8] && tk_mac[8], a10 = tk_v[10] && tk_mac[10];
+    // b at r2 is still on data_mem's output, so r2's multiply uses a; b arrives in su_b_r for r3/r5
+    wire [31:0] su_mul_a = (su_state_r == SU_PM) ? su_tr_r : (m2 || m4) ? su_a_r : su_b_r;
     // fl(1/3), or SWEEP's fl(1/(3 L^2)) for L = 1..4
     wire [31:0] su_scale = !su_sw_r ? PL_THIRD :
                            (su_l1 == 2'd0) ? 32'h3EAAAAAB : (su_l1 == 2'd1) ? 32'h3DAAAAAB :
                            (su_l1 == 2'd2) ? 32'h3D17B426 : 32'h3CAAAAAB;
-    wire [31:0] su_mul_b = (su_state_r == SU_PM) ? su_scale :
-                           (su_state_r == SU_A || su_state_r == SU_D) ? su_cr  : su_dr;
-    wire [31:0] su_add_a = (su_state_r == SU_D) ? su_accre_r : (su_state_r == SU_F) ? su_accim_r : su_p1_r;
-    wire [31:0] su_add_b = (su_state_r == SU_D) ? su_tre_r   : (su_state_r == SU_F) ? su_tim_r   : su_p2_r;
-    wire        su_add_sub = (su_state_r == SU_C);
+    wire [31:0] su_mul_b = (su_state_r == SU_PM) ? su_scale : (m2 || m5) ? su_cr : su_dr;
+    wire [31:0] su_acc_init_re = tk_acctr[8] ? su_tr_r : 32'b0;
+    wire [31:0] su_add_a = a8  ? (tk_first[8]  ? su_acc_init_re : su_accre_r) :
+                           a10 ? (tk_first[10] ? 32'b0          : su_accim_r) :
+                           a7  ? su_p3_r : su_p1_r;                   // r5: p1
+    wire [31:0] su_add_b = a8 ? su_tre_r : a10 ? su_tim_r : a7 ? su_p4_r : su_p2_r;
+    wire        su_add_sub = !(a7 || a8 || a10);                      // r5: tRe = p1 - p2
+
+    wire [4:0]  lm_ri = ({3'b000, tk_i[11]} * 5'd3 + {3'b000, tk_kk[11]}) << 1; // C[i][col] Re index
 
     always @(posedge clk or posedge reset) begin
         if (reset) begin
             su_state_r <= SU_IDLE;
             su_i_r <= 2'd0; su_j_r <= 2'd0;
             su_base_r <= 32'b0; su_a_r <= 32'b0; su_b_r <= 32'b0;
-            su_p1_r <= 32'b0; su_p2_r <= 32'b0; su_tre_r <= 32'b0; su_tim_r <= 32'b0;
+            su_p1_r <= 32'b0; su_p2_r <= 32'b0; su_p3_r <= 32'b0; su_p4_r <= 32'b0;
+            su_tre_r <= 32'b0; su_tim_r <= 32'b0;
             su_accre_r <= 32'b0; su_accim_r <= 32'b0;
             su_ore0_r <= 32'b0; su_oim0_r <= 32'b0; su_ore1_r <= 32'b0;
             su_oim1_r <= 32'b0; su_ore2_r <= 32'b0; su_oim2_r <= 32'b0;
@@ -1058,12 +1084,77 @@ module cpu_core #(
             su_sw_r <= 1'b0; su_sx <= 2'd0; su_sy <= 2'd0; su_l1 <= 2'd0;
             su_lm_r <= 1'b0; su_bb_r <= 32'b0; su_cb_r <= 32'b0; su_w_r <= 5'd0;
             for (su_ri = 0; su_ri < 18; su_ri = su_ri + 1) su_res[su_ri] <= 32'b0;
+            su_cnt <= 2'd0; su_done_r <= 1'b0; tk_addr1 <= 32'b0;
+            tk_v <= 11'b0; tk_mac <= 11'b0; tk_conj <= 11'b0; tk_first <= 11'b0;
+            tk_last <= 11'b0; tk_vcopy <= 11'b0; tk_acctr <= 11'b0;
+            for (tk_s = 1; tk_s <= 11; tk_s = tk_s + 1) begin
+                tk_j[tk_s] <= 2'd0; tk_i[tk_s] <= 2'd0; tk_kk[tk_s] <= 2'd0; tk_dest[tk_s] <= 2'd0;
+            end
         end else if (!halted_r && !fa_wait) begin
+            // ---- the token pipeline shifts every cycle ----
+            tk_v     <= {tk_v[10:1], su_issue};
+            tk_mac   <= {tk_mac[10:1], !su_is_load};
+            tk_conj  <= {tk_conj[10:1], su_conj};
+            tk_first <= {tk_first[10:1], su_j_r == 2'd0};
+            tk_last  <= {tk_last[10:1], su_t_last};
+            tk_vcopy <= {tk_vcopy[10:1], su_t_vcopy};
+            tk_acctr <= {tk_acctr[10:1], su_pl_r && su_ph_r == 2'd3};
+            for (tk_s = 11; tk_s >= 2; tk_s = tk_s - 1) begin
+                tk_j[tk_s] <= tk_j[tk_s - 1]; tk_i[tk_s] <= tk_i[tk_s - 1];
+                tk_kk[tk_s] <= tk_kk[tk_s - 1]; tk_dest[tk_s] <= tk_dest[tk_s - 1];
+            end
+            tk_j[1] <= su_j_r; tk_i[1] <= su_i_r; tk_kk[1] <= su_kk_r; tk_dest[1] <= su_t_dest;
+            if (su_issue) tk_addr1 <= su_issue_addr;
+            su_cnt <= su_cnt + 2'd1;
+
+            // r1: Re arrives; psi_j is latched for the multiplies
+            if (tk_v[1]) begin su_a_r <= dmem_rdata; su_cr <= su_c; su_dr <= su_d; end
+            // r2: Im arrives - a load writes v_j, a MAC keeps it as b
+            if (tk_v[2]) begin
+                if (!tk_mac[2])
+                    case (tk_j[2])
+                        2'd0:    begin su_vre0_r <= su_a_r; su_vim0_r <= su_im_in; end
+                        2'd1:    begin su_vre1_r <= su_a_r; su_vim1_r <= su_im_in; end
+                        default: begin su_vre2_r <= su_a_r; su_vim2_r <= su_im_in; end
+                    endcase
+                else su_b_r <= su_im_in;
+            end
+            // products and sums land one cycle after they are issued
+            if (m2) ;                                      // a*c issued (r2), lands at r3
+            if (m3) su_p1_r <= q_mul_result;               // r3: a*c
+            if (m4) su_p2_r <= q_mul_result;               // r4: b*d
+            if (m5) su_p3_r <= q_mul_result;               // r5: a*d
+            if (tk_v[6] && tk_mac[6]) begin su_p4_r <= q_mul_result; su_tre_r <= q_addsub_result; end // b*c, tRe
+            if (tk_v[8] && tk_mac[8]) su_tim_r <= q_addsub_result;   // tIm
+            if (tk_v[9] && tk_mac[9]) su_accre_r <= q_addsub_result; // accRe
+            // r11: accIm lands; the last term of a row hands the row result on
+            if (tk_v[11] && tk_mac[11]) begin
+                su_accim_r <= q_addsub_result;
+                if (tk_last[11]) begin
+                    if (tk_dest[11] == 2'd2) begin
+                        su_res[lm_ri]        <= su_accre_r;
+                        su_res[lm_ri + 5'd1] <= q_addsub_result;
+                    end else if (tk_dest[11] == 2'd1)
+                        su_tr_r <= su_accre_r;                 // PLAQ: (U1 v)_k joins the trace
+                    else begin
+                        case (tk_i[11])
+                            2'd0:    begin su_ore0_r <= su_accre_r; su_oim0_r <= q_addsub_result; end
+                            2'd1:    begin su_ore1_r <= su_accre_r; su_oim1_r <= q_addsub_result; end
+                            default: begin su_ore2_r <= su_accre_r; su_oim2_r <= q_addsub_result; end
+                        endcase
+                        if (tk_vcopy[11]) begin                // PLAQ ph 1/2: the new vector replaces v
+                            su_vre0_r <= su_ore0_r; su_vim0_r <= su_oim0_r;
+                            su_vre1_r <= su_ore1_r; su_vim1_r <= su_oim1_r;
+                            su_vre2_r <= su_accre_r; su_vim2_r <= q_addsub_result;
+                        end
+                    end
+                end
+            end
+
             case (su_state_r)
                 SU_IDLE: if (su3_go) begin
                     su_base_r  <= n_porta_data;
                     su_i_r     <= 2'd0; su_j_r <= 2'd0;
-                    su_accre_r <= 32'b0; su_accim_r <= 32'b0; // +0.0
                     su_pl_r    <= is_plaq || is_sweep;
                     su_sw_r    <= is_sweep;
                     su_sx      <= 2'd0; su_sy <= 2'd0; su_l1 <= sw_l1;
@@ -1072,86 +1163,38 @@ module cpu_core #(
                     su_cb_r    <= n_portc_data;
                     su_ph_r    <= 2'd0; su_kk_r <= 2'd0;
                     su_tr_r    <= 32'b0;
-                    su_state_r <= SU_LRE;
+                    su_cnt     <= 2'd0; su_done_r <= 1'b0;
+                    su_state_r <= SU_RUN;
                 end
-                SU_LRE: su_state_r <= SU_LIM;
-                SU_LIM: begin su_a_r <= dmem_rdata; su_cr <= su_c; su_dr <= su_d; su_state_r <= SU_A; end
-                SU_A: if ((su_pl_r || su_lm_r) && su_ph_r == 2'd0) begin
-                    // PLAQ ph 0: v_j = conj(U4[k][j]); LINKMUL ph 0: v_j = B'[j][col]. No arithmetic
-                    case (su_j_r)
-                        2'd0:    begin su_vre0_r <= su_a_r; su_vim0_r <= su_im_in; end
-                        2'd1:    begin su_vre1_r <= su_a_r; su_vim1_r <= su_im_in; end
-                        default: begin su_vre2_r <= su_a_r; su_vim2_r <= su_im_in; end
-                    endcase
-                    if (su_j_r == 2'd2) begin
-                        su_j_r  <= 2'd0;
-                        su_ph_r <= 2'd1; su_i_r <= 2'd0;
-                        su_accre_r <= 32'b0; su_accim_r <= 32'b0;
-                    end else
-                        su_j_r  <= su_j_r + 2'd1;
-                    su_state_r <= SU_LRE;
-                end else begin
-                    su_b_r <= su_im_in; su_p1_r <= q_mul_result; su_state_r <= SU_B;
-                end
-                SU_B:   begin su_p2_r <= q_mul_result; su_state_r <= SU_C; end
-                SU_C:   begin su_tre_r <= q_addsub_result; su_p1_r <= q_mul_result; su_state_r <= SU_D; end
-                SU_D:   begin su_p2_r <= q_mul_result; su_accre_r <= q_addsub_result; su_state_r <= SU_E; end
-                SU_E:   begin su_tim_r <= q_addsub_result; su_state_r <= SU_F; end
-                SU_F: begin
-                    if (su_j_r != 2'd2) begin
-                        su_accim_r <= q_addsub_result;
-                        su_j_r     <= su_j_r + 2'd1;
-                        su_state_r <= SU_LRE;
-                    end else if (su_lm_r) begin
-                        // LINKMUL: C[i][col] done - into the result buffer
-                        su_res[lm_ri]        <= su_accre_r;
-                        su_res[lm_ri + 5'd1] <= q_addsub_result;
-                        su_accre_r <= 32'b0; su_accim_r <= 32'b0;
-                        su_j_r     <= 2'd0;
-                        if (su_i_r == 2'd2) begin
-                            su_i_r <= 2'd0;
-                            if (su_kk_r == 2'd2) begin su_w_r <= 5'd0; su_state_r <= SU_MW; end
-                            else begin su_kk_r <= su_kk_r + 2'd1; su_ph_r <= 2'd0; su_state_r <= SU_LRE; end
-                        end else begin
-                            su_i_r <= su_i_r + 2'd1; su_state_r <= SU_LRE;
-                        end
-                    end else if (su_pl_r && su_ph_r == 2'd3) begin
-                        // PLAQ: (U1 v)_k done - the trace absorbs it
-                        su_tr_r    <= su_accre_r;
-                        su_accre_r <= 32'b0; su_accim_r <= 32'b0;
-                        su_j_r     <= 2'd0;
-                        su_ph_r    <= 2'd0;
-                        su_kk_r    <= su_kk_r + 2'd1;
-                        su_state_r <= (su_kk_r == 2'd2) ? SU_PM : SU_LRE;
-                        if (su_kk_r == 2'd2 && su_sw_r && !(su_sx == su_l1 && su_sy == su_l1)) begin
-                            // SWEEP: next site (x fastest), same running trace
-                            su_kk_r    <= 2'd0;
-                            su_sx      <= (su_sx == su_l1) ? 2'd0 : su_sx + 2'd1;
-                            if (su_sx == su_l1) su_sy <= su_sy + 2'd1;
-                            su_state_r <= SU_LRE;
-                        end
-                    end else begin // row i finished
-                        case (su_i_r)
-                            2'd0:    begin su_ore0_r <= su_accre_r; su_oim0_r <= q_addsub_result; end
-                            2'd1:    begin su_ore1_r <= su_accre_r; su_oim1_r <= q_addsub_result; end
-                            default: begin su_ore2_r <= su_accre_r; su_oim2_r <= q_addsub_result; end
-                        endcase
-                        su_accre_r <= 32'b0; su_accim_r <= 32'b0;
-                        su_j_r     <= 2'd0;
-                        su_i_r     <= su_i_r + 2'd1;
-                        if (!su_pl_r)
-                            su_state_r <= (su_i_r == 2'd2) ? SU_W0 : SU_LRE;
+                SU_RUN: begin
+                    if (su_issue) begin
+                        // advance to the next term: j, then row i, then phase / column / k / site
+                        if (!su_t_last) su_j_r <= su_j_r + 2'd1;
                         else begin
-                            su_state_r <= SU_LRE;
-                            if (su_i_r == 2'd2) begin // PLAQ ph 1/2: the new vector replaces v
-                                su_vre0_r <= su_ore0_r; su_vim0_r <= su_oim0_r;
-                                su_vre1_r <= su_ore1_r; su_vim1_r <= su_oim1_r;
-                                su_vre2_r <= su_accre_r; su_vim2_r <= q_addsub_result;
-                                su_i_r    <= 2'd0;
-                                su_ph_r   <= su_ph_r + 2'd1;
-                                if (su_ph_r == 2'd2) su_accre_r <= su_tr_r; // ph 3 accumulates onto tr
+                            su_j_r <= 2'd0;
+                            if (su_is_load) begin                 // PLAQ / LINKMUL vector loaded -> mat-vec
+                                su_ph_r <= 2'd1; su_i_r <= 2'd0;
+                            end else if (su_i_r != 2'd2 && su_row_len3) su_i_r <= su_i_r + 2'd1;
+                            else if (!su_pl_r && !su_lm_r) su_done_r <= 1'b1;          // SU3MUL
+                            else if (su_lm_r) begin                                     // LINKMUL column done
+                                su_i_r <= 2'd0; su_ph_r <= 2'd0;
+                                if (su_kk_r == 2'd2) su_done_r <= 1'b1; else su_kk_r <= su_kk_r + 2'd1;
+                            end else if (su_ph_r != 2'd3) begin                         // PLAQ ph 1 -> 2 -> 3
+                                su_i_r <= 2'd0; su_ph_r <= su_ph_r + 2'd1;
+                            end else begin                                              // PLAQ k done
+                                su_i_r <= 2'd0; su_ph_r <= 2'd0;
+                                if (su_kk_r != 2'd2) su_kk_r <= su_kk_r + 2'd1;
+                                else if (su_sw_r && !(su_sx == su_l1 && su_sy == su_l1)) begin
+                                    su_kk_r <= 2'd0;                                    // SWEEP: next site, x fastest
+                                    su_sx   <= (su_sx == su_l1) ? 2'd0 : su_sx + 2'd1;
+                                    if (su_sx == su_l1) su_sy <= su_sy + 2'd1;
+                                end else su_done_r <= 1'b1;
                             end
                         end
+                    end
+                    if (su_done_r && !su_pipe_busy) begin
+                        su_w_r     <= 5'd0;
+                        su_state_r <= su_lm_r ? SU_MW : su_pl_r ? SU_PM : SU_W0;
                     end
                 end
                 SU_PM:   begin su_tr_r <= q_mul_result; su_state_r <= SU_PW; end
@@ -1166,7 +1209,6 @@ module cpu_core #(
 
     // Write-back: W0/W1 = red (Re, Im), W2/W3 = green, W4/W5 = blue.
     // W0/W2/W4 have odd state codes (9/11/13) -> Re at dst; W1/W3/W5 -> Im at dst+1.
-    wire [4:0]  lm_ri = ({3'b000, su_i_r} * 5'd3 + {3'b000, su_kk_r}) << 1; // C[i][col] Re index
     // LINKMUL's write-back: word w of C, one per cycle, straight into data_mem
     wire        su_mw      = (su_state_r == SU_MW);
     wire [31:0] su_mw_addr = su_cb_r + {25'd0, su_w_r, 2'b00};
@@ -2283,14 +2325,13 @@ module cpu_core #(
     // product is out; the sequencers' own register writes are gated too.
     wire fa_use = (is_qhad && q_state_r >= Q_S2 && q_state_r <= Q_S5) ||
                   (qm_state_r >= QM_S4 && qm_state_r <= QM_S9) ||
-                  (su_state_r == SU_C || su_state_r == SU_D || su_state_r == SU_E || su_state_r == SU_F) ||
                   (rg_state_r == RG_X && rg_mass) || (rg_state_r == RG_Z) ||
                   (mx_state_r == MX_SUB || mx_state_r == MX_SPLIT || mx_state_r == MX_HA || mx_state_r == MX_R) ||
                   // ... and the multiplier's
                   (is_qhad && q_state_r >= Q_S3) ||
                   (qm_state_r >= QM_S2 && qm_state_r <= QM_S5) ||
                   (qm_state_r >= QM_W0 && qm_state_r <= QM_W3) ||
-                  ((su_state_r == SU_A && !((su_pl_r || su_lm_r) && su_ph_r == 2'd0)) || su_state_r == SU_B || su_state_r == SU_PM) ||
+                  (su_state_r == SU_PM) ||                       // SU3MUL/PLAQ/LINKMUL pipeline their own terms
                   (rg_state_r == RG_X && !rg_mass) || (rg_state_r == RG_Y) ||
                   (mx_state_r == MX_BETA || mx_state_r == MX_Y || mx_state_r == MX_HM) ||
                   // REUNIT's add/sub/mul micro-ops
