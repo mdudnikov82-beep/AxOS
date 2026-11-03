@@ -26,10 +26,37 @@ two stages the sequencer was waiting after every multiply and add, and
 lost on cycles. Pipelining the terms (a new one every 4 cycles, see
 `docs/ISA.md` "Pipelined terms") put it ahead: 52 vs 107.
 
+## In nanoseconds (sky130, 2026-10-30)
+
+Both cores through the same OpenLane2 flow and config (runs 41055086346
+AxISA at `b120284`, 41055081636 RV32I): 100 ns target, relative sizing,
+40% utilization, 128-word instruction memory loaded through a port,
+512-byte data memory. Fmax = 1 / (100 ns - worst setup slack).
+
+| | ss 100°C 1.60V | tt 25°C 1.80V | cell area | flip-flops |
+|---|---|---|---|---|
+| AxISA v2.3 | 58.49 ns, 17.1 MHz | 40.27 ns, 24.8 MHz | 958,796 µm² | 13,619 |
+| RV32I 5-stage | 50.67 ns, 19.7 MHz | 27.37 ns, 36.5 MHz | 724,114 µm² | 11,177 |
+
+`U·ψ` = cycles x period:
+
+| | ss | tt |
+|---|---|---|
+| AxISA, 52 cycles | **3.04 µs** | **2.09 µs** |
+| RV32I, 107 cycles | 5.42 µs | 2.93 µs |
+| AxISA faster by | **1.78x** | **1.40x** |
+
+RV32I clocks faster (its worst path: FP forwarding into its one-cycle
+FPU, `ffu.mem_wb_rd -> ex_mem_fpu_result`); AxISA needs half the cycles
+(its worst path: the integer decode -> register file -> trap check ->
+write path). AxISA is 1.32x the area, so per unit of area its lead is
+about 1.35x (ss) and 1.06x (tt). Both: DRC 0, LVS 0, no timing
+violations; antenna violations 349 nets (AxISA) vs 100 (RV32I).
+
 Caveats, honestly:
 - Cycles are not time. The RV32I cores do a whole multiply or add in one
-  cycle, so their clock is probably slower than AxISA's. The pipelined
-  core now has its own sky130 flow (`hardware/rv32i_core/asic`,
+  cycle - and the 5-stage one still clocks faster than AxISA (above).
+  The pipelined core has its own sky130 flow (`hardware/rv32i_core/asic`,
   `.github/workflows/openlane-rv32i-synth.yml`, same config and memory
   sizes as AxISA's, program loaded through a port) to turn cycles into
   nanoseconds. (The data moved to low addresses to fit its 512-byte
