@@ -192,6 +192,11 @@ jobs:
           echo "---"
           tail -60 power_report_vcd.log
 
+      - name: Energy of one U psi (hardware/bench fair fight)
+        # Programs A (setup) and B (setup + U psi) on this run's gate-level
+        # netlist; E = report_power with each run's own VCD x run time.
+        run: bash hardware/bench/energy_power.sh axisa hardware/axisa_core/asic
+
       - name: Show disk usage after
         if: always()
         run: |

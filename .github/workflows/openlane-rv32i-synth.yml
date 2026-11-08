@@ -3,7 +3,7 @@ name: RV32I pipelined core ASIC Synthesis (OpenLane2 / sky130)
 # The opponent in hardware/bench's fair fight against AxISA: the project's
 # own 5-stage RV32I(F) core through the SAME flow and config as
 # openlane-axisa-synth.yml (100 ns, relative sizing, 40% utilization,
-# 128-word instruction memory loaded through a port, 512-byte data
+# 256-word instruction memory loaded through a port, 512-byte data
 # memory), so the two clock rates can be compared and cycles turned into
 # nanoseconds. See hardware/rv32i_core/asic/cpu_core_top.v.
 on:
@@ -87,6 +87,14 @@ jobs:
           for (a, b), n in collections.Counter((g(a), g(b)) for a, b, _ in paths).most_common(15):
               print(f"{n:5d}  {a:35s} -> {b}")
           PY
+
+      - name: Install Icarus Verilog (gate-level simulation)
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+
+      - name: Energy of one U psi (hardware/bench fair fight)
+        # Programs A (setup) and B (setup + U psi) on this run's gate-level
+        # netlist; E = report_power with each run's own VCD x run time.
+        run: bash hardware/bench/energy_power.sh rv32i hardware/rv32i_core/asic
 
       - name: Upload the small reports
         if: always()

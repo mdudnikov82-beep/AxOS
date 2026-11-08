@@ -2,7 +2,7 @@
 // the opponent in hardware/bench's fair fight against AxISA. Same rules as
 // hardware/axisa_core/asic/cpu_core_top.v, so the two numbers compare:
 // same flow and config (100 ns, relative sizing, 40% utilization), the
-// same memory sizes (128 instruction words, 512 data bytes - flip-flops,
+// same memory sizes (256 instruction words, 512 data bytes - flip-flops,
 // no SRAM macro in this flow), and the program LOADED through instr_mem's
 // load port rather than baked in as a ROM, so synthesis cannot prune away
 // the parts a particular program does not use. Every core port is a pin.
@@ -29,7 +29,7 @@ module cpu_core_top (
     input  wire [31:0] bus_read_data
 );
     cpu_core_pipelined #(
-        .INSTR_MEM_WORDS(128),
+        .INSTR_MEM_WORDS(256),
         .DATA_MEM_BYTES(512),
         .INSTR_INIT_FILE("")
     ) core (

@@ -10,8 +10,9 @@
 // is provably dead, so the full core gets synthesized.
 //
 // Memory sizes are ASIC-only parameters: the flow has no SRAM macro, so
-// every memory bit is a flip-flop. 128 words each (512 bytes) keeps the
-// die sane while every piece of logic - decode, datapath, sequencers,
+// every memory bit is a flip-flop. 256 instruction words and 128 data
+// words (512 bytes) keep the die sane (256 since 2026-11: the energy
+// bench's programs, setup + U psi, need ~210 words) while every piece of logic - decode, datapath, sequencers,
 // FPU, MTE tag memory (DATA_MEM_WORDS / 4 granules) - is still there.
 // The simulations keep cpu_core.v's own defaults (1024 / 2048 words).
 `timescale 1ns/1ps
@@ -49,7 +50,7 @@ module cpu_core_top (
     output wire [3:0]   hop_in_ready
 );
     cpu_core #(
-        .INSTR_MEM_WORDS(128),
+        .INSTR_MEM_WORDS(256),
         .DATA_MEM_WORDS(128),
         .INSTR_INIT_FILE("")
     ) core (
