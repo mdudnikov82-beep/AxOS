@@ -1999,11 +1999,16 @@ module cpu_core #(
 
     generate
         if (MTE_ENABLE) begin: g_mte
+            // Cleared by RESET, not by an `initial` block: synthesis drops
+            // `initial`, so on silicon (and in the gate-level netlist) the
+            // tags would power up random and the first LOAD/STORE could
+            // take a false tag fault. Found by the gate-level energy run.
             reg [3:0] tag_mem [0:TAG_GRANULES-1];
             integer ti;
-            initial for (ti = 0; ti < TAG_GRANULES; ti = ti + 1) tag_mem[ti] = 4'd0;
-            always @(posedge clk)
-                if (stg_commit) tag_mem[mtag_gidx] <= mtag_ptr_tag;
+            always @(posedge clk or posedge reset)
+                if (reset) begin
+                    for (ti = 0; ti < TAG_GRANULES; ti = ti + 1) tag_mem[ti] <= 4'd0;
+                end else if (stg_commit) tag_mem[mtag_gidx] <= mtag_ptr_tag;
             assign mem_alloc_tag  = tag_mem[mem_gidx];
             assign mtag_alloc_tag = tag_mem[mtag_gidx];
         end else begin: g_no_mte
