@@ -1,44 +1,85 @@
-# Writes a gate-level "X spy" for the energy testbench: every cycle after
-# reset it prints the PC and which architectural registers hold an X bit,
-# so the first instruction that makes a value unknown can be read off the
-# log. Register bits are found by their flip-flop Q nets in the netlist
-# (OpenLane keeps the RTL register names on them).
-# Usage: python3 gl_probe.py <netlist.v> <tb module> <out.v>
+# Gate-level helpers for the energy testbench, found by the flip-flops' Q
+# nets in the netlist (OpenLane keeps the RTL register names on them).
+# Usage: python3 gl_probe.py <netlist.v> <tb module> <probe.v> <init.v>
+#
+# init.v - zeroes the register-bank flip-flops (R/G/B/N) during reset, by
+#   forcing their D input from the end of the program load until reset is
+#   released (an earlier release would let a reset-time clock edge load
+#   the cell's real, possibly X, D again).
+#   Why: on silicon a register powers up as some 0s and 1s and the
+#   programs' own `ANDI x, x, 0` clears it. In gate-level simulation it
+#   powers up as X, and the cell models are X-pessimistic: in CI run
+#   45048114403 the clear left bits X in most color registers, so the
+#   programs' results came out X in simulation only. The VCD starts
+#   at reset release, after this, and programs A and B get the same
+#   treatment, so it does not touch the energy of U psi.
+# probe.v - the X spy: every cycle after reset, the PC and which of these
+#   registers hold an X bit (used with PROBE=1).
 import collections
 import re
 import sys
 
-nl = open(sys.argv[1]).read()
-tb, out = sys.argv[2], sys.argv[3]
-WANT = [r'core\.pc', r'core\.tohost_r', r'core\.halted_r'] + \
-       [rf'core\.{b}_bank\.regs\[\d\]' for b in 'rgbn']
+nl_path, tb, probe_out, init_out = sys.argv[1:5]
+nl = open(nl_path).read()
+SPY = [r'core\.pc', r'core\.pc_r', r'core\.tohost_r', r'core\.halted_r'] + \
+      [rf'core\.{b}_bank\.regs\[\d\]' for b in 'rgbn']
+INIT = [rf'core\.{b}_bank\.regs\[\d\]' for b in 'rgbn']
 
-groups = collections.defaultdict(dict)   # base name -> {bit: verilog reference}
-for net in re.findall(r'\.Q\(\s*([^()]*?)\s*\)', nl):
+
+def split(net):
+    """'\\a.b[2] [5]' or '\\a.b[2][5] ' -> (base, bit, verilog reference)"""
     m = re.match(r'^(\\\S+)\s*(?:\[(\d+)\])?$', net)
     if not m:
-        continue
+        return None
     name, bit = m.group(1), m.group(2)
-    if bit is None:                       # the index may be part of the escaped name
+    ref = name + ' ' + (f'[{bit}]' if bit is not None else '')
+    if bit is None:
         mm = re.match(r'^(.*)\[(\d+)\]$', name)
-        base, bit = (mm.group(1), int(mm.group(2))) if mm else (name, 0)
-    else:
-        base, bit = name, int(bit)
-    ref = name + ' ' + (f'[{m.group(2)}]' if m.group(2) is not None else '')
-    if any(re.fullmatch(r'\\' + w, base) for w in WANT):
-        groups[base][bit] = ref
+        return (mm.group(1), int(mm.group(2)), ref) if mm else (name, 0, ref)
+    return name, int(bit), ref
 
-L = ["`timescale 1ns/1ps", "module gl_probe;"]
+
+spy = collections.defaultdict(dict)
+init = []                                  # (instance, cell type)
+for cell, inst, pins in re.findall(r'(sky130_fd_sc_hd__\w+)\s+(\\\S+|\w+)\s*\((.*?)\);', nl, re.S):
+    q = re.search(r'\.Q\(\s*([^()]*?)\s*\)', pins)
+    if not q:
+        continue
+    s = split(q.group(1))
+    if not s:
+        continue
+    base, bit, ref = s
+    if any(re.fullmatch(r'\\' + w, base) for w in SPY):
+        spy[base][bit] = ref
+    if any(re.fullmatch(r'\\' + w, base) for w in INIT):
+        init.append((inst + ' ' if inst.startswith('\\') else inst, cell))   # escaped names end in a space
+
+# ---- init.v ----
+L = ["`timescale 1ns/1ps", "module gl_init;", "    initial begin",
+     f"        @(negedge {tb}.we);   // program loaded, reset still held"]
+for inst, cell in init:
+    L.append(f"        force {tb}.dut.{inst}.D = 1'b0;")
+    if 'edfxtp' in cell:
+        L.append(f"        force {tb}.dut.{inst}.DE = 1'b1;")
+L.append(f"        @(negedge {tb}.reset);")
+for inst, cell in init:
+    L.append(f"        release {tb}.dut.{inst}.D;")
+    if 'edfxtp' in cell:
+        L.append(f"        release {tb}.dut.{inst}.DE;")
+L += [f"        $display(\"GL-INIT: {len(init)} register flip-flops zeroed during reset\");",
+      "    end", "endmodule"]
+open(init_out, 'w').write("\n".join(L) + "\n")
+
+# ---- probe.v ----
 cat = {}
-for base, bits in sorted(groups.items()):
-    refs = [f"{tb}.dut.{bits[b]}" for b in sorted(bits, reverse=True)]
-    cat[base] = "{" + ", ".join(refs) + "}"
-names = [b[1:] for b in cat]
-pc = cat.get(r'\core.pc', "32'b0")
-L.append(f"    always @(posedge {tb}.clk) if (!{tb}.reset) begin")
-L.append(f"        #1 $display(\"PROBE c=%0d pc=%h X:" + "%s" * len(cat) + f"\", {tb}.cycle_count, {pc}, " +
-         ", ".join(f'((^{c} === 1\'bx) ? " {b[1:]}" : "")' for b, c in cat.items()) + ");")
-L.append("    end")
-L.append("endmodule")
-open(out, 'w').write("\n".join(L) + "\n")
-print(f"gl_probe: {len(cat)} registers: " + ", ".join(f"{n}({len(groups[chr(92) + n])}b)" for n in names))
+for base, bits in sorted(spy.items()):
+    cat[base] = "{" + ", ".join(f"{tb}.dut.{bits[b]}" for b in sorted(bits, reverse=True)) + "}"
+pc = cat.get(r'\core.pc', cat.get(r'\core.pc_r', "32'b0"))
+L = ["`timescale 1ns/1ps", "module gl_probe;",
+     f"    always @(posedge {tb}.clk) if (!{tb}.reset) begin",
+     f"        #1 $display(\"PROBE c=%0d pc=%h X:" + "%s" * len(cat) + f"\", {tb}.cycle_count, {pc}, " +
+     ", ".join(f'((^{c} === 1\'bx) ? " {b[1:]}" : "")' for b, c in cat.items()) + ");",
+     "    end", "endmodule"]
+open(probe_out, 'w').write("\n".join(L) + "\n")
+print(f"gl_probe: init {len(init)} flip-flops ({collections.Counter(c for _, c in init)}); "
+      f"spy {len(cat)} registers: " + ", ".join(f"{b[1:]}({len(spy[b])}b)" for b in cat))

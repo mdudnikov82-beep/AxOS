@@ -29,13 +29,12 @@ for v in NETLIST SDC SPEF LIB TECH_LEF CELL_LEF PRIMITIVES CELLS; do
 done
 
 cd "$E"
-# PROBE=1: add the X spy (gl_probe.py) - prints, every cycle, the PC and
-# which registers hold X; both programs run even if one fails.
-EXTRA=()
-if [ -n "${PROBE:-}" ]; then
-    python3 "$BENCH/gl_probe.py" "$NETLIST" "tb_energy_$CORE" gl_probe.v
-    EXTRA=(gl_probe.v)
-fi
+# gl_init.v (always): zero the register-bank flip-flops during reset - see
+# gl_probe.py for why. PROBE=1: add the X spy too - prints, every cycle,
+# the PC and which registers hold X; both programs run even if one fails.
+python3 "$BENCH/gl_probe.py" "$NETLIST" "tb_energy_$CORE" gl_probe.v gl_init.v
+EXTRA=(gl_init.v)
+[ -n "${PROBE:-}" ] && EXTRA+=(gl_probe.v)
 iverilog -o "gl_$CORE.vvp" -g2012 -DFUNCTIONAL -DSIM -DGL -DUNIT_DELAY="#1" \
     "$PRIMITIVES" "$CELLS" "$NETLIST" "tb_energy_$CORE.v" "${EXTRA[@]}"
 
