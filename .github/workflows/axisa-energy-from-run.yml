@@ -1,0 +1,61 @@
+name: AxISA energy from an existing synthesis run (no re-synthesis)
+
+# The energy step of openlane-axisa-synth.yml on its own: takes the
+# netlist, SDC and SPEF from a finished synthesis run's artifact and runs
+# hardware/bench/energy_power.sh on them - minutes instead of the ~3 h of
+# a new synthesis. probe=1 adds the gate-level X spy (gl_probe.py).
+# Valid only while the RTL that matters for the run is unchanged.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: openlane-axisa-synth.yml run id whose artifact to use
+        required: true
+      probe:
+        description: "1 = print which registers hold X every cycle"
+        default: "1"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  energy:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Nix build cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Cache the sky130 PDK (volare) - same key as the synthesis workflow
+        uses: actions/cache@v4
+        with:
+          path: ~/.volare
+          key: volare-pdk-sky130-v1
+
+      - name: Download the synthesis run's artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: axisa-cpu-core-openlane-run
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: hardware/axisa_core/asic
+
+      - name: Check the netlist and the PDK are there
+        run: |
+          ls -d hardware/axisa_core/asic/runs/RUN_*/final/nl
+          find "$HOME/.volare" -iname 'sky130_fd_sc_hd.v' | head -1 | grep . || { echo "PDK cache missing"; exit 1; }
+
+      - name: Install Icarus Verilog
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+
+      - name: Energy of one U psi
+        env:
+          PROBE: ${{ inputs.probe == '1' && '1' || '' }}
+        run: bash hardware/bench/energy_power.sh axisa hardware/axisa_core/asic

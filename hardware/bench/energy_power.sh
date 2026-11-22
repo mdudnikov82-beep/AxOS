@@ -29,14 +29,26 @@ for v in NETLIST SDC SPEF LIB TECH_LEF CELL_LEF PRIMITIVES CELLS; do
 done
 
 cd "$E"
+# PROBE=1: add the X spy (gl_probe.py) - prints, every cycle, the PC and
+# which registers hold X; both programs run even if one fails.
+EXTRA=()
+if [ -n "${PROBE:-}" ]; then
+    python3 "$BENCH/gl_probe.py" "$NETLIST" "tb_energy_$CORE" gl_probe.v
+    EXTRA=(gl_probe.v)
+fi
 iverilog -o "gl_$CORE.vvp" -g2012 -DFUNCTIONAL -DSIM -DGL -DUNIT_DELAY="#1" \
-    "$PRIMITIVES" "$CELLS" "$NETLIST" "tb_energy_$CORE.v"
+    "$PRIMITIVES" "$CELLS" "$NETLIST" "tb_energy_$CORE.v" "${EXTRA[@]}"
 
 declare -A P CYC
+FAILED=0
 for PROG in A B; do
     EXP=$(grep "^${CORE}_${PROG} " expect.txt | cut -d' ' -f2)
     vvp "gl_$CORE.vvp" +HEX="${CORE}_${PROG}.hex" +EXPECT="$EXP" +VCD="${CORE}_${PROG}.vcd" | tee "sim_${CORE}_${PROG}.log"
-    grep -q "ENERGY-RUN PASS" "sim_${CORE}_${PROG}.log" || { echo "gate-level run $PROG failed"; exit 1; }
+    if ! grep -q "ENERGY-RUN PASS" "sim_${CORE}_${PROG}.log"; then
+        echo "gate-level run $PROG failed"
+        [ -n "${PROBE:-}" ] && { FAILED=1; continue; }
+        exit 1
+    fi
     CYC[$PROG]=$(grep -o 'cycles=[0-9]*' "sim_${CORE}_${PROG}.log" | cut -d= -f2)
     cat > "power_${PROG}.tcl" <<TCL
 read_lef $TECH_LEF
@@ -54,6 +66,7 @@ TCL
     # Group  Internal  Switching  Leakage  Total  -> the Total row's 4th number (watts)
     P[$PROG]=$(grep -E '^Total ' "power_${CORE}_${PROG}.log" | head -1 | awk '{print $5}')
 done
+[ "$FAILED" = 0 ] || exit 1
 
 python3 - "$CORE" "${P[A]}" "${CYC[A]}" "${P[B]}" "${CYC[B]}" <<'PY'
 import sys
