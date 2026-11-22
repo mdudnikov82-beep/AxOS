@@ -47,10 +47,16 @@ jobs:
           github-token: ${{ github.token }}
           path: hardware/axisa_core/asic
 
-      - name: Check the netlist and the PDK are there
+      - name: Check the netlist; fetch the PDK if the cache missed
+        # The cache is only saved by a synthesis job that SUCCEEDS, so it
+        # can be missing; the version is the one the synthesis runs use.
         run: |
           ls -d hardware/axisa_core/asic/runs/RUN_*/final/nl
-          find "$HOME/.volare" -iname 'sky130_fd_sc_hd.v' | head -1 | grep . || { echo "PDK cache missing"; exit 1; }
+          if ! find "$HOME/.volare" -iname 'sky130_fd_sc_hd.v' 2>/dev/null | grep -q .; then
+            pip install volare
+            volare enable --pdk-root "$HOME/.volare" --pdk sky130 0fe599b2afb6708d281543108caf8310912f54af
+          fi
+          find "$HOME/.volare" -iname 'sky130_fd_sc_hd.v' | head -1 | grep .
 
       - name: Install Icarus Verilog
         run: sudo apt-get update && sudo apt-get install -y iverilog
