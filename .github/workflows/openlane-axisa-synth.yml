@@ -86,6 +86,16 @@ jobs:
               print(f"{k:70s} {m[k]}")
           PY
 
+      - name: Worst paths by register (slow corner, post-route)
+        if: always()
+        working-directory: hardware/axisa_core/asic
+        run: |
+          RUN_DIR=$(ls -td runs/RUN_* 2>/dev/null | head -1)
+          NL=$(ls "$RUN_DIR"/final/nl/*.nl.v 2>/dev/null | head -1)
+          RPT=$(ls "$RUN_DIR"/*-openroad-stapostpnr/max_ss_100C_1v60/max.rpt 2>/dev/null | head -1)
+          [ -z "$NL" ] || [ -z "$RPT" ] && { echo "no post-route report"; exit 0; }
+          python3 worst_paths.py "$NL" "$RPT" 40
+
       - name: Report power (OpenROAD report_power - first real number, vectorless default activity)
         working-directory: hardware/axisa_core/asic
         run: |

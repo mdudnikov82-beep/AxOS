@@ -1,0 +1,44 @@
+name: AxISA worst paths from an existing synthesis run
+
+# Prints the slow-corner critical paths of a finished openlane-axisa-synth
+# run (grouped by register, plus the worst one cell by cell) from its
+# artifact - a couple of minutes, no download of the 1.2 GB artifact to a
+# PC and no re-synthesis. See hardware/axisa_core/asic/worst_paths.py.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: openlane-axisa-synth.yml run id
+        required: true
+      corner:
+        description: STA corner directory
+        default: max_ss_100C_1v60
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  paths:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the synthesis run's artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: axisa-cpu-core-openlane-run
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: hardware/axisa_core/asic
+
+      - name: Worst paths
+        working-directory: hardware/axisa_core/asic
+        run: |
+          RUN_DIR=$(ls -td runs/RUN_* | head -1)
+          NL=$(ls "$RUN_DIR"/final/nl/*.nl.v | head -1)
+          RPT=$(ls "$RUN_DIR"/*-openroad-stapostpnr/${{ inputs.corner }}/max.rpt | head -1)
+          echo "netlist $NL"; echo "report $RPT"
+          python3 worst_paths.py "$NL" "$RPT" 40
