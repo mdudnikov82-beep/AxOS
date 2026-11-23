@@ -31,27 +31,45 @@ lost on cycles. Pipelining the terms (a new one every 4 cycles, see
 Both cores through the same OpenLane2 flow and config (runs 41055086346
 AxISA at `b120284`, 41055081636 RV32I): 100 ns target, relative sizing,
 40% utilization, 128-word instruction memory loaded through a port,
-512-byte data memory. Fmax = 1 / (100 ns - worst setup slack).
+512-byte data memory.
+
+How the clock period is read from a 100 ns run: the SDC gives the
+outside world 20% of the clock on every port (input and output delay
+20 ns, plus 0.25 ns uncertainty). A register-to-register path with slack
+`s` needs `100 - s` ns; a path that starts or ends at a port needs
+`(80 - s) / 0.8`, because the port's 20% shrinks with the clock too.
+The period is the larger of the two, from the worst slack and the worst
+register-to-register slack in OpenLane's `stapostpnr/summary.rpt`.
 
 | | ss 100°C 1.60V | tt 25°C 1.80V | cell area | flip-flops |
 |---|---|---|---|---|
-| AxISA v2.3 | 58.49 ns, 17.1 MHz | 40.27 ns, 24.8 MHz | 958,796 µm² | 13,619 |
-| RV32I 5-stage | 50.67 ns, 19.7 MHz | 27.37 ns, 36.5 MHz | 724,114 µm² | 11,177 |
+| AxISA v2.3 | 48.12 ns, **20.8 MHz** (port) | 25.34 ns, 39.5 MHz (port) | 958,796 µm² | 13,619 |
+| RV32I 5-stage | 50.67 ns, 19.7 MHz (reg) | 24.22 ns, 41.3 MHz (reg) | 724,114 µm² | 11,177 |
 
 `U·ψ` = cycles x period:
 
 | | ss | tt |
 |---|---|---|
-| AxISA, 52 cycles | **3.04 µs** | **2.09 µs** |
-| RV32I, 107 cycles | 5.42 µs | 2.93 µs |
-| AxISA faster by | **1.78x** | **1.40x** |
+| AxISA, 52 cycles | **2.50 µs** | **1.32 µs** |
+| RV32I, 107 cycles | 5.42 µs | 2.59 µs |
+| AxISA faster by | **2.17x** | **1.97x** |
 
-RV32I clocks faster (its worst path: FP forwarding into its one-cycle
-FPU, `ffu.mem_wb_rd -> ex_mem_fpu_result`); AxISA needs half the cycles
-(its worst path: the integer decode -> register file -> trap check ->
-write path). AxISA is 1.32x the area, so per unit of area its lead is
-about 1.35x (ss) and 1.06x (tt). Both: DRC 0, LVS 0, no timing
-violations; antenna violations 349 nets (AxISA) vs 100 (RV32I).
+The two cores clock about the same: AxISA a little faster at ss, RV32I a
+little faster at tt. RV32I's worst path is register to register (FP
+forwarding into its one-cycle FPU, `ffu.mem_wb_rd -> ex_mem_fpu_result`).
+AxISA's ends at the output ports: the whole integer instruction in one
+cycle, from the start of the instruction (`squash_r`) through decode,
+register read and the address adder to `uart_rx_ack`, `uart_tx_valid`,
+`bus_req` and `bus_addr` (`asic/worst_paths.py`). AxISA needs half the
+cycles. It is 1.32x the area, so per unit of area its lead is about
+1.64x (ss) and 1.49x (tt). Both: DRC 0, LVS 0, no timing violations;
+antenna violations 349 nets (AxISA) vs 100 (RV32I).
+
+Correction (2026-11-24): this section first used `1 / (100 - slack)` for
+every path. That is right for RV32I at ss and wrong for port paths,
+which made AxISA look slower: 17.1 / 24.8 MHz instead of 20.8 / 39.5,
+and a 1.78x / 1.40x lead instead of 2.17x / 1.97x. RV32I at tt moved
+too, 36.5 -> 41.3 MHz, because its worst tt path is also a port path.
 
 ## In joules (sky130, 2026-11-23)
 
@@ -78,8 +96,8 @@ Runs: RV32I 42507816103 (`9e0c67f`); AxISA synthesis 44914318764
 (`8f9b8a3`), energy 45207002821 (`axisa-energy-from-run.yml`, on that
 run's netlist). These use a 256-word instruction memory (the energy
 programs do not fit in 128), so the area and clock differ a little from
-the 2026-10-30 table: AxISA 1,183,250 µm², 17.8 / 25.7 MHz (ss / tt);
-RV32I 954,269 µm², 20.7 / 36.6 MHz.
+the 2026-10-30 table: AxISA 1,183,250 µm², 22.1 / 42.4 MHz (ss / tt);
+RV32I 954,269 µm², 20.7 / 42.6 MHz (same way of reading the clock).
 
 Caveats, honestly:
 - `report_power` prints 3 digits (13.6 mW), so each `U·ψ` figure is
@@ -98,7 +116,7 @@ Caveats, honestly:
 ## Caveats on cycles and time
 
 - Cycles are not time. The RV32I cores do a whole multiply or add in one
-  cycle - and the 5-stage one still clocks faster than AxISA (above).
+  cycle, and the 5-stage one still clocks about as fast as AxISA (above).
   The pipelined core has its own sky130 flow (`hardware/rv32i_core/asic`,
   `.github/workflows/openlane-rv32i-synth.yml`, same config and memory
   sizes as AxISA's, program loaded through a port) to turn cycles into
