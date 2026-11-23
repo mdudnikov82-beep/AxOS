@@ -53,7 +53,50 @@ write path). AxISA is 1.32x the area, so per unit of area its lead is
 about 1.35x (ss) and 1.06x (tt). Both: DRC 0, LVS 0, no timing
 violations; antenna violations 349 nets (AxISA) vs 100 (RV32I).
 
+## In joules (sky130, 2026-11-23)
+
+Energy of one `U·ψ` on the synthesized netlists (`gen_bench_energy.py`,
+`energy_power.sh`). Two programs per core, both write their own data
+first (a netlist has no memory to preload): A = setup + check + halt,
+B = setup + `U·ψ` + check + halt. Each runs on the gate-level netlist
+at the SDC's 100 ns clock; OpenROAD `report_power` (tt 25°C 1.80V) reads
+that run's own VCD; E = power x cycles x 100 ns, and `U·ψ` = E(B) -
+E(A), which cancels each ISA's own way of setting data up. Both
+programs check a checksum, on RTL and on the netlist.
+
+| | A | B | `U·ψ` = B - A |
+|---|---|---|---|
+| AxISA | 158 cycles, 13.6 mW, 214.9 nJ | 209 cycles, 13.6 mW, 284.2 nJ | 51 cycles, **69.4 nJ** |
+| RV32I | 80 cycles, 11.7 mW, 93.6 nJ | 180 cycles, 12.1 mW, 217.8 nJ | 100 cycles, 124.2 nJ |
+
+**AxISA uses 1.79x less energy per `U·ψ`.** Per cycle it costs more
+(1.36 vs ~1.2 nJ: a bigger core, more flip-flops on the clock), but it
+needs half the cycles. Dynamic energy per cycle hardly depends on the
+clock rate, so the ratio holds at each core's own Fmax too.
+
+Runs: RV32I 42507816103 (`9e0c67f`); AxISA synthesis 44914318764
+(`8f9b8a3`), energy 45207002821 (`axisa-energy-from-run.yml`, on that
+run's netlist). These use a 256-word instruction memory (the energy
+programs do not fit in 128), so the area and clock differ a little from
+the 2026-10-30 table: AxISA 1,183,250 µm², 17.8 / 25.7 MHz (ss / tt);
+RV32I 954,269 µm², 20.7 / 36.6 MHz.
+
 Caveats, honestly:
+- `report_power` prints 3 digits (13.6 mW), so each `U·ψ` figure is
+  good to about ±2 nJ; the ratio to about ±0.06.
+- Most of the power is the clock tree and flip-flops (no clock gating
+  in either core), so energy follows cycles closely. With clock gating
+  both numbers would drop and the ratio could change.
+- In the gate-level runs the register-bank flip-flops are set to 0
+  during reset (`gl_probe.py`'s `gl_init.v`): the cell models keep X
+  through the programs' own `ANDI x, x, 0` clears, which work on
+  silicon. This happens before the VCD starts and is the same for A and B.
+- The gate-level run found a real bug on the way: AxISA's MTE tag memory
+  was cleared by an `initial` block, which synthesis drops (fixed in
+  `8f9b8a3`, reset now clears it).
+
+## Caveats on cycles and time
+
 - Cycles are not time. The RV32I cores do a whole multiply or add in one
   cycle - and the 5-stage one still clocks faster than AxISA (above).
   The pipelined core has its own sky130 flow (`hardware/rv32i_core/asic`,
