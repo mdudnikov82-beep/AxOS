@@ -31,7 +31,7 @@ module cpu_core_fpga_top (
     input  wire        uart_rx_ready_in,
     output wire        uart_rx_ack
 );
-    cpu_core core (
+    cpu_core #(.PREDECODE(0)) core ( // registered instruction read -> ECP5 block RAM
         .clk(clk), .reset(reset),
         .halted(halted), .tohost_value(tohost_value),
         .irq_in(irq_in),

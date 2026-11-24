@@ -229,6 +229,15 @@ FAST_TESTS = [
     T("mmu", "tb/tb_mmu.v", "ALL AXISA MMU TESTS PASSED",
       "tohost=342, translated STORE/LOAD + recoverable page fault", asm=[axasm("mmu_test")]),
 ]
+# The same core with PREDECODE=0 (registered fetch, decode in the execute
+# cycle - the form FPGA builds use, see fpga/). With PREDECODE=1 the
+# default, nothing else would run that form. Picked to cover branches,
+# the squash bubble, stalls, IRQs on squash and stall cycles, a sequencer
+# and the MMU; on 2026-11-24 a per-cycle trace of all 64 tests was also
+# identical between the two forms.
+FAST_TESTS += [dict(t, name=t["name"] + "_predecode0", defines=(*t["defines"], "AXISA_PREDECODE0"))
+               for t in FAST_TESTS if t["name"] in
+               ("milestone2", "su3mul", "trap_irq_squash", "trap_irq_stall", "trap_irq_su3mul_1", "mmu")]
 
 # CI-sized mesh, generated fresh into a temp dir. The committed
 # rtl/soc_top.v is the 22x11x19 (4597-core) scale record, which no longer

@@ -32,7 +32,8 @@ module cpu_core_fpga_top (
     output wire        uart_rx_ack
 );
     cpu_core #(
-        .INSTR_INIT_FILE("sw/test1.hex")
+        .INSTR_INIT_FILE("sw/test1.hex"),
+        .PREDECODE(0) // registered instruction read -> ECP5 block RAM (see cpu_core.v)
     ) core (
         .clk(clk), .reset(reset),
         .imem_load_we(1'b0), .imem_load_addr(32'b0), .imem_load_data(32'b0), // program is baked in here

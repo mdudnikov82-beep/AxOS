@@ -79,7 +79,18 @@ module cpu_core #(
     // 0 removes the tag memory and every tag check (LDG reads tag 0,
     // STG does nothing) - for area-constrained builds.
     parameter MTE_ENABLE    = 1,
-    parameter PT_INDEX_BITS = 4
+    parameter PT_INDEX_BITS = 4,
+    // Decode one cycle early (control_unit_stage, end of control_unit.v):
+    // 1 = the instruction memory is read combinationally, control_unit
+    // decodes it in the fetch cycle and its outputs are registered - the
+    // decoder is off the execute cycle's critical path (about 14 ns of
+    // the 31 ns of logic of sky130's worst ss path). Same cycles, same
+    // one-bubble redirect. 0 = the original registered fetch + squash
+    // mask + decode in the execute cycle, for FPGA builds whose
+    // instruction memory must have a registered read to become block RAM.
+    // (-DAXISA_PREDECODE0 flips the default, so run_sim.py can run tests
+    // that instantiate the core without parameters in the FPGA form too.)
+    parameter PREDECODE     = `ifdef AXISA_PREDECODE0 0 `else 1 `endif
 ) (
     // v2.1 program-load port into instr_mem (see instr_mem.v) - real
     // chips (and the ASIC wrapper) load their program from outside.
@@ -172,12 +183,20 @@ module cpu_core #(
     assign halted = halted_r;
 
     wire [31:0] instr_fetched;
-    instr_mem #(.MEM_WORDS(INSTR_MEM_WORDS), .INIT_FILE(INSTR_INIT_FILE), .SYNC_READ(1)) imem (
+    instr_mem #(.MEM_WORDS(INSTR_MEM_WORDS), .INIT_FILE(INSTR_INIT_FILE), .SYNC_READ(PREDECODE ? 0 : 1)) imem (
         .clk(clk), .addr(pc), .stall(cpu_stall),
         .load_we(imem_load_we), .load_addr(imem_load_addr), .load_data(imem_load_data),
         .instr(instr_fetched)
     );
-    wire [31:0] instr = squash_r ? 32'b0 : instr_fetched;
+    // PREDECODE=1: instr_fetched is mem[pc], the NEXT instruction, and
+    // the decode register (control_unit_stage) takes over both of the
+    // old fetch register's jobs: it holds while cpu_stall (as instr_mem's
+    // `stall` did) and it loads decode(0) when the next cycle will be a
+    // squash bubble (as the `squash_r ? 0 : ...` mask did). The next
+    // squash_r is exactly what the pc block below computes: it updates
+    // only when !halted_r && !cpu_stall, to `squash_r ? 0 : is_redirect`.
+    // squash_r itself still gates commits (opcode 0 is a real instruction).
+    wire decode_kill = halted_r ? squash_r : (!squash_r && is_redirect);
 
     wire [1:0]  bank;
     wire [3:0]  alu_funct;
@@ -267,8 +286,9 @@ module cpu_core #(
     wire        tag_fault;    // v2.1: MTE tag mismatch on LOAD/STORE
     wire        str_stall;  // v2.0 step 4: STRING's distance-dependent stall
 
-    control_unit cu (
-        .instr(instr),
+    control_unit_stage #(.REGISTERED(PREDECODE)) cu (
+        .clk(clk), .reset(reset), .en(!cpu_stall), .kill(decode_kill), .squash(squash_r),
+        .instr(instr_fetched),
         .bank(bank), .alu_funct(alu_funct), .branch_funct(branch_funct),
         .rd_addr(rd_addr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .imm(imm),
         .alu_src_imm(alu_src_imm),
