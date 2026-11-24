@@ -1483,7 +1483,9 @@ module control_unit_stage #(parameter REGISTERED = 1) (
         assign reg_write = q_reg_write;
         assign illegal = q_illegal;
 `ifndef SYNTHESIS
-        // the constants above must still be decode(0)
+`ifndef VERILATOR
+        // the constants above must still be decode(0) - simulation only:
+        // OpenLane lints with Verilator, which rejects the #delay below
         wire [1:0] z_bank;
         wire [3:0] z_alu_funct;
         wire [2:0] z_branch_funct;
@@ -1591,6 +1593,7 @@ module control_unit_stage #(parameter REGISTERED = 1) (
                 $finish;
             end
         end
+`endif
 `endif
     end else begin: g_comb
         control_unit u (.instr(squash ? 32'b0 : instr), .bank(bank), .alu_funct(alu_funct), .branch_funct(branch_funct), .rd_addr(rd_addr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .imm(imm), .alu_src_imm(alu_src_imm), .is_branch(is_branch), .is_halt(is_halt), .tohost_reg(tohost_reg), .is_gluon(is_gluon), .gluon_funct(gluon_funct), .gluon_rs1_bank(gluon_rs1_bank), .gluon_rs1_reg(gluon_rs1_reg), .gluon_rs2_bank(gluon_rs2_bank), .gluon_rs2_reg(gluon_rs2_reg), .is_baryon(is_baryon), .baryon_rr(baryon_rr), .baryon_gg(baryon_gg), .baryon_bb(baryon_bb), .baryon_funct(baryon_funct), .is_meson(is_meson), .meson_funct(meson_funct), .meson_q1_bank(meson_q1_bank), .meson_q1_reg(meson_q1_reg), .meson_q2_bank(meson_q2_bank), .meson_q2_reg(meson_q2_reg), .is_load(is_load), .is_store(is_store), .mem_nd_ns(mem_nd_ns), .mem_base_bank(mem_base_bank), .mem_base_reg(mem_base_reg), .mem_imm(mem_imm), .is_jal(is_jal), .jal_imm(jal_imm), .is_rft(is_rft), .is_syscall(is_syscall), .is_mvsr(is_mvsr), .mvsr_dir(mvsr_dir), .mvsr_selreg(mvsr_selreg), .mvsr_nreg(mvsr_nreg), .is_ptb(is_ptb), .ptb_dir(ptb_dir), .ptb_nreg(ptb_nreg), .is_qhad(is_qhad), .qhad_qubit(qhad_qubit), .qhad_half(qhad_half), .is_qcnot(is_qcnot), .qcnot_ctrl(qcnot_ctrl), .q_reg_i(q_reg_i), .q_reg_j(q_reg_j), .is_string(is_string), .is_regge(is_regge), .regge_funct(regge_funct), .regge_ns(regge_ns), .is_jalr(is_jalr), .jalr_ns(jalr_ns), .is_mtag(is_mtag), .mtag_funct(mtag_funct), .mtag_ns(mtag_ns), .is_plaq(is_plaq), .is_linkmul(is_linkmul), .is_reunit(is_reunit), .is_sweep(is_sweep), .is_hop(is_hop), .hop_funct(hop_funct), .hop_dir(hop_dir), .hop_reg(hop_reg), .is_cim(is_cim), .cim_funct(cim_funct), .cim_ns(cim_ns), .cim_nt(cim_nt), .sw_l1(sw_l1), .ru_ns(ru_ns), .lm_daga(lm_daga), .lm_dagb(lm_dagb), .lm_na(lm_na), .lm_nb(lm_nb), .lm_nc(lm_nc), .is_metro(is_metro), .metro_weight(metro_weight), .metro_na(metro_na), .metro_nb(metro_nb), .metro_nbeta(metro_nbeta), .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src), .is_qmeasure(is_qmeasure), .qmeasure_qubit(qmeasure_qubit), .qmeasure_nd(qmeasure_nd), .qm_reg_a0(qm_reg_a0), .qm_reg_a1(qm_reg_a1), .qm_reg_b0(qm_reg_b0), .qm_reg_b1(qm_reg_b1), .write_bank(write_bank), .write_addr(write_addr), .reg_write(reg_write), .illegal(illegal));
