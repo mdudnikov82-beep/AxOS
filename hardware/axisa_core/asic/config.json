@@ -12,6 +12,7 @@
         "dir::../rtl/fp_sqrt.v",
         "dir::../rtl/fp_div.v",
         "dir::../rtl/lfsr.v",
+        "dir::../rtl/cim.v",
         "dir::../rtl/mmu.v",
         "dir::../rtl/cpu_core.v",
         "dir::cpu_core_top.v"

@@ -23,7 +23,7 @@ from asm_test1 import (
     BEQ, BNE, BLT, BGE, BLTU, BGEU,
     SEL_EPC, SEL_CAUSE, SEL_SMODE, SEL_SIE,
     alur, alui, branch, halt, gluon, baryon, meson, load, store, jal,
-    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq, metro, linkmul, reunit, sweep, hop,
+    rft, syscall, mvsr, ptb, qhad, qcnot, qmeasure, string, su3mul, mtag, jalr, regge, plaq, metro, linkmul, reunit, sweep, hop, cim,
     GLUON_FUNCT, GLUON_COLORS,
     write_hex,
 )
@@ -303,6 +303,25 @@ def encode_one(mnemonic, ops, iaddr, labels):
         if not (0 <= dst <= 6 and 0 <= src <= 6):
             raise AsmError("SU3MUL: dst/src must be 0..6 (each names the pair idx, idx+1)")
         return su3mul(ns, dst, src)
+
+    # v2.4: CIM - compute-in-memory block (docs/ISA.md "CIM"), N operands:
+    # CIM.PUT ns, nt / CIM.GET nd, ns / CIM.ADD nt / CIM.FINDEQ nd, nt /
+    # CIM.FINDLT nd, nt / CIM.FIRST nd / CIM.SUM nd / CIM.SUMF nd
+    CIM_OPS = {  # funct, operand roles
+        'CIM.PUT': (0, ('ns', 'nt')), 'CIM.GET': (1, ('nd', 'ns')), 'CIM.ADD': (2, ('nt',)),
+        'CIM.FINDEQ': (3, ('nd', 'nt')), 'CIM.FINDLT': (4, ('nd', 'nt')), 'CIM.FIRST': (5, ('nd',)),
+        'CIM.SUM': (6, ('nd',)), 'CIM.SUMF': (7, ('nd',)),
+    }
+    if m in CIM_OPS:
+        funct, roles = CIM_OPS[m]
+        if len(ops) != len(roles):
+            raise AsmError(f"{m}: expected {len(roles)} operand(s): {', '.join(roles)}")
+        f = {'nd': 0, 'ns': 0, 'nt': 0}
+        for tok, role in zip(ops, roles):
+            bk, r = parse_reg(tok)
+            require_bank(bk, r, N, m, role)
+            f[role] = r
+        return cim(funct, f['nd'], f['ns'], f['nt'])
 
     # v2.3 step 4: HOP - nearest-neighbour links. HOP SEND +X, N1 / HOP RECV N2, -X
     # (one word, register <-> link); HOP SENDL +Y, N1 / HOP RECVL -Y, N3 (an

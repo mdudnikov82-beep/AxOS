@@ -1,0 +1,94 @@
+# AxISA v2.4 (see docs/ISA.md's "CIM" section): the compute-in-memory
+# block. tb/tb_cim.v checks the results stored at 0x400.. and pulses an
+# external IRQ inside the first CIM.SUM (its first, middle or last cycle,
+# +IRQ_PHASE=0/1/2): the IRQ must wait until the SUM is done.
+#
+# The block is filled with w[i] = 3i - 50 (i = 0..63): 17 negative
+# words (i <= 16), sum 3*2016 - 64*50 = 2848.
+#
+# The handler counts traps in n7 (+= 256 + cause). Expected: the IRQ
+# (cause 2) and two ILLEGAL (cause 0) -> n7 = 3*256 + 2 = 770.
+    ADDI N1, N0, 1
+    MTSIE N1                 # saved_ie = 1
+    MTSMODE N1               # saved_mode = kernel
+    ADDI N1, N0, 0x40
+    MTEPC N1
+    RFT                      # continue at main with ie = 1
+
+.org 0x40
+main:
+    ADDI N1, N0, 0           # i
+    ADDI N2, N0, -50         # 3i - 50
+    ADDI N3, N0, 64
+fill:
+    CIM.PUT N1, N2           # w[i] = 3i - 50
+    ADDI N2, N2, 3
+    ADDI N1, N1, 1
+    BNE N1, N3, fill
+
+    ADDI N5, N0, 10
+    CIM.GET N4, N5           # w[10] = -20
+    STORE N4, N0, 0x400
+    CIM.SUM N4               # 2848 (the IRQ lands in here)
+    ADDI N1, N4, 0           # an ordinary instruction: the IRQ is taken here
+    STORE N1, N0, 0x404      # (LOAD/STORE and CIM instructions defer IRQs too)
+    CIM.FINDLT N4, N0        # words < 0: 17
+    STORE N4, N0, 0x408
+    CIM.SUMF N4              # their sum: 3*136 - 17*50 = -442
+    STORE N4, N0, 0x40C
+    CIM.FIRST N4             # 0
+    STORE N4, N0, 0x410
+
+    ADDI N6, N0, 100
+    CIM.ADD N6               # all 64 words += 100, in one instruction
+    CIM.SUM N4               # 2848 + 6400 = 9248
+    STORE N4, N0, 0x414
+    ADDI N6, N0, 110
+    CIM.FINDEQ N4, N6        # only w[20] = 60 - 50 + 100: 1
+    STORE N4, N0, 0x418
+    CIM.FIRST N4             # 20
+    STORE N4, N0, 0x41C
+    ADDI N5, N0, 5
+    CIM.PUT N5, N6           # w[5] = 110 too
+    CIM.FINDEQ N4, N6        # 2
+    STORE N4, N0, 0x420
+    CIM.FIRST N4             # 5
+    STORE N4, N0, 0x424
+    CIM.SUMF N4              # 110 + 110 = 220
+    STORE N4, N0, 0x428
+    ADDI N6, N0, 1
+    CIM.FINDEQ N4, N6        # no word is 1: 0
+    STORE N4, N0, 0x42C
+    CIM.FIRST N4             # none: 0xFFFFFFFF
+    STORE N4, N0, 0x430
+    CIM.SUMF N4              # empty sum: 0
+    STORE N4, N0, 0x434
+
+# an index past the 64 words is ILLEGAL, and nothing is written
+    ADDI N5, N0, 64
+    ADDI N4, N0, 77
+    CIM.PUT N5, N6           # ILLEGAL
+    CIM.GET N4, N5           # ILLEGAL - n4 stays 77
+    STORE N4, N0, 0x438
+    ADDI N5, N0, 63
+    CIM.GET N4, N5           # w[63] = 189 - 50 + 100 = 239 (PUT to 64 did not wrap)
+    STORE N4, N0, 0x43C
+    CIM.GET N4, N0           # w[0] = -50 + 100 = 50
+    STORE N4, N0, 0x444
+    HALT N7                  # tohost = 770
+
+.org 0x200
+handler:
+    MFCAUSE N3
+    ADDI N7, N7, 256
+    ADD N7, N7, N3           # n7 += 256 + cause
+    ADDI N3, N3, -2
+    BNE N3, N0, sync
+    MFEPC N3                 # IRQ: resume where it was taken
+    STORE N3, N0, 0x440      # [0x440] = its EPC, for the testbench
+    RFT
+sync:
+    MFEPC N3                 # ILLEGAL: skip the instruction
+    ADDI N3, N3, 4
+    MTEPC N3
+    RFT

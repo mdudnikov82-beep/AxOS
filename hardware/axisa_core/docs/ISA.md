@@ -1,4 +1,4 @@
-# AxISA v2.3 — Instruction Set Architecture Specification
+# AxISA v2.4 — Instruction Set Architecture Specification
 
 A from-scratch 32-bit ISA (not RISC-V, not derived from it) built
 around quantum chromodynamics (QCD). This document is the single
@@ -150,6 +150,7 @@ bit range across classes, to keep decode simple).
 | `11001`          | REUNIT   | lattice QCD: pull a matrix back onto SU(3), in place, microcoded (v2.3) |
 | `11010`          | SWEEP    | lattice QCD: average plaquette of a whole periodic L×L lattice (v2.3) |
 | `11011`          | HOP      | nearest-neighbour links: `SEND`/`RECV` a word, `SENDL`/`RECVL` an 18-word link (v2.3) |
+| `11100`          | CIM      | compute-in-memory: 64 words that add, compare and sum themselves (v2.4) |
 | others           | —        | reserved for v0.2+                        |
 
 ### ALUR — `opcode[31:27] bank[26:25] funct[24:21] rd[20:18] rs1[17:15] rs2[14:12] (unused[11:0])`
@@ -1329,6 +1330,56 @@ the ~420 `STG`s into the heap and checks each tag rule as an invariant.
 Not done (honest limits): one size class only, and no MMU guard pages
 — the kernel-mode allocator bypasses translation, so per-granule tags
 are the guard instead.
+
+## CIM — compute in memory (v2.4)
+
+`CIM` — `opcode[31:27] funct[26:24] nd[23:21] ns[20:18] nt[17:15] (unused[14:0])`,
+all operands `N` registers.
+
+A von Neumann machine keeps memory and computing apart and moves every
+word between them through one port: adding 100 to 64 words is 64
+LOADs, 64 adds and 64 STOREs. The CIM block is a small memory, 64 words
+of 32 bits, that computes on itself: **every word has its own adder and
+its own comparators**, so one instruction works on all 64 words at once,
+and an associative memory's one match flag per word remembers the
+result of a search.
+
+| `funct` | Assembler | Effect | Cycles |
+|---|---|---|---|
+| `000` | `CIM.PUT ns, nt` | `w[ns] = nt` | 1 |
+| `001` | `CIM.GET nd, ns` | `nd = w[ns]` | 1 |
+| `010` | `CIM.ADD nt` | `w[i] += nt` for all 64 words | 1 |
+| `011` | `CIM.FINDEQ nd, nt` | `flag[i] = (w[i] == nt)`; `nd` = number of flags set | 1 |
+| `100` | `CIM.FINDLT nd, nt` | `flag[i] = (w[i] < nt)`, signed; `nd` = number of flags set | 1 |
+| `101` | `CIM.FIRST nd` | `nd` = lowest `i` with `flag[i]`, or `0xFFFFFFFF` if none | 1 |
+| `110` | `CIM.SUM nd` | `nd` = sum of all 64 words (mod 2³²) | 3 |
+| `111` | `CIM.SUMF nd` | `nd` = sum of the flagged words | 3 |
+
+- `CIM.PUT`/`CIM.GET` with `ns ≥ 64` are `ILLEGAL` (nothing is written;
+  the index does not wrap). Every other combination is defined.
+- `SUM`/`SUMF` add through a 4-ary tree with a register after each level
+  (64 → 16 → 4 → 1); the core stalls for two cycles and `nd` is written
+  once, on the last. `FINDLT` with `nt = 0` then `SUMF` sums the negative
+  words; `FINDEQ` then `FIRST` is a one-instruction search.
+- The words and flags are cleared by reset. Nothing else touches them:
+  they are not in the address space, so the MMU and memory tags do not
+  apply, and CIM works in user mode. A kernel that switches between
+  programs that use CIM saves and restores it with `GET`/`PUT` (the
+  flags are not saved: a program re-runs its `FIND` after a switch).
+- External IRQs are deferred across every CIM instruction, like
+  LOAD/STORE and the sequencers, so an IRQ never lands inside a `SUM`.
+
+In the hardware (`rtl/cim.v`) the 64 adders and 128 comparators are
+real: 2,752 flip-flops (64 words, 64 flags, the tree's 20 partial sums)
+and about 190 adders and comparators (one adder per word that also does
+FINDLT's compare, 63 in the tree, 64 equality compares), the price
+of not moving the data. `sw/cim_test.axasm` (`tb/tb_cim.v`) checks every
+operation, the `ILLEGAL` index, the no-write-while-stalled rule and an
+IRQ in each of `SUM`'s three cycles; 8 of 8 mutants killed.
+`tb/tb_cim_fuzz.v` runs the block alone against a behavioral model
+(20,000 random operations, edge values for FINDLT's signed overflow). The
+cycle-for-cycle comparison with ordinary code on the same core is in
+`hardware/bench/README.md` ("Von Neumann vs compute-in-memory").
 
 ## Memory tagging (v2.1 step 1, MTE-style)
 

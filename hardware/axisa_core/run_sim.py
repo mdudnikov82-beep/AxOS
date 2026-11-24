@@ -26,7 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = [
     "rtl/alu.v", "rtl/regbank.v", "rtl/instr_mem.v", "rtl/data_mem.v",
     "rtl/control_unit.v", "rtl/fp_addsub.v", "rtl/fp_addsub2.v", "rtl/fp_mul.v", "rtl/fp_mul2.v", "rtl/reunit_rom.v", "rtl/fp_sqrt.v",
-    "rtl/fp_div.v", "rtl/lfsr.v", "rtl/cpu_core.v", "rtl/mmu.v",
+    "rtl/fp_div.v", "rtl/lfsr.v", "rtl/cim.v", "rtl/cpu_core.v", "rtl/mmu.v",
 ]
 NOC = ["rtl/shared_mem_backing.v", "rtl/router.v",
        "rtl/noc_core_adapter.v", "rtl/noc_mem_adapter.v"]
@@ -228,6 +228,18 @@ FAST_TESTS = [
       "IRQ on QMEASURE's terminal cycle deferred, EPC=0x28", asm=[axasm("trap_irq_qmeasure")]),
     T("mmu", "tb/tb_mmu.v", "ALL AXISA MMU TESTS PASSED",
       "tohost=342, translated STORE/LOAD + recoverable page fault", asm=[axasm("mmu_test")]),
+    T("cim_fuzz", "tb/tb_cim_fuzz.v", "ALL AXISA CIM FUZZ TESTS PASSED",
+      "rtl/cim.v vs a behavioral model, 20000 random ops incl. signed-overflow compares",
+      src=["rtl/cim.v"]),
+    T("cim_0", "tb/tb_cim.v", "ALL AXISA CIM TESTS PASSED",
+      "v2.4: compute-in-memory - all 8 ops on 64 words, ILLEGAL index, IRQ in SUM cycle 0",
+      asm=[axasm("cim_test")], plusargs=("+IRQ_PHASE=0",)),
+    T("cim_1", "tb/tb_cim.v", "ALL AXISA CIM TESTS PASSED",
+      "v2.4: compute-in-memory - all 8 ops on 64 words, ILLEGAL index, IRQ in SUM cycle 1",
+      asm=[axasm("cim_test")], plusargs=("+IRQ_PHASE=1",)),
+    T("cim_2", "tb/tb_cim.v", "ALL AXISA CIM TESTS PASSED",
+      "v2.4: compute-in-memory - all 8 ops on 64 words, ILLEGAL index, IRQ in SUM cycle 2",
+      asm=[axasm("cim_test")], plusargs=("+IRQ_PHASE=2",)),
 ]
 # The same core with PREDECODE=0 (registered fetch, decode in the execute
 # cycle - the form FPGA builds use, see fpga/). With PREDECODE=1 the

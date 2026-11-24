@@ -267,6 +267,10 @@ module cpu_core #(
     wire [1:0]  hop_funct, hop_dir;
     wire [2:0]  hop_reg;
     wire        hop_stall; // v2.3 step 4 (see the HOP section)
+    wire        is_cim;    // v2.4 compute-in-memory block (see the CIM section)
+    wire [2:0]  cim_funct, cim_ns, cim_nt;
+    wire        cim_stall, cim_bad;
+    wire [31:0] cim_result;
     wire [1:0]  sw_l1;
     wire [2:0]  ru_ns;
     wire        rx_active, rx_stall; // v2.3 step 2 rx-sequencer (see the REUNIT section)
@@ -314,7 +318,8 @@ module cpu_core #(
         .is_jalr(is_jalr), .jalr_ns(jalr_ns),
         .is_mtag(is_mtag), .mtag_funct(mtag_funct), .mtag_ns(mtag_ns),
         .is_plaq(is_plaq), .is_reunit(is_reunit), .ru_ns(ru_ns), .is_sweep(is_sweep), .sw_l1(sw_l1),
-        .is_hop(is_hop), .hop_funct(hop_funct), .hop_dir(hop_dir), .hop_reg(hop_reg), .is_linkmul(is_linkmul), .lm_daga(lm_daga), .lm_dagb(lm_dagb),
+        .is_hop(is_hop), .hop_funct(hop_funct), .hop_dir(hop_dir), .hop_reg(hop_reg),
+        .is_cim(is_cim), .cim_funct(cim_funct), .cim_ns(cim_ns), .cim_nt(cim_nt), .is_linkmul(is_linkmul), .lm_daga(lm_daga), .lm_dagb(lm_dagb),
         .lm_na(lm_na), .lm_nb(lm_nb), .lm_nc(lm_nc), .is_metro(is_metro), .metro_weight(metro_weight),
         .metro_na(metro_na), .metro_nb(metro_nb), .metro_nbeta(metro_nbeta),
         .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src),
@@ -501,6 +506,8 @@ module cpu_core #(
         if (is_reunit) begin n_addr_a = ru_ns; n_addr_b = ru_ns; end
         // HOP: the word to send, or the link's memory base
         if (is_hop) begin n_addr_a = hop_reg; n_addr_b = hop_reg; end
+        // CIM: the index (PUT/GET) on A, the value on B
+        if (is_cim) begin n_addr_a = cim_ns; n_addr_b = cim_nt; end
     end
 
     // ==================== Register banks ====================
@@ -527,7 +534,7 @@ module cpu_core #(
     // 533 intermediate writes nobody can observe (the core is stalled and
     // the last one is right) - a mutation test confirmed that, so this
     // gate saves register-file switching rather than fixing a result.
-    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !data_illegal && !str_stall && !rg_stall && !su3_stall && !mx_stall && !hop_stall && !any_trap;
+    wire gated_reg_write = reg_write && !mem_stall && !squash_r && !data_illegal && !str_stall && !rg_stall && !su3_stall && !mx_stall && !hop_stall && !cim_stall && !any_trap;
     wire r_write_en = gated_reg_write && (write_bank == BANK_R);
     wire g_write_en = gated_reg_write && (write_bank == BANK_G);
     wire b_write_en = gated_reg_write && (write_bank == BANK_B);
@@ -746,7 +753,7 @@ module cpu_core #(
 
     assign data_illegal = (is_baryon && baryon_funct == 3'b011 && !baryon_qn_ok) ||
                           (is_meson  && meson_funct  == 2'b10  && !meson_qn_ok) ||
-                          su3_bad || mtag_bad || rx_bad || hl_bad;
+                          su3_bad || mtag_bad || rx_bad || hl_bad || cim_bad;
 
     // ==================== STRING (v2.0 step 4: asymptotic freedom) ====================
     // d = |qa - qb|, the two quarks' positions as signed integers (33-bit
@@ -1618,7 +1625,7 @@ module cpu_core #(
     // never touch memory, so mem_stall's own components are provably
     // always 0 whenever q_stall/qm_stall is 1) - see the "QHAD / QCNOT"
     // and "QMEASURE" sections above for q_stall/qm_stall's definitions.
-    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall || su3_stall || rg_stall || mx_stall || rx_stall || hop_stall || fa_wait;
+    wire cpu_stall = mem_stall || q_stall || qm_stall || str_stall || su3_stall || rg_stall || mx_stall || rx_stall || hop_stall || cim_stall || fa_wait;
 
     // Walker's own PTE fetch takes priority (its read must land on
     // data_mem's shared port); otherwise a translated user-mode access
@@ -1993,6 +2000,21 @@ module cpu_core #(
         end
     end
 
+    // ==================== CIM: compute-in-memory (v2.4) ====================
+    // 64 words that compute on themselves (rtl/cim.v, docs/ISA.md "CIM").
+    // PUT/ADD/FINDEQ/FINDLT change its state only when the instruction
+    // retires (like STG); SUM/SUMF stall the core for their adder tree and
+    // write N[nd] through the normal path on the terminal cycle. External
+    // IRQs are deferred across every CIM instruction (any_trap below).
+    cim cimb (
+        .clk(clk), .reset(reset),
+        .active(is_cim), .funct(cim_funct),
+        .commit(is_cim && !cpu_stall && !any_trap && !halted_r),
+        .run(!halted_r),
+        .idx(n_porta_data), .val(n_portb_data),
+        .result(cim_result), .bad(cim_bad), .stall(cim_stall)
+    );
+
     // ==================== Memory tagging (v2.1 step 1, MTE-style) ====================
     // One 4-bit allocation tag per 16-byte granule of the private data
     // memory. A LOAD/STORE to private memory must carry the same tag in
@@ -2167,7 +2189,7 @@ module cpu_core #(
     // reproducibility.
     // STRING (v2.0) gets the same deferral: its write commits on the
     // terminal cycle, so an IRQ there would make RFT redo it.
-    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul && !is_plaq && !is_linkmul && !is_reunit && !is_sweep && !is_hop && !is_regge && !is_metro);
+    wire any_trap  = sync_trap || (irq_taken && !is_load && !is_store && !is_qhad && !is_qcnot && !is_qmeasure && !is_string && !is_su3mul && !is_plaq && !is_linkmul && !is_reunit && !is_sweep && !is_hop && !is_regge && !is_metro && !is_cim);
 
     wire [2:0] next_cause = (illegal || data_illegal) ? CAUSE_ILLEGAL :
                              is_syscall     ? CAUSE_SYSCALL :
@@ -2198,6 +2220,7 @@ module cpu_core #(
                          is_regge  ? rg_p_r :
                          (is_plaq || is_sweep) ? su_tr_r :
                          is_hop    ? hop_mb_data[hop_dir] : // RECV
+                         is_cim    ? cim_result :
                          is_metro  ? mx_result :
                          is_load   ? effective_dmem_rdata :
                          (is_jal || is_jalr) ? (pc_r + 32'd4) :

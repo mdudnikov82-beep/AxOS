@@ -250,6 +250,15 @@ def hop(funct, d, reg):
     return (OP_HOP << 27) | (funct << 25) | (d << 23) | (reg << 20)
 
 
+# v2.4: CIM - compute-in-memory block. funct 0 PUT 1 GET 2 ADD 3 FINDEQ
+# 4 FINDLT 5 FIRST 6 SUM 7 SUMF; nd = result, ns = index, nt = value (all N)
+OP_CIM = 0b11100
+
+
+def cim(funct, nd, ns, nt):
+    return (OP_CIM << 27) | (funct << 24) | (nd << 21) | (ns << 18) | (nt << 15)
+
+
 def write_hex(program, out_path):
     with open(out_path, "w") as f:
         for word in program:

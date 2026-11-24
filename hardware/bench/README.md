@@ -113,6 +113,30 @@ Caveats, honestly:
   was cleared by an `initial` block, which synthesis drops (fixed in
   `8f9b8a3`, reset now clears it).
 
+## Von Neumann vs compute-in-memory (2026-11-24)
+
+The same AxISA core, two ways to work on 64 words (`w[i] = 3i - 50`):
+the classic way, words in data memory, and AxISA v2.4's CIM block
+(`docs/ISA.md` "CIM"), where every word has its own adder and
+comparators. The classic code is fully unrolled straight-line
+LOAD/ALU/STORE (no loop, no address arithmetic). Both sides must give
+the same answers; after ADD the data memory and the block must be equal
+word for word (`gen_bench_cim.py`, `cim/tb_cim_bench.v`).
+
+| job | von Neumann | CIM | |
+|---|---|---|---|
+| sum of 64 words | 194 cycles (64 x LOAD + ADD) | 4 (`CIM.SUM` + STORE) | **48x** |
+| count the negative ones | 258 (64 x LOAD + SLTI + ADD) | 2 (`CIM.FINDLT` + STORE) | **129x** |
+| add 100 to every word | 256 (64 x LOAD + ADDI + STORE) | 2 (ADDI + `CIM.ADD`) | **128x** |
+
+What this does not say yet:
+- Cycles are not time or energy. The block adds 2,752 flip-flops and
+  about 190 adders and comparators to the core, which costs area, clock
+  power and maybe clock rate; the sky130 numbers come next.
+- Getting data into the block is still one word per cycle (`CIM.PUT`).
+  CIM wins when data stays in the block and is worked on many times -
+  not for a single pass over data that lives somewhere else.
+
 ## Caveats on cycles and time
 
 - Cycles are not time. The RV32I cores do a whole multiply or add in one
@@ -132,6 +156,13 @@ Run (from `hardware/bench`):
 python gen_bench_su3mul.py
 iverilog -o single.vvp ../rv32i_core/rtl/{alu,regfile,fp_regfile,imm_gen,control_unit,instr_mem,data_mem,fp_addsub,fp_mul,fp_div,mmu,fp_sqrt,cpu_core}.v tb_bench_rv32i_single.v && vvp single.vvp
 iverilog -o pipe.vvp ../rv32i_core/rtl/{alu,regfile,fp_regfile,imm_gen,control_unit,instr_mem,data_mem,fp_addsub,fp_mul,fp_div,forward_unit,fp_forward_unit,hazard_unit,mmu,fp_sqrt,cpu_core_pipelined}.v tb_bench_rv32i_pipe.v && vvp pipe.vvp
+```
+
+CIM fight (from `hardware/bench`; the iverilog line is the AxISA core's file list):
+
+```
+python gen_bench_cim.py
+iverilog -o cim/bench.vvp ../axisa_core/rtl/{alu,regbank,instr_mem,data_mem,control_unit,fp_addsub,fp_addsub2,fp_mul,fp_mul2,reunit_rom,fp_sqrt,fp_div,lfsr,cim,cpu_core,mmu}.v cim/tb_cim_bench.v && vvp cim/bench.vvp
 ```
 
 AxISA's count is checked by `tb/tb_su3mul.v` (`python run_sim.py su3mul`
