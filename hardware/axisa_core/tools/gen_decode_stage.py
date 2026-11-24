@@ -110,7 +110,9 @@ L.append("        end")
 for n, w in ports:
     L.append(f"        assign {n} = q_{n};")
 L.append("`ifndef SYNTHESIS")
-L.append("        // the constants above must still be decode(0)")
+L.append("`ifndef VERILATOR")
+L.append("        // the constants above must still be decode(0) - simulation only:")
+L.append("        // OpenLane lints with Verilator, which rejects the #delay below")
 for n, w in ports:
     L.append(f"        wire [{w-1}:0] z_{n};")
 L.append("        control_unit z (.instr(32'b0), " + ", ".join(f".{n}(z_{n})" for n, _ in ports) + ");")
@@ -121,6 +123,7 @@ L.append('                $display("FATAL: control_unit_stage is stale - re-run 
 L.append("                $finish;")
 L.append("            end")
 L.append("        end")
+L.append("`endif")
 L.append("`endif")
 L.append("    end else begin: g_comb")
 L.append("        control_unit u (.instr(squash ? 32'b0 : instr), " + ", ".join(f".{n}({n})" for n, _ in ports) + ");")
