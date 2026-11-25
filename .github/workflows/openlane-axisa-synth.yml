@@ -16,7 +16,11 @@ jobs:
     # The full (unpruned) core takes ~2h+ in OpenLane alone - detailed
     # routing by itself took 34 min on 2026-10-28, and that run hit the
     # old 120-minute limit at the antenna check, one of the last steps.
-    timeout-minutes: 300
+    # 360 = GitHub's ceiling for hosted runners. With CIM (v2.4) the core
+    # is a third bigger and the 2026-11-24 run hit the old 300 during
+    # Magic DRC; the flow step itself stops at 330 so the metrics, worst
+    # paths and the run-directory upload below still get their minutes.
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
@@ -56,6 +60,7 @@ jobs:
 
       - name: OpenLane2 flow - AxISA cpu_core.v under sky130
         working-directory: hardware/axisa_core/asic
+        timeout-minutes: 330
         run: |
           nix run --accept-flake-config \
             github:efabless/openlane2#openlane -- \

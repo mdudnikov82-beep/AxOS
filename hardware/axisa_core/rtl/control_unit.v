@@ -208,6 +208,17 @@ module control_unit (
     output reg  [1:0]  write_bank,
     output reg  [2:0]  write_addr,
 
+    // Register-file read addresses, as far as the instruction alone
+    // decides them (cpu_core overlays the multi-cycle sequencers' own
+    // addresses on top). Decoded here so that the decode register holds
+    // them ready - the long `if (is_x) addr = ...` priority chain used to
+    // sit on the core's critical path between the decode register and
+    // the register-file read. rd_n_late: one of the N-bank readers that
+    // outrank the SU3 sequencer (MTAG, JALR, REGGE, METRO, LINKMUL,
+    // REUNIT, HOP, CIM) - see cpu_core's n_addr routing.
+    output reg  [2:0]  rd_r_a, rd_r_b, rd_g_a, rd_g_b, rd_b_a, rd_b_b, rd_n_a, rd_n_b,
+    output reg          rd_n_late,
+
     output reg          reg_write,
     output reg          illegal
 );
@@ -757,11 +768,115 @@ module control_unit (
             end
         endcase
     end
+
+    // ==================== Register-file read addresses ====================
+    // Moved here from cpu_core.v unchanged (the instruction-only part of
+    // its per-bank routing). Every input is one of this module's own
+    // outputs above, so this is still a pure function of `instr`.
+    always @(*) begin
+        rd_r_a = 3'b0; rd_r_b = 3'b0; rd_g_a = 3'b0; rd_g_b = 3'b0;
+        rd_b_a = 3'b0; rd_b_b = 3'b0; rd_n_a = 3'b0; rd_n_b = 3'b0;
+        // R, G, B: the same shape, bank by bank
+        if (is_gluon) begin
+            case ({gluon_rs1_bank == BANK_R, gluon_rs2_bank == BANK_R})
+                2'b11: begin rd_r_a = gluon_rs1_reg; rd_r_b = gluon_rs2_reg; end
+                2'b10: begin rd_r_a = gluon_rs1_reg; rd_r_b = gluon_rs1_reg; end
+                2'b01: begin rd_r_a = gluon_rs2_reg; rd_r_b = gluon_rs2_reg; end
+                default: ;
+            endcase
+            case ({gluon_rs1_bank == BANK_G, gluon_rs2_bank == BANK_G})
+                2'b11: begin rd_g_a = gluon_rs1_reg; rd_g_b = gluon_rs2_reg; end
+                2'b10: begin rd_g_a = gluon_rs1_reg; rd_g_b = gluon_rs1_reg; end
+                2'b01: begin rd_g_a = gluon_rs2_reg; rd_g_b = gluon_rs2_reg; end
+                default: ;
+            endcase
+            case ({gluon_rs1_bank == BANK_B, gluon_rs2_bank == BANK_B})
+                2'b11: begin rd_b_a = gluon_rs1_reg; rd_b_b = gluon_rs2_reg; end
+                2'b10: begin rd_b_a = gluon_rs1_reg; rd_b_b = gluon_rs1_reg; end
+                2'b01: begin rd_b_a = gluon_rs2_reg; rd_b_b = gluon_rs2_reg; end
+                default: ;
+            endcase
+        end else if (is_baryon) begin
+            rd_r_a = baryon_rr; rd_r_b = baryon_rr;
+            rd_g_a = baryon_gg; rd_g_b = baryon_gg;
+            rd_b_a = baryon_bb; rd_b_b = baryon_bb;
+        end else if (is_meson) begin
+            case ({meson_q1_bank == BANK_R, meson_q2_bank == BANK_R})
+                2'b11: begin rd_r_a = meson_q1_reg; rd_r_b = meson_q2_reg; end
+                2'b10: begin rd_r_a = meson_q1_reg; rd_r_b = meson_q1_reg; end
+                2'b01: begin rd_r_a = meson_q2_reg; rd_r_b = meson_q2_reg; end
+                default: ;
+            endcase
+            case ({meson_q1_bank == BANK_G, meson_q2_bank == BANK_G})
+                2'b11: begin rd_g_a = meson_q1_reg; rd_g_b = meson_q2_reg; end
+                2'b10: begin rd_g_a = meson_q1_reg; rd_g_b = meson_q1_reg; end
+                2'b01: begin rd_g_a = meson_q2_reg; rd_g_b = meson_q2_reg; end
+                default: ;
+            endcase
+            case ({meson_q1_bank == BANK_B, meson_q2_bank == BANK_B})
+                2'b11: begin rd_b_a = meson_q1_reg; rd_b_b = meson_q2_reg; end
+                2'b10: begin rd_b_a = meson_q1_reg; rd_b_b = meson_q1_reg; end
+                2'b01: begin rd_b_a = meson_q2_reg; rd_b_b = meson_q2_reg; end
+                default: ;
+            endcase
+        end else if (is_load || is_store) begin
+            if (mem_base_bank == BANK_R) begin rd_r_a = mem_base_reg; rd_r_b = mem_base_reg; end
+            if (mem_base_bank == BANK_G) begin rd_g_a = mem_base_reg; rd_g_b = mem_base_reg; end
+            if (mem_base_bank == BANK_B) begin rd_b_a = mem_base_reg; rd_b_b = mem_base_reg; end
+        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr && !is_ptb) begin // ALUR/ALUI/BRANCH (and illegal/default, harmlessly)
+            if (bank == BANK_R) begin rd_r_a = rs1_addr; rd_r_b = rs2_addr; end
+            if (bank == BANK_G) begin rd_g_a = rs1_addr; rd_g_b = rs2_addr; end
+            if (bank == BANK_B) begin rd_b_a = rs1_addr; rd_b_b = rs2_addr; end
+        end
+
+        // N - the only bank with STORE's double read and HALT's tohost
+        // read; BARYON never reads N (it only writes nd)
+        if (is_gluon) begin
+            case ({gluon_rs1_bank == BANK_N, gluon_rs2_bank == BANK_N})
+                2'b11: begin rd_n_a = gluon_rs1_reg; rd_n_b = gluon_rs2_reg; end
+                2'b10: begin rd_n_a = gluon_rs1_reg; rd_n_b = gluon_rs1_reg; end
+                2'b01: begin rd_n_a = gluon_rs2_reg; rd_n_b = gluon_rs2_reg; end
+                default: ;
+            endcase
+        end else if (is_meson) begin
+            case ({meson_q1_bank == BANK_N, meson_q2_bank == BANK_N})
+                2'b11: begin rd_n_a = meson_q1_reg; rd_n_b = meson_q2_reg; end
+                2'b10: begin rd_n_a = meson_q1_reg; rd_n_b = meson_q1_reg; end
+                2'b01: begin rd_n_a = meson_q2_reg; rd_n_b = meson_q2_reg; end
+                default: ;
+            endcase
+        end else if (is_load) begin
+            if (mem_base_bank == BANK_N) begin rd_n_a = mem_base_reg; rd_n_b = mem_base_reg; end
+        end else if (is_store) begin
+            rd_n_a = mem_nd_ns; // the value to store - ALWAYS read from N
+            rd_n_b = (mem_base_bank == BANK_N) ? mem_base_reg : mem_nd_ns;
+        end else if (is_halt) begin
+            rd_n_a = tohost_reg; rd_n_b = tohost_reg;
+        end else if (is_mvsr) begin
+            // dir=1 (N -> special) reads the value to capture
+            if (mvsr_dir) begin rd_n_a = mvsr_nreg; rd_n_b = mvsr_nreg; end
+        end else if (is_ptb) begin
+            if (ptb_dir) begin rd_n_a = ptb_nreg; rd_n_b = ptb_nreg; end
+        end else if (!is_jal && !is_rft && !is_syscall) begin // ALUR/ALUI/BRANCH
+            if (bank == BANK_N) begin rd_n_a = rs1_addr; rd_n_b = rs2_addr; end
+        end
+        // (cpu_core puts the SU3 sequencer's matrix base here when none
+        // of the readers below is active)
+        rd_n_late = is_mtag || is_jalr || is_regge || is_metro || is_linkmul || is_reunit || is_hop || is_cim;
+        if (is_mtag)    begin rd_n_a = mtag_ns;  rd_n_b = mtag_ns;  end // MTAG: its pointer
+        if (is_jalr)    begin rd_n_a = jalr_ns;  rd_n_b = jalr_ns;  end // JALR: the target base
+        if (is_regge)   begin rd_n_a = regge_ns; rd_n_b = regge_ns; end // REGGE: mass / spin
+        if (is_metro)   begin rd_n_a = metro_na; rd_n_b = metro_nb; end // METRO: P_old / P_new (cpu_core swaps in beta on MX_SUB)
+        if (is_linkmul) begin rd_n_a = lm_na;    rd_n_b = lm_nb;    end // LINKMUL: matrix bases A, B
+        if (is_reunit)  begin rd_n_a = ru_ns;    rd_n_b = ru_ns;    end // REUNIT: the matrix base
+        if (is_hop)     begin rd_n_a = hop_reg;  rd_n_b = hop_reg;  end // HOP: the word / link base
+        if (is_cim)     begin rd_n_a = cim_ns;   rd_n_b = cim_nt;   end // CIM: index on A, value on B
+    end
 endmodule
 
 // ===== control_unit_stage: GENERATED by tools/gen_decode_stage.py - do not edit by hand =====
 //
-// 100 control_unit outputs, 296 bits. REGISTERED=1: control_unit
+// 109 control_unit outputs, 321 bits. REGISTERED=1: control_unit
 // decodes `instr` (the instruction memory's combinational read of the
 // next pc) and the outputs are registered - updated when `en`
 // (!cpu_stall), forced to decode(0) by `kill` (the next cycle is a
@@ -869,6 +984,15 @@ module control_unit_stage #(parameter REGISTERED = 1) (
     output wire [2:0] qm_reg_b1,
     output wire [1:0] write_bank,
     output wire [2:0] write_addr,
+    output wire [2:0] rd_r_a,
+    output wire [2:0] rd_r_b,
+    output wire [2:0] rd_g_a,
+    output wire [2:0] rd_g_b,
+    output wire [2:0] rd_b_a,
+    output wire [2:0] rd_b_b,
+    output wire [2:0] rd_n_a,
+    output wire [2:0] rd_n_b,
+    output wire [0:0] rd_n_late,
     output wire [0:0] reg_write,
     output wire [0:0] illegal
 );
@@ -1069,11 +1193,29 @@ module control_unit_stage #(parameter REGISTERED = 1) (
         reg  [1:0] q_write_bank;
         wire [2:0] d_write_addr;
         reg  [2:0] q_write_addr;
+        wire [2:0] d_rd_r_a;
+        reg  [2:0] q_rd_r_a;
+        wire [2:0] d_rd_r_b;
+        reg  [2:0] q_rd_r_b;
+        wire [2:0] d_rd_g_a;
+        reg  [2:0] q_rd_g_a;
+        wire [2:0] d_rd_g_b;
+        reg  [2:0] q_rd_g_b;
+        wire [2:0] d_rd_b_a;
+        reg  [2:0] q_rd_b_a;
+        wire [2:0] d_rd_b_b;
+        reg  [2:0] q_rd_b_b;
+        wire [2:0] d_rd_n_a;
+        reg  [2:0] q_rd_n_a;
+        wire [2:0] d_rd_n_b;
+        reg  [2:0] q_rd_n_b;
+        wire [0:0] d_rd_n_late;
+        reg  [0:0] q_rd_n_late;
         wire [0:0] d_reg_write;
         reg  [0:0] q_reg_write;
         wire [0:0] d_illegal;
         reg  [0:0] q_illegal;
-        control_unit u (.instr(instr), .bank(d_bank), .alu_funct(d_alu_funct), .branch_funct(d_branch_funct), .rd_addr(d_rd_addr), .rs1_addr(d_rs1_addr), .rs2_addr(d_rs2_addr), .imm(d_imm), .alu_src_imm(d_alu_src_imm), .is_branch(d_is_branch), .is_halt(d_is_halt), .tohost_reg(d_tohost_reg), .is_gluon(d_is_gluon), .gluon_funct(d_gluon_funct), .gluon_rs1_bank(d_gluon_rs1_bank), .gluon_rs1_reg(d_gluon_rs1_reg), .gluon_rs2_bank(d_gluon_rs2_bank), .gluon_rs2_reg(d_gluon_rs2_reg), .is_baryon(d_is_baryon), .baryon_rr(d_baryon_rr), .baryon_gg(d_baryon_gg), .baryon_bb(d_baryon_bb), .baryon_funct(d_baryon_funct), .is_meson(d_is_meson), .meson_funct(d_meson_funct), .meson_q1_bank(d_meson_q1_bank), .meson_q1_reg(d_meson_q1_reg), .meson_q2_bank(d_meson_q2_bank), .meson_q2_reg(d_meson_q2_reg), .is_load(d_is_load), .is_store(d_is_store), .mem_nd_ns(d_mem_nd_ns), .mem_base_bank(d_mem_base_bank), .mem_base_reg(d_mem_base_reg), .mem_imm(d_mem_imm), .is_jal(d_is_jal), .jal_imm(d_jal_imm), .is_rft(d_is_rft), .is_syscall(d_is_syscall), .is_mvsr(d_is_mvsr), .mvsr_dir(d_mvsr_dir), .mvsr_selreg(d_mvsr_selreg), .mvsr_nreg(d_mvsr_nreg), .is_ptb(d_is_ptb), .ptb_dir(d_ptb_dir), .ptb_nreg(d_ptb_nreg), .is_qhad(d_is_qhad), .qhad_qubit(d_qhad_qubit), .qhad_half(d_qhad_half), .is_qcnot(d_is_qcnot), .qcnot_ctrl(d_qcnot_ctrl), .q_reg_i(d_q_reg_i), .q_reg_j(d_q_reg_j), .is_string(d_is_string), .is_regge(d_is_regge), .regge_funct(d_regge_funct), .regge_ns(d_regge_ns), .is_jalr(d_is_jalr), .jalr_ns(d_jalr_ns), .is_mtag(d_is_mtag), .mtag_funct(d_mtag_funct), .mtag_ns(d_mtag_ns), .is_plaq(d_is_plaq), .is_linkmul(d_is_linkmul), .is_reunit(d_is_reunit), .is_sweep(d_is_sweep), .is_hop(d_is_hop), .hop_funct(d_hop_funct), .hop_dir(d_hop_dir), .hop_reg(d_hop_reg), .is_cim(d_is_cim), .cim_funct(d_cim_funct), .cim_ns(d_cim_ns), .cim_nt(d_cim_nt), .sw_l1(d_sw_l1), .ru_ns(d_ru_ns), .lm_daga(d_lm_daga), .lm_dagb(d_lm_dagb), .lm_na(d_lm_na), .lm_nb(d_lm_nb), .lm_nc(d_lm_nc), .is_metro(d_is_metro), .metro_weight(d_metro_weight), .metro_na(d_metro_na), .metro_nb(d_metro_nb), .metro_nbeta(d_metro_nbeta), .is_su3mul(d_is_su3mul), .su3_ns(d_su3_ns), .su3_dst(d_su3_dst), .su3_src(d_su3_src), .is_qmeasure(d_is_qmeasure), .qmeasure_qubit(d_qmeasure_qubit), .qmeasure_nd(d_qmeasure_nd), .qm_reg_a0(d_qm_reg_a0), .qm_reg_a1(d_qm_reg_a1), .qm_reg_b0(d_qm_reg_b0), .qm_reg_b1(d_qm_reg_b1), .write_bank(d_write_bank), .write_addr(d_write_addr), .reg_write(d_reg_write), .illegal(d_illegal));
+        control_unit u (.instr(instr), .bank(d_bank), .alu_funct(d_alu_funct), .branch_funct(d_branch_funct), .rd_addr(d_rd_addr), .rs1_addr(d_rs1_addr), .rs2_addr(d_rs2_addr), .imm(d_imm), .alu_src_imm(d_alu_src_imm), .is_branch(d_is_branch), .is_halt(d_is_halt), .tohost_reg(d_tohost_reg), .is_gluon(d_is_gluon), .gluon_funct(d_gluon_funct), .gluon_rs1_bank(d_gluon_rs1_bank), .gluon_rs1_reg(d_gluon_rs1_reg), .gluon_rs2_bank(d_gluon_rs2_bank), .gluon_rs2_reg(d_gluon_rs2_reg), .is_baryon(d_is_baryon), .baryon_rr(d_baryon_rr), .baryon_gg(d_baryon_gg), .baryon_bb(d_baryon_bb), .baryon_funct(d_baryon_funct), .is_meson(d_is_meson), .meson_funct(d_meson_funct), .meson_q1_bank(d_meson_q1_bank), .meson_q1_reg(d_meson_q1_reg), .meson_q2_bank(d_meson_q2_bank), .meson_q2_reg(d_meson_q2_reg), .is_load(d_is_load), .is_store(d_is_store), .mem_nd_ns(d_mem_nd_ns), .mem_base_bank(d_mem_base_bank), .mem_base_reg(d_mem_base_reg), .mem_imm(d_mem_imm), .is_jal(d_is_jal), .jal_imm(d_jal_imm), .is_rft(d_is_rft), .is_syscall(d_is_syscall), .is_mvsr(d_is_mvsr), .mvsr_dir(d_mvsr_dir), .mvsr_selreg(d_mvsr_selreg), .mvsr_nreg(d_mvsr_nreg), .is_ptb(d_is_ptb), .ptb_dir(d_ptb_dir), .ptb_nreg(d_ptb_nreg), .is_qhad(d_is_qhad), .qhad_qubit(d_qhad_qubit), .qhad_half(d_qhad_half), .is_qcnot(d_is_qcnot), .qcnot_ctrl(d_qcnot_ctrl), .q_reg_i(d_q_reg_i), .q_reg_j(d_q_reg_j), .is_string(d_is_string), .is_regge(d_is_regge), .regge_funct(d_regge_funct), .regge_ns(d_regge_ns), .is_jalr(d_is_jalr), .jalr_ns(d_jalr_ns), .is_mtag(d_is_mtag), .mtag_funct(d_mtag_funct), .mtag_ns(d_mtag_ns), .is_plaq(d_is_plaq), .is_linkmul(d_is_linkmul), .is_reunit(d_is_reunit), .is_sweep(d_is_sweep), .is_hop(d_is_hop), .hop_funct(d_hop_funct), .hop_dir(d_hop_dir), .hop_reg(d_hop_reg), .is_cim(d_is_cim), .cim_funct(d_cim_funct), .cim_ns(d_cim_ns), .cim_nt(d_cim_nt), .sw_l1(d_sw_l1), .ru_ns(d_ru_ns), .lm_daga(d_lm_daga), .lm_dagb(d_lm_dagb), .lm_na(d_lm_na), .lm_nb(d_lm_nb), .lm_nc(d_lm_nc), .is_metro(d_is_metro), .metro_weight(d_metro_weight), .metro_na(d_metro_na), .metro_nb(d_metro_nb), .metro_nbeta(d_metro_nbeta), .is_su3mul(d_is_su3mul), .su3_ns(d_su3_ns), .su3_dst(d_su3_dst), .su3_src(d_su3_src), .is_qmeasure(d_is_qmeasure), .qmeasure_qubit(d_qmeasure_qubit), .qmeasure_nd(d_qmeasure_nd), .qm_reg_a0(d_qm_reg_a0), .qm_reg_a1(d_qm_reg_a1), .qm_reg_b0(d_qm_reg_b0), .qm_reg_b1(d_qm_reg_b1), .write_bank(d_write_bank), .write_addr(d_write_addr), .rd_r_a(d_rd_r_a), .rd_r_b(d_rd_r_b), .rd_g_a(d_rd_g_a), .rd_g_b(d_rd_g_b), .rd_b_a(d_rd_b_a), .rd_b_b(d_rd_b_b), .rd_n_a(d_rd_n_a), .rd_n_b(d_rd_n_b), .rd_n_late(d_rd_n_late), .reg_write(d_reg_write), .illegal(d_illegal));
         always @(posedge clk or posedge reset) begin
             if (reset) begin
                 q_bank <= 2'b00;
@@ -1174,6 +1316,15 @@ module control_unit_stage #(parameter REGISTERED = 1) (
                 q_qm_reg_b1 <= 3'b000;
                 q_write_bank <= 2'b00;
                 q_write_addr <= 3'b000;
+                q_rd_r_a <= 3'b000;
+                q_rd_r_b <= 3'b000;
+                q_rd_g_a <= 3'b000;
+                q_rd_g_b <= 3'b000;
+                q_rd_b_a <= 3'b000;
+                q_rd_b_b <= 3'b000;
+                q_rd_n_a <= 3'b000;
+                q_rd_n_b <= 3'b000;
+                q_rd_n_late <= 1'b0;
                 q_reg_write <= 1'b1;
                 q_illegal <= 1'b0;
             end else if (en) begin
@@ -1276,6 +1427,15 @@ module control_unit_stage #(parameter REGISTERED = 1) (
                     q_qm_reg_b1 <= 3'b000;
                     q_write_bank <= 2'b00;
                     q_write_addr <= 3'b000;
+                    q_rd_r_a <= 3'b000;
+                    q_rd_r_b <= 3'b000;
+                    q_rd_g_a <= 3'b000;
+                    q_rd_g_b <= 3'b000;
+                    q_rd_b_a <= 3'b000;
+                    q_rd_b_b <= 3'b000;
+                    q_rd_n_a <= 3'b000;
+                    q_rd_n_b <= 3'b000;
+                    q_rd_n_late <= 1'b0;
                     q_reg_write <= 1'b1;
                     q_illegal <= 1'b0;
                 end else begin
@@ -1377,6 +1537,15 @@ module control_unit_stage #(parameter REGISTERED = 1) (
                     q_qm_reg_b1 <= d_qm_reg_b1;
                     q_write_bank <= d_write_bank;
                     q_write_addr <= d_write_addr;
+                    q_rd_r_a <= d_rd_r_a;
+                    q_rd_r_b <= d_rd_r_b;
+                    q_rd_g_a <= d_rd_g_a;
+                    q_rd_g_b <= d_rd_g_b;
+                    q_rd_b_a <= d_rd_b_a;
+                    q_rd_b_b <= d_rd_b_b;
+                    q_rd_n_a <= d_rd_n_a;
+                    q_rd_n_b <= d_rd_n_b;
+                    q_rd_n_late <= d_rd_n_late;
                     q_reg_write <= d_reg_write;
                     q_illegal <= d_illegal;
                 end
@@ -1480,6 +1649,15 @@ module control_unit_stage #(parameter REGISTERED = 1) (
         assign qm_reg_b1 = q_qm_reg_b1;
         assign write_bank = q_write_bank;
         assign write_addr = q_write_addr;
+        assign rd_r_a = q_rd_r_a;
+        assign rd_r_b = q_rd_r_b;
+        assign rd_g_a = q_rd_g_a;
+        assign rd_g_b = q_rd_g_b;
+        assign rd_b_a = q_rd_b_a;
+        assign rd_b_b = q_rd_b_b;
+        assign rd_n_a = q_rd_n_a;
+        assign rd_n_b = q_rd_n_b;
+        assign rd_n_late = q_rd_n_late;
         assign reg_write = q_reg_write;
         assign illegal = q_illegal;
 `ifndef SYNTHESIS
@@ -1584,11 +1762,20 @@ module control_unit_stage #(parameter REGISTERED = 1) (
         wire [2:0] z_qm_reg_b1;
         wire [1:0] z_write_bank;
         wire [2:0] z_write_addr;
+        wire [2:0] z_rd_r_a;
+        wire [2:0] z_rd_r_b;
+        wire [2:0] z_rd_g_a;
+        wire [2:0] z_rd_g_b;
+        wire [2:0] z_rd_b_a;
+        wire [2:0] z_rd_b_b;
+        wire [2:0] z_rd_n_a;
+        wire [2:0] z_rd_n_b;
+        wire [0:0] z_rd_n_late;
         wire [0:0] z_reg_write;
         wire [0:0] z_illegal;
-        control_unit z (.instr(32'b0), .bank(z_bank), .alu_funct(z_alu_funct), .branch_funct(z_branch_funct), .rd_addr(z_rd_addr), .rs1_addr(z_rs1_addr), .rs2_addr(z_rs2_addr), .imm(z_imm), .alu_src_imm(z_alu_src_imm), .is_branch(z_is_branch), .is_halt(z_is_halt), .tohost_reg(z_tohost_reg), .is_gluon(z_is_gluon), .gluon_funct(z_gluon_funct), .gluon_rs1_bank(z_gluon_rs1_bank), .gluon_rs1_reg(z_gluon_rs1_reg), .gluon_rs2_bank(z_gluon_rs2_bank), .gluon_rs2_reg(z_gluon_rs2_reg), .is_baryon(z_is_baryon), .baryon_rr(z_baryon_rr), .baryon_gg(z_baryon_gg), .baryon_bb(z_baryon_bb), .baryon_funct(z_baryon_funct), .is_meson(z_is_meson), .meson_funct(z_meson_funct), .meson_q1_bank(z_meson_q1_bank), .meson_q1_reg(z_meson_q1_reg), .meson_q2_bank(z_meson_q2_bank), .meson_q2_reg(z_meson_q2_reg), .is_load(z_is_load), .is_store(z_is_store), .mem_nd_ns(z_mem_nd_ns), .mem_base_bank(z_mem_base_bank), .mem_base_reg(z_mem_base_reg), .mem_imm(z_mem_imm), .is_jal(z_is_jal), .jal_imm(z_jal_imm), .is_rft(z_is_rft), .is_syscall(z_is_syscall), .is_mvsr(z_is_mvsr), .mvsr_dir(z_mvsr_dir), .mvsr_selreg(z_mvsr_selreg), .mvsr_nreg(z_mvsr_nreg), .is_ptb(z_is_ptb), .ptb_dir(z_ptb_dir), .ptb_nreg(z_ptb_nreg), .is_qhad(z_is_qhad), .qhad_qubit(z_qhad_qubit), .qhad_half(z_qhad_half), .is_qcnot(z_is_qcnot), .qcnot_ctrl(z_qcnot_ctrl), .q_reg_i(z_q_reg_i), .q_reg_j(z_q_reg_j), .is_string(z_is_string), .is_regge(z_is_regge), .regge_funct(z_regge_funct), .regge_ns(z_regge_ns), .is_jalr(z_is_jalr), .jalr_ns(z_jalr_ns), .is_mtag(z_is_mtag), .mtag_funct(z_mtag_funct), .mtag_ns(z_mtag_ns), .is_plaq(z_is_plaq), .is_linkmul(z_is_linkmul), .is_reunit(z_is_reunit), .is_sweep(z_is_sweep), .is_hop(z_is_hop), .hop_funct(z_hop_funct), .hop_dir(z_hop_dir), .hop_reg(z_hop_reg), .is_cim(z_is_cim), .cim_funct(z_cim_funct), .cim_ns(z_cim_ns), .cim_nt(z_cim_nt), .sw_l1(z_sw_l1), .ru_ns(z_ru_ns), .lm_daga(z_lm_daga), .lm_dagb(z_lm_dagb), .lm_na(z_lm_na), .lm_nb(z_lm_nb), .lm_nc(z_lm_nc), .is_metro(z_is_metro), .metro_weight(z_metro_weight), .metro_na(z_metro_na), .metro_nb(z_metro_nb), .metro_nbeta(z_metro_nbeta), .is_su3mul(z_is_su3mul), .su3_ns(z_su3_ns), .su3_dst(z_su3_dst), .su3_src(z_su3_src), .is_qmeasure(z_is_qmeasure), .qmeasure_qubit(z_qmeasure_qubit), .qmeasure_nd(z_qmeasure_nd), .qm_reg_a0(z_qm_reg_a0), .qm_reg_a1(z_qm_reg_a1), .qm_reg_b0(z_qm_reg_b0), .qm_reg_b1(z_qm_reg_b1), .write_bank(z_write_bank), .write_addr(z_write_addr), .reg_write(z_reg_write), .illegal(z_illegal));
+        control_unit z (.instr(32'b0), .bank(z_bank), .alu_funct(z_alu_funct), .branch_funct(z_branch_funct), .rd_addr(z_rd_addr), .rs1_addr(z_rs1_addr), .rs2_addr(z_rs2_addr), .imm(z_imm), .alu_src_imm(z_alu_src_imm), .is_branch(z_is_branch), .is_halt(z_is_halt), .tohost_reg(z_tohost_reg), .is_gluon(z_is_gluon), .gluon_funct(z_gluon_funct), .gluon_rs1_bank(z_gluon_rs1_bank), .gluon_rs1_reg(z_gluon_rs1_reg), .gluon_rs2_bank(z_gluon_rs2_bank), .gluon_rs2_reg(z_gluon_rs2_reg), .is_baryon(z_is_baryon), .baryon_rr(z_baryon_rr), .baryon_gg(z_baryon_gg), .baryon_bb(z_baryon_bb), .baryon_funct(z_baryon_funct), .is_meson(z_is_meson), .meson_funct(z_meson_funct), .meson_q1_bank(z_meson_q1_bank), .meson_q1_reg(z_meson_q1_reg), .meson_q2_bank(z_meson_q2_bank), .meson_q2_reg(z_meson_q2_reg), .is_load(z_is_load), .is_store(z_is_store), .mem_nd_ns(z_mem_nd_ns), .mem_base_bank(z_mem_base_bank), .mem_base_reg(z_mem_base_reg), .mem_imm(z_mem_imm), .is_jal(z_is_jal), .jal_imm(z_jal_imm), .is_rft(z_is_rft), .is_syscall(z_is_syscall), .is_mvsr(z_is_mvsr), .mvsr_dir(z_mvsr_dir), .mvsr_selreg(z_mvsr_selreg), .mvsr_nreg(z_mvsr_nreg), .is_ptb(z_is_ptb), .ptb_dir(z_ptb_dir), .ptb_nreg(z_ptb_nreg), .is_qhad(z_is_qhad), .qhad_qubit(z_qhad_qubit), .qhad_half(z_qhad_half), .is_qcnot(z_is_qcnot), .qcnot_ctrl(z_qcnot_ctrl), .q_reg_i(z_q_reg_i), .q_reg_j(z_q_reg_j), .is_string(z_is_string), .is_regge(z_is_regge), .regge_funct(z_regge_funct), .regge_ns(z_regge_ns), .is_jalr(z_is_jalr), .jalr_ns(z_jalr_ns), .is_mtag(z_is_mtag), .mtag_funct(z_mtag_funct), .mtag_ns(z_mtag_ns), .is_plaq(z_is_plaq), .is_linkmul(z_is_linkmul), .is_reunit(z_is_reunit), .is_sweep(z_is_sweep), .is_hop(z_is_hop), .hop_funct(z_hop_funct), .hop_dir(z_hop_dir), .hop_reg(z_hop_reg), .is_cim(z_is_cim), .cim_funct(z_cim_funct), .cim_ns(z_cim_ns), .cim_nt(z_cim_nt), .sw_l1(z_sw_l1), .ru_ns(z_ru_ns), .lm_daga(z_lm_daga), .lm_dagb(z_lm_dagb), .lm_na(z_lm_na), .lm_nb(z_lm_nb), .lm_nc(z_lm_nc), .is_metro(z_is_metro), .metro_weight(z_metro_weight), .metro_na(z_metro_na), .metro_nb(z_metro_nb), .metro_nbeta(z_metro_nbeta), .is_su3mul(z_is_su3mul), .su3_ns(z_su3_ns), .su3_dst(z_su3_dst), .su3_src(z_su3_src), .is_qmeasure(z_is_qmeasure), .qmeasure_qubit(z_qmeasure_qubit), .qmeasure_nd(z_qmeasure_nd), .qm_reg_a0(z_qm_reg_a0), .qm_reg_a1(z_qm_reg_a1), .qm_reg_b0(z_qm_reg_b0), .qm_reg_b1(z_qm_reg_b1), .write_bank(z_write_bank), .write_addr(z_write_addr), .rd_r_a(z_rd_r_a), .rd_r_b(z_rd_r_b), .rd_g_a(z_rd_g_a), .rd_g_b(z_rd_g_b), .rd_b_a(z_rd_b_a), .rd_b_b(z_rd_b_b), .rd_n_a(z_rd_n_a), .rd_n_b(z_rd_n_b), .rd_n_late(z_rd_n_late), .reg_write(z_reg_write), .illegal(z_illegal));
         initial begin #0.001;
-            if ({z_bank, z_alu_funct, z_branch_funct, z_rd_addr, z_rs1_addr, z_rs2_addr, z_imm, z_alu_src_imm, z_is_branch, z_is_halt, z_tohost_reg, z_is_gluon, z_gluon_funct, z_gluon_rs1_bank, z_gluon_rs1_reg, z_gluon_rs2_bank, z_gluon_rs2_reg, z_is_baryon, z_baryon_rr, z_baryon_gg, z_baryon_bb, z_baryon_funct, z_is_meson, z_meson_funct, z_meson_q1_bank, z_meson_q1_reg, z_meson_q2_bank, z_meson_q2_reg, z_is_load, z_is_store, z_mem_nd_ns, z_mem_base_bank, z_mem_base_reg, z_mem_imm, z_is_jal, z_jal_imm, z_is_rft, z_is_syscall, z_is_mvsr, z_mvsr_dir, z_mvsr_selreg, z_mvsr_nreg, z_is_ptb, z_ptb_dir, z_ptb_nreg, z_is_qhad, z_qhad_qubit, z_qhad_half, z_is_qcnot, z_qcnot_ctrl, z_q_reg_i, z_q_reg_j, z_is_string, z_is_regge, z_regge_funct, z_regge_ns, z_is_jalr, z_jalr_ns, z_is_mtag, z_mtag_funct, z_mtag_ns, z_is_plaq, z_is_linkmul, z_is_reunit, z_is_sweep, z_is_hop, z_hop_funct, z_hop_dir, z_hop_reg, z_is_cim, z_cim_funct, z_cim_ns, z_cim_nt, z_sw_l1, z_ru_ns, z_lm_daga, z_lm_dagb, z_lm_na, z_lm_nb, z_lm_nc, z_is_metro, z_metro_weight, z_metro_na, z_metro_nb, z_metro_nbeta, z_is_su3mul, z_su3_ns, z_su3_dst, z_su3_src, z_is_qmeasure, z_qmeasure_qubit, z_qmeasure_nd, z_qm_reg_a0, z_qm_reg_a1, z_qm_reg_b0, z_qm_reg_b1, z_write_bank, z_write_addr, z_reg_write, z_illegal} !== {2'b00, 4'b0000, 3'b000, 3'b000, 3'b000, 3'b000, 32'b00000000000000000000000000000000, 1'b0, 1'b0, 1'b0, 3'b000, 1'b0, 3'b000, 2'b00, 3'b000, 2'b00, 3'b000, 1'b0, 3'b000, 3'b000, 3'b000, 3'b000, 1'b0, 2'b00, 2'b00, 3'b000, 2'b00, 3'b000, 1'b0, 1'b0, 3'b000, 2'b00, 3'b000, 32'b00000000000000000000000000000000, 1'b0, 32'b00000000000000000000000000000000, 1'b0, 1'b0, 1'b0, 1'b0, 2'b00, 3'b000, 1'b0, 1'b0, 3'b000, 1'b0, 1'b0, 1'b0, 1'b0, 1'b0, 3'b000, 3'b000, 1'b0, 1'b0, 2'b00, 3'b000, 1'b0, 3'b000, 1'b0, 2'b00, 3'b000, 1'b0, 1'b0, 1'b0, 1'b0, 1'b0, 2'b00, 2'b00, 3'b000, 1'b0, 3'b000, 3'b000, 3'b000, 2'b00, 3'b000, 1'b0, 1'b0, 3'b000, 3'b000, 3'b000, 1'b0, 1'b0, 3'b000, 3'b000, 3'b000, 1'b0, 3'b000, 3'b000, 3'b000, 1'b0, 1'b0, 3'b000, 3'b000, 3'b000, 3'b000, 3'b000, 2'b00, 3'b000, 1'b1, 1'b0}) begin
+            if ({z_bank, z_alu_funct, z_branch_funct, z_rd_addr, z_rs1_addr, z_rs2_addr, z_imm, z_alu_src_imm, z_is_branch, z_is_halt, z_tohost_reg, z_is_gluon, z_gluon_funct, z_gluon_rs1_bank, z_gluon_rs1_reg, z_gluon_rs2_bank, z_gluon_rs2_reg, z_is_baryon, z_baryon_rr, z_baryon_gg, z_baryon_bb, z_baryon_funct, z_is_meson, z_meson_funct, z_meson_q1_bank, z_meson_q1_reg, z_meson_q2_bank, z_meson_q2_reg, z_is_load, z_is_store, z_mem_nd_ns, z_mem_base_bank, z_mem_base_reg, z_mem_imm, z_is_jal, z_jal_imm, z_is_rft, z_is_syscall, z_is_mvsr, z_mvsr_dir, z_mvsr_selreg, z_mvsr_nreg, z_is_ptb, z_ptb_dir, z_ptb_nreg, z_is_qhad, z_qhad_qubit, z_qhad_half, z_is_qcnot, z_qcnot_ctrl, z_q_reg_i, z_q_reg_j, z_is_string, z_is_regge, z_regge_funct, z_regge_ns, z_is_jalr, z_jalr_ns, z_is_mtag, z_mtag_funct, z_mtag_ns, z_is_plaq, z_is_linkmul, z_is_reunit, z_is_sweep, z_is_hop, z_hop_funct, z_hop_dir, z_hop_reg, z_is_cim, z_cim_funct, z_cim_ns, z_cim_nt, z_sw_l1, z_ru_ns, z_lm_daga, z_lm_dagb, z_lm_na, z_lm_nb, z_lm_nc, z_is_metro, z_metro_weight, z_metro_na, z_metro_nb, z_metro_nbeta, z_is_su3mul, z_su3_ns, z_su3_dst, z_su3_src, z_is_qmeasure, z_qmeasure_qubit, z_qmeasure_nd, z_qm_reg_a0, z_qm_reg_a1, z_qm_reg_b0, z_qm_reg_b1, z_write_bank, z_write_addr, z_rd_r_a, z_rd_r_b, z_rd_g_a, z_rd_g_b, z_rd_b_a, z_rd_b_b, z_rd_n_a, z_rd_n_b, z_rd_n_late, z_reg_write, z_illegal} !== {2'b00, 4'b0000, 3'b000, 3'b000, 3'b000, 3'b000, 32'b00000000000000000000000000000000, 1'b0, 1'b0, 1'b0, 3'b000, 1'b0, 3'b000, 2'b00, 3'b000, 2'b00, 3'b000, 1'b0, 3'b000, 3'b000, 3'b000, 3'b000, 1'b0, 2'b00, 2'b00, 3'b000, 2'b00, 3'b000, 1'b0, 1'b0, 3'b000, 2'b00, 3'b000, 32'b00000000000000000000000000000000, 1'b0, 32'b00000000000000000000000000000000, 1'b0, 1'b0, 1'b0, 1'b0, 2'b00, 3'b000, 1'b0, 1'b0, 3'b000, 1'b0, 1'b0, 1'b0, 1'b0, 1'b0, 3'b000, 3'b000, 1'b0, 1'b0, 2'b00, 3'b000, 1'b0, 3'b000, 1'b0, 2'b00, 3'b000, 1'b0, 1'b0, 1'b0, 1'b0, 1'b0, 2'b00, 2'b00, 3'b000, 1'b0, 3'b000, 3'b000, 3'b000, 2'b00, 3'b000, 1'b0, 1'b0, 3'b000, 3'b000, 3'b000, 1'b0, 1'b0, 3'b000, 3'b000, 3'b000, 1'b0, 3'b000, 3'b000, 3'b000, 1'b0, 1'b0, 3'b000, 3'b000, 3'b000, 3'b000, 3'b000, 2'b00, 3'b000, 3'b000, 3'b000, 3'b000, 3'b000, 3'b000, 3'b000, 3'b000, 3'b000, 1'b0, 1'b1, 1'b0}) begin
                 $display("FATAL: control_unit_stage is stale - re-run tools/gen_decode_stage.py");
                 $finish;
             end
@@ -1596,6 +1783,6 @@ module control_unit_stage #(parameter REGISTERED = 1) (
 `endif
 `endif
     end else begin: g_comb
-        control_unit u (.instr(squash ? 32'b0 : instr), .bank(bank), .alu_funct(alu_funct), .branch_funct(branch_funct), .rd_addr(rd_addr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .imm(imm), .alu_src_imm(alu_src_imm), .is_branch(is_branch), .is_halt(is_halt), .tohost_reg(tohost_reg), .is_gluon(is_gluon), .gluon_funct(gluon_funct), .gluon_rs1_bank(gluon_rs1_bank), .gluon_rs1_reg(gluon_rs1_reg), .gluon_rs2_bank(gluon_rs2_bank), .gluon_rs2_reg(gluon_rs2_reg), .is_baryon(is_baryon), .baryon_rr(baryon_rr), .baryon_gg(baryon_gg), .baryon_bb(baryon_bb), .baryon_funct(baryon_funct), .is_meson(is_meson), .meson_funct(meson_funct), .meson_q1_bank(meson_q1_bank), .meson_q1_reg(meson_q1_reg), .meson_q2_bank(meson_q2_bank), .meson_q2_reg(meson_q2_reg), .is_load(is_load), .is_store(is_store), .mem_nd_ns(mem_nd_ns), .mem_base_bank(mem_base_bank), .mem_base_reg(mem_base_reg), .mem_imm(mem_imm), .is_jal(is_jal), .jal_imm(jal_imm), .is_rft(is_rft), .is_syscall(is_syscall), .is_mvsr(is_mvsr), .mvsr_dir(mvsr_dir), .mvsr_selreg(mvsr_selreg), .mvsr_nreg(mvsr_nreg), .is_ptb(is_ptb), .ptb_dir(ptb_dir), .ptb_nreg(ptb_nreg), .is_qhad(is_qhad), .qhad_qubit(qhad_qubit), .qhad_half(qhad_half), .is_qcnot(is_qcnot), .qcnot_ctrl(qcnot_ctrl), .q_reg_i(q_reg_i), .q_reg_j(q_reg_j), .is_string(is_string), .is_regge(is_regge), .regge_funct(regge_funct), .regge_ns(regge_ns), .is_jalr(is_jalr), .jalr_ns(jalr_ns), .is_mtag(is_mtag), .mtag_funct(mtag_funct), .mtag_ns(mtag_ns), .is_plaq(is_plaq), .is_linkmul(is_linkmul), .is_reunit(is_reunit), .is_sweep(is_sweep), .is_hop(is_hop), .hop_funct(hop_funct), .hop_dir(hop_dir), .hop_reg(hop_reg), .is_cim(is_cim), .cim_funct(cim_funct), .cim_ns(cim_ns), .cim_nt(cim_nt), .sw_l1(sw_l1), .ru_ns(ru_ns), .lm_daga(lm_daga), .lm_dagb(lm_dagb), .lm_na(lm_na), .lm_nb(lm_nb), .lm_nc(lm_nc), .is_metro(is_metro), .metro_weight(metro_weight), .metro_na(metro_na), .metro_nb(metro_nb), .metro_nbeta(metro_nbeta), .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src), .is_qmeasure(is_qmeasure), .qmeasure_qubit(qmeasure_qubit), .qmeasure_nd(qmeasure_nd), .qm_reg_a0(qm_reg_a0), .qm_reg_a1(qm_reg_a1), .qm_reg_b0(qm_reg_b0), .qm_reg_b1(qm_reg_b1), .write_bank(write_bank), .write_addr(write_addr), .reg_write(reg_write), .illegal(illegal));
+        control_unit u (.instr(squash ? 32'b0 : instr), .bank(bank), .alu_funct(alu_funct), .branch_funct(branch_funct), .rd_addr(rd_addr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .imm(imm), .alu_src_imm(alu_src_imm), .is_branch(is_branch), .is_halt(is_halt), .tohost_reg(tohost_reg), .is_gluon(is_gluon), .gluon_funct(gluon_funct), .gluon_rs1_bank(gluon_rs1_bank), .gluon_rs1_reg(gluon_rs1_reg), .gluon_rs2_bank(gluon_rs2_bank), .gluon_rs2_reg(gluon_rs2_reg), .is_baryon(is_baryon), .baryon_rr(baryon_rr), .baryon_gg(baryon_gg), .baryon_bb(baryon_bb), .baryon_funct(baryon_funct), .is_meson(is_meson), .meson_funct(meson_funct), .meson_q1_bank(meson_q1_bank), .meson_q1_reg(meson_q1_reg), .meson_q2_bank(meson_q2_bank), .meson_q2_reg(meson_q2_reg), .is_load(is_load), .is_store(is_store), .mem_nd_ns(mem_nd_ns), .mem_base_bank(mem_base_bank), .mem_base_reg(mem_base_reg), .mem_imm(mem_imm), .is_jal(is_jal), .jal_imm(jal_imm), .is_rft(is_rft), .is_syscall(is_syscall), .is_mvsr(is_mvsr), .mvsr_dir(mvsr_dir), .mvsr_selreg(mvsr_selreg), .mvsr_nreg(mvsr_nreg), .is_ptb(is_ptb), .ptb_dir(ptb_dir), .ptb_nreg(ptb_nreg), .is_qhad(is_qhad), .qhad_qubit(qhad_qubit), .qhad_half(qhad_half), .is_qcnot(is_qcnot), .qcnot_ctrl(qcnot_ctrl), .q_reg_i(q_reg_i), .q_reg_j(q_reg_j), .is_string(is_string), .is_regge(is_regge), .regge_funct(regge_funct), .regge_ns(regge_ns), .is_jalr(is_jalr), .jalr_ns(jalr_ns), .is_mtag(is_mtag), .mtag_funct(mtag_funct), .mtag_ns(mtag_ns), .is_plaq(is_plaq), .is_linkmul(is_linkmul), .is_reunit(is_reunit), .is_sweep(is_sweep), .is_hop(is_hop), .hop_funct(hop_funct), .hop_dir(hop_dir), .hop_reg(hop_reg), .is_cim(is_cim), .cim_funct(cim_funct), .cim_ns(cim_ns), .cim_nt(cim_nt), .sw_l1(sw_l1), .ru_ns(ru_ns), .lm_daga(lm_daga), .lm_dagb(lm_dagb), .lm_na(lm_na), .lm_nb(lm_nb), .lm_nc(lm_nc), .is_metro(is_metro), .metro_weight(metro_weight), .metro_na(metro_na), .metro_nb(metro_nb), .metro_nbeta(metro_nbeta), .is_su3mul(is_su3mul), .su3_ns(su3_ns), .su3_dst(su3_dst), .su3_src(su3_src), .is_qmeasure(is_qmeasure), .qmeasure_qubit(qmeasure_qubit), .qmeasure_nd(qmeasure_nd), .qm_reg_a0(qm_reg_a0), .qm_reg_a1(qm_reg_a1), .qm_reg_b0(qm_reg_b0), .qm_reg_b1(qm_reg_b1), .write_bank(write_bank), .write_addr(write_addr), .rd_r_a(rd_r_a), .rd_r_b(rd_r_b), .rd_g_a(rd_g_a), .rd_g_b(rd_g_b), .rd_b_a(rd_b_a), .rd_b_b(rd_b_b), .rd_n_a(rd_n_a), .rd_n_b(rd_n_b), .rd_n_late(rd_n_late), .reg_write(reg_write), .illegal(illegal));
     end endgenerate
 endmodule

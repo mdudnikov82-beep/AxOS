@@ -326,10 +326,19 @@ module cpu_core #(
         .is_qmeasure(is_qmeasure), .qmeasure_qubit(qmeasure_qubit), .qmeasure_nd(qmeasure_nd),
         .qm_reg_a0(qm_reg_a0), .qm_reg_a1(qm_reg_a1), .qm_reg_b0(qm_reg_b0), .qm_reg_b1(qm_reg_b1),
         .write_bank(write_bank), .write_addr(write_addr),
+        .rd_r_a(rd_r_a), .rd_r_b(rd_r_b), .rd_g_a(rd_g_a), .rd_g_b(rd_g_b),
+        .rd_b_a(rd_b_a), .rd_b_b(rd_b_b), .rd_n_a(rd_n_a), .rd_n_b(rd_n_b), .rd_n_late(rd_n_late),
         .reg_write(reg_write), .illegal(illegal)
     );
 
     // ==================== Per-bank read-address routing ====================
+    // The instruction's own read addresses come ready-decoded from the
+    // decode register (rd_* - control_unit.v's read-address block, see
+    // why there). Only the multi-cycle sequencers, whose addresses
+    // depend on their state, are overlaid here - a mux or two deep
+    // instead of the old ten-level priority chain.
+    wire [2:0] rd_r_a, rd_r_b, rd_g_a, rd_g_b, rd_b_a, rd_b_b, rd_n_a, rd_n_b;
+    wire       rd_n_late;
     reg [2:0] r_addr_a, r_addr_b;
     reg [2:0] g_addr_a, g_addr_b;
     reg [2:0] b_addr_a, b_addr_b;
@@ -337,25 +346,20 @@ module cpu_core #(
     reg [2:0] n_addr_c; // v2.3: N's third read port (LINKMUL's C)
 
     always @(*) begin
-        r_addr_a = 3'b0; r_addr_b = 3'b0;
+        r_addr_a = rd_r_a; r_addr_b = rd_r_b;
         if (q_active) begin
-            // The q-sequencer FSM (below) owns R-bank read routing for
-            // its whole multi-cycle sequence - top priority, since
-            // is_qhad/is_qcnot's own `bank` field defaults to 0 (=
-            // BANK_R), which would otherwise incorrectly fall through
-            // to the ALUR/ALUI/BRANCH catch-all below and read
-            // rs1_addr/rs2_addr (also 0-default garbage) instead.
+            // The q-sequencer owns R-bank reads for its whole sequence
+            // (is_qhad/is_qcnot's `bank` field defaults to BANK_R, so
+            // rd_r_* would be rs1/rs2 garbage)
+            r_addr_a = 3'b0; r_addr_b = 3'b0;
             if (q_state_r == Q_S1) begin
                 r_addr_a = q_reg_j; r_addr_b = q_reg_j + 3'd1;
             end else if (q_state_r == Q_IDLE) begin // decode cycle
                 r_addr_a = q_reg_i; r_addr_b = q_reg_i + 3'd1;
             end
-            // Q_S2/Q_S3/Q_S4: no read needed, defaults above stand.
         end else if (qm_active) begin
-            // The qm-sequencer FSM (below) owns R-bank read routing for
-            // its whole 96-cycle sequence - same top-priority reasoning
-            // as q_active above (is_qmeasure's own `bank` field also
-            // defaults to 0=BANK_R).
+            // the qm-sequencer likewise, for its whole 96-cycle sequence
+            r_addr_a = 3'b0; r_addr_b = 3'b0;
             if (qm_state_r == QM_IDLE) begin
                 r_addr_a = qm_reg_a0; r_addr_b = qm_reg_a0 + 3'd1;
             end else if (qm_state_r == QM_S1) begin
@@ -365,149 +369,29 @@ module cpu_core #(
             end else if (qm_state_r == QM_S3) begin
                 r_addr_a = qm_reg_b1; r_addr_b = qm_reg_b1 + 3'd1;
             end
-            // QM_S4 onward: no further reads needed, defaults stand.
-        end else if (is_gluon) begin
-            case ({gluon_rs1_bank == BANK_R, gluon_rs2_bank == BANK_R})
-                2'b11: begin r_addr_a = gluon_rs1_reg; r_addr_b = gluon_rs2_reg; end
-                2'b10: begin r_addr_a = gluon_rs1_reg; r_addr_b = gluon_rs1_reg; end
-                2'b01: begin r_addr_a = gluon_rs2_reg; r_addr_b = gluon_rs2_reg; end
-                default: ;
-            endcase
-        end else if (is_baryon) begin
-            r_addr_a = baryon_rr; r_addr_b = baryon_rr;
-        end else if (is_meson) begin
-            case ({meson_q1_bank == BANK_R, meson_q2_bank == BANK_R})
-                2'b11: begin r_addr_a = meson_q1_reg; r_addr_b = meson_q2_reg; end
-                2'b10: begin r_addr_a = meson_q1_reg; r_addr_b = meson_q1_reg; end
-                2'b01: begin r_addr_a = meson_q2_reg; r_addr_b = meson_q2_reg; end
-                default: ;
-            endcase
-        end else if (is_load || is_store) begin
-            if (mem_base_bank == BANK_R) begin r_addr_a = mem_base_reg; r_addr_b = mem_base_reg; end
-        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr && !is_ptb) begin // ALUR/ALUI/BRANCH (and illegal/default, harmlessly)
-            if (bank == BANK_R) begin r_addr_a = rs1_addr; r_addr_b = rs2_addr; end
         end
         // SU3MUL owns every R/G/B read while it runs: color j's psi pair
         if (su3_active) begin r_addr_a = su3_src; r_addr_b = su3_src + 3'd1; end
     end
 
     always @(*) begin
-        g_addr_a = 3'b0; g_addr_b = 3'b0;
-        if (is_gluon) begin
-            case ({gluon_rs1_bank == BANK_G, gluon_rs2_bank == BANK_G})
-                2'b11: begin g_addr_a = gluon_rs1_reg; g_addr_b = gluon_rs2_reg; end
-                2'b10: begin g_addr_a = gluon_rs1_reg; g_addr_b = gluon_rs1_reg; end
-                2'b01: begin g_addr_a = gluon_rs2_reg; g_addr_b = gluon_rs2_reg; end
-                default: ;
-            endcase
-        end else if (is_baryon) begin
-            g_addr_a = baryon_gg; g_addr_b = baryon_gg;
-        end else if (is_meson) begin
-            case ({meson_q1_bank == BANK_G, meson_q2_bank == BANK_G})
-                2'b11: begin g_addr_a = meson_q1_reg; g_addr_b = meson_q2_reg; end
-                2'b10: begin g_addr_a = meson_q1_reg; g_addr_b = meson_q1_reg; end
-                2'b01: begin g_addr_a = meson_q2_reg; g_addr_b = meson_q2_reg; end
-                default: ;
-            endcase
-        end else if (is_load || is_store) begin
-            if (mem_base_bank == BANK_G) begin g_addr_a = mem_base_reg; g_addr_b = mem_base_reg; end
-        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr && !is_ptb) begin
-            if (bank == BANK_G) begin g_addr_a = rs1_addr; g_addr_b = rs2_addr; end
+        g_addr_a = rd_g_a; g_addr_b = rd_g_b;
+        b_addr_a = rd_b_a; b_addr_b = rd_b_b;
+        if (su3_active) begin
+            g_addr_a = su3_src; g_addr_b = su3_src + 3'd1;
+            b_addr_a = su3_src; b_addr_b = su3_src + 3'd1;
         end
-        // SU3MUL owns every R/G/B read while it runs: color j's psi pair
-        if (su3_active) begin g_addr_a = su3_src; g_addr_b = su3_src + 3'd1; end
     end
 
     always @(*) begin
-        b_addr_a = 3'b0; b_addr_b = 3'b0;
-        if (is_gluon) begin
-            case ({gluon_rs1_bank == BANK_B, gluon_rs2_bank == BANK_B})
-                2'b11: begin b_addr_a = gluon_rs1_reg; b_addr_b = gluon_rs2_reg; end
-                2'b10: begin b_addr_a = gluon_rs1_reg; b_addr_b = gluon_rs1_reg; end
-                2'b01: begin b_addr_a = gluon_rs2_reg; b_addr_b = gluon_rs2_reg; end
-                default: ;
-            endcase
-        end else if (is_baryon) begin
-            b_addr_a = baryon_bb; b_addr_b = baryon_bb;
-        end else if (is_meson) begin
-            case ({meson_q1_bank == BANK_B, meson_q2_bank == BANK_B})
-                2'b11: begin b_addr_a = meson_q1_reg; b_addr_b = meson_q2_reg; end
-                2'b10: begin b_addr_a = meson_q1_reg; b_addr_b = meson_q1_reg; end
-                2'b01: begin b_addr_a = meson_q2_reg; b_addr_b = meson_q2_reg; end
-                default: ;
-            endcase
-        end else if (is_load || is_store) begin
-            if (mem_base_bank == BANK_B) begin b_addr_a = mem_base_reg; b_addr_b = mem_base_reg; end
-        end else if (!is_halt && !is_jal && !is_rft && !is_syscall && !is_mvsr && !is_ptb) begin
-            if (bank == BANK_B) begin b_addr_a = rs1_addr; b_addr_b = rs2_addr; end
-        end
-        // SU3MUL owns every R/G/B read while it runs: color j's psi pair
-        if (su3_active) begin b_addr_a = su3_src; b_addr_b = su3_src + 3'd1; end
-    end
-
-    // N is the only bank with STORE's real double-read (ns + base_reg,
-    // when base_bank==N) and HALT's tohost read - BARYON never reads N
-    // at all (it only writes nd), so it's deliberately absent below.
-    always @(*) begin
-        n_addr_a = 3'b0; n_addr_b = 3'b0;
-        if (is_gluon) begin
-            case ({gluon_rs1_bank == BANK_N, gluon_rs2_bank == BANK_N})
-                2'b11: begin n_addr_a = gluon_rs1_reg; n_addr_b = gluon_rs2_reg; end
-                2'b10: begin n_addr_a = gluon_rs1_reg; n_addr_b = gluon_rs1_reg; end
-                2'b01: begin n_addr_a = gluon_rs2_reg; n_addr_b = gluon_rs2_reg; end
-                default: ;
-            endcase
-        end else if (is_meson) begin
-            case ({meson_q1_bank == BANK_N, meson_q2_bank == BANK_N})
-                2'b11: begin n_addr_a = meson_q1_reg; n_addr_b = meson_q2_reg; end
-                2'b10: begin n_addr_a = meson_q1_reg; n_addr_b = meson_q1_reg; end
-                2'b01: begin n_addr_a = meson_q2_reg; n_addr_b = meson_q2_reg; end
-                default: ;
-            endcase
-        end else if (is_load) begin
-            if (mem_base_bank == BANK_N) begin n_addr_a = mem_base_reg; n_addr_b = mem_base_reg; end
-        end else if (is_store) begin
-            n_addr_a = mem_nd_ns; // the value to store - ALWAYS read from N
-            n_addr_b = (mem_base_bank == BANK_N) ? mem_base_reg : mem_nd_ns;
-        end else if (is_halt) begin
-            n_addr_a = tohost_reg; n_addr_b = tohost_reg;
-        end else if (is_mvsr) begin
-            // dir=1 (write, N->special): read mvsr_nreg's value to
-            // capture into the target special register (see the
-            // trap-entry always block below). dir=0 (read, special->N):
-            // no N read needed at all - the result is written via the
-            // normal write_data/write_bank broadcast, same as LOAD.
-            if (mvsr_dir) begin n_addr_a = mvsr_nreg; n_addr_b = mvsr_nreg; end
-        end else if (is_ptb) begin
-            // Same shape as MVSR's write direction just above: dir=1
-            // (write, N->PTB) needs ptb_nreg's value read to capture
-            // into ptb_r (trap-entry always block below); dir=0 (read,
-            // PTB->N) needs no N read at all - control_unit.v already
-            // routed that case via the normal write_data/write_bank
-            // broadcast, same as MVSR's own read direction.
-            if (ptb_dir) begin n_addr_a = ptb_nreg; n_addr_b = ptb_nreg; end
-        end else if (!is_jal && !is_rft && !is_syscall) begin // ALUR/ALUI/BRANCH (BARYON has no N read - falls through harmlessly, bank stays 0!=BANK_N)
-            if (bank == BANK_N) begin n_addr_a = rs1_addr; n_addr_b = rs2_addr; end
-        end
-        // SU3MUL: the matrix base address (only N touches memory)
-        if (su3_active) begin n_addr_a = su3_ns; n_addr_b = su3_ns; end
-        // MTAG: its pointer operand
-        if (is_mtag) begin n_addr_a = mtag_ns; n_addr_b = mtag_ns; end
-        // JALR: the target base (read before nd is written - no bypass, so nd == ns works)
-        if (is_jalr) begin n_addr_a = jalr_ns; n_addr_b = jalr_ns; end
-        // REGGE: the mass / spin operand
-        if (is_regge) begin n_addr_a = regge_ns; n_addr_b = regge_ns; end
+        n_addr_a = rd_n_a; n_addr_b = rd_n_b;
+        // SU3MUL: the matrix base address (only N touches memory) - unless
+        // a reader that outranks it (rd_n_late) is the instruction
+        if (su3_active && !rd_n_late) begin n_addr_a = su3_ns; n_addr_b = su3_ns; end
         // METRO: P_old / P_new on the decode cycle, beta on the next
-        if (is_metro) begin n_addr_a = (mx_state_r == MX_SUB) ? metro_nbeta : metro_na; n_addr_b = metro_nb; end
-        // LINKMUL: all three matrix bases on the decode cycle (port C is its own)
+        if (is_metro && mx_state_r == MX_SUB) n_addr_a = metro_nbeta;
+        // LINKMUL's C has a port of its own
         n_addr_c = lm_nc;
-        if (is_linkmul) begin n_addr_a = lm_na; n_addr_b = lm_nb; end
-        // REUNIT: the matrix base
-        if (is_reunit) begin n_addr_a = ru_ns; n_addr_b = ru_ns; end
-        // HOP: the word to send, or the link's memory base
-        if (is_hop) begin n_addr_a = hop_reg; n_addr_b = hop_reg; end
-        // CIM: the index (PUT/GET) on A, the value on B
-        if (is_cim) begin n_addr_a = cim_ns; n_addr_b = cim_nt; end
     end
 
     // ==================== Register banks ====================
@@ -1017,7 +901,7 @@ module cpu_core #(
                       ((n_porta_data[1:0] != 2'b00) ||
                        (n_porta_data > UART_TX_ADDR - (is_plaq ? 32'd288 : 32'd72)))) ||
                      (is_linkmul && (lm_bad_a || lm_bad_b || lm_bad_c)));
-    wire su3_go = (is_su3mul || is_plaq || is_linkmul || is_sweep) && (su_state_r == SU_IDLE) && !sync_trap;
+    wire su3_go = (is_su3mul || is_plaq || is_linkmul || is_sweep) && (su_state_r == SU_IDLE) && !dec_trap && !su3_bad;
 
     assign su3_active = (su_state_r != SU_IDLE) || is_su3mul || is_plaq || is_linkmul || is_sweep;
     wire   su_last_mw = (su_state_r == SU_MW) && (su_w_r == 5'd17);
@@ -1689,7 +1573,7 @@ module cpu_core #(
     wire        rg_sqrt_req = (rg_state_r == RG_SQ);
 
     assign rg_active = (rg_state_r != RG_IDLE) || is_regge;
-    wire   rg_go     = is_regge && (rg_state_r == RG_IDLE) && !sync_trap;
+    wire   rg_go     = is_regge && (rg_state_r == RG_IDLE) && !dec_trap;
     assign rg_stall  = (rg_state_r == RG_IDLE) ? rg_go : (rg_state_r != RG_W);
 
     always @(posedge clk or posedge reset) begin
@@ -1798,7 +1682,7 @@ module cpu_core #(
                            (mx_state_r == MX_Y) ? MX_LOG2E : mx_t_r;
 
     assign mx_active = (mx_state_r != MX_IDLE) || is_metro;
-    wire   mx_go     = is_metro && (mx_state_r == MX_IDLE) && !sync_trap;
+    wire   mx_go     = is_metro && (mx_state_r == MX_IDLE) && !dec_trap;
     assign mx_stall  = (mx_state_r == MX_IDLE) ? mx_go : (mx_state_r != MX_W);
     wire [3:0] mx_done_w = metro_weight ? MX_W : MX_R; // where a finished w goes
     wire [31:0] mx_result = metro_weight ? mx_w_r : {31'b0, (mx_r_r < mx_w_r)};
@@ -1876,7 +1760,7 @@ module cpu_core #(
 
     wire rx_bad   = is_reunit && (rx_state_r == RX_IDLE) &&
                     ((n_porta_data[1:0] != 2'b00) || (n_porta_data > UART_TX_ADDR - 32'd72));
-    wire rx_go    = is_reunit && (rx_state_r == RX_IDLE) && !sync_trap;
+    wire rx_go    = is_reunit && (rx_state_r == RX_IDLE) && !dec_trap && !rx_bad;
     assign rx_active = (rx_state_r != RX_IDLE) || is_reunit;
     wire rx_st    = (rx_state_r == RX_ST);
     assign rx_stall = (rx_state_r == RX_IDLE) ? rx_go : !(rx_st && rx_k == 5'd17);
@@ -1938,10 +1822,10 @@ module cpu_core #(
     reg [4:0]  hl_k;
     reg [31:0] hl_base, hl_data;
 
-    wire hop_word = is_hop && !hop_funct[1] && !sync_trap;
+    wire hop_word = is_hop && !hop_funct[1] && !dec_trap;
     wire hop_send = hop_word && (hop_funct[0] == 1'b0);
     wire hop_recv = hop_word && (hop_funct[0] == 1'b1);
-    wire hl_go    = is_hop && hop_funct[1] && (hl_state_r == HL_IDLE) && !sync_trap;
+    wire hl_go    = is_hop && hop_funct[1] && (hl_state_r == HL_IDLE) && !dec_trap && !hl_bad;
     wire hl_bad   = is_hop && hop_funct[1] && (hl_state_r == HL_IDLE) &&
                     ((n_porta_data[1:0] != 2'b00) || (n_porta_data > UART_TX_ADDR - 32'd72));
     wire hl_tx    = (hl_state_r == HL_TX);
@@ -2144,6 +2028,17 @@ module cpu_core #(
     // which illegal/is_syscall/priv_violation's own opcode classes
     // never are).
     wire sync_trap = illegal || data_illegal || is_syscall || priv_violation || mmu_fault || tag_fault;
+    // dec_trap: the trap causes that come straight from the decode
+    // register and the mode bit. The sequencer starts (su3_go, rg_go,
+    // mx_go, rx_go, hop_word, hl_go) use it plus their OWN data check
+    // instead of the whole sync_trap - every other data_illegal term is
+    // gated by a different opcode, and mmu_fault / tag_fault only ever
+    // fire on LOAD/STORE, so for these instructions it is the same
+    // value. It keeps the other units' address checks (and the register
+    // reads behind them) out of these paths: on sky130 the worst path
+    // went su_state_r -> N read -> SU3 address check -> sync_trap ->
+    // hop_word -> the hop_out_valid port.
+    wire dec_trap  = illegal || is_syscall || priv_violation;
 
     // Latched, not a live level - a brief irq_in pulse must never be
     // missed even if it arrives mid-mem_stall (see below), and clearing
